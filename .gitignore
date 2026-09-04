@@ -46,6 +46,7 @@ config.toml
 config2.toml
 config.local.toml
 
-# Russian localized markdown docs
+# Russian working documents (local planning notes, not part of the repository)
 *.ru.md
-*.RU.MD
+# Exception: user-facing translations are tracked
+!README.ru.md

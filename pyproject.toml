@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "codexsync"
 version = "0.1.2"
 description = "Local-first Codex state sync utility"
-readme = "README.MD"
+readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "codexSync contributors" }]
 license = "GPL-3.0-only"

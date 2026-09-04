@@ -1,15 +1,34 @@
 from __future__ import annotations
 
+import errno
 import logging
 import os
 from pathlib import Path
 import shutil
+import time
 import uuid
+import hashlib
+from collections.abc import Callable
 
 from .backup import BackupManager
+from .exceptions import FailSafeError
 from .models import CopyAction, SyncPlan
 
 LOG = logging.getLogger(__name__)
+
+_REPLACE_ATTEMPTS = 5
+_REPLACE_BACKOFF_SECONDS = 0.1
+# Windows: ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+_TRANSIENT_WINERRORS = frozenset({5, 32, 33})
+_TRANSIENT_ERRNOS = frozenset({errno.EACCES, errno.EBUSY, errno.ETXTBSY})
+
+
+def _is_transient_lock(exc: OSError) -> bool:
+    """True when the target was momentarily held open by another process."""
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _TRANSIENT_WINERRORS
+    return exc.errno in _TRANSIENT_ERRNOS
 
 
 class SyncEngine:
@@ -19,37 +38,69 @@ class SyncEngine:
         temp_dir: Path,
         backup_before_overwrite: bool = True,
         fail_on_unknown: bool = True,
+        pre_commit_check: Callable[[], None] | None = None,
+        before_replace_check: Callable[[], None] | None = None,
+        after_backup: Callable[[], None] | None = None,
+        after_success: Callable[[], None] | None = None,
     ) -> None:
         self._backup_manager = backup_manager
         self._temp_dir = temp_dir
         self._backup_before_overwrite = backup_before_overwrite
         self._fail_on_unknown = fail_on_unknown
+        self._pre_commit_check = pre_commit_check
+        self._before_replace_check = before_replace_check
+        self._after_backup = after_backup
+        self._after_success = after_success
 
     def execute(self, plan: SyncPlan, dry_run: bool = True) -> None:
-        if not dry_run:
-            self._cleanup_orphaned_temp_files()
-        for action in plan.to_local:
-            self._copy(action, dry_run=dry_run)
-        for action in plan.to_cloud:
-            self._copy(action, dry_run=dry_run)
-        if not dry_run:
-            self._backup_manager.prune()
-
-    def _copy(self, action: CopyAction, dry_run: bool) -> None:
-        LOG.info("copy %s -> %s", action.src, action.dst)
+        actions = [*plan.to_local, *plan.to_cloud]
+        for action in actions:
+            LOG.info("copy %s -> %s", action.src, action.dst)
         if dry_run:
             return
+        if not self._backup_before_overwrite:
+            raise FailSafeError("backup_before_overwrite=false is not permitted for apply")
 
-        self._ensure_parent(action.dst)
-
-        if self._backup_before_overwrite and action.dst.exists():
-            backup_path = self._backup_manager.backup_file(action.dst, action.relative_path)
-            if backup_path:
-                LOG.debug("backup created: %s", backup_path)
-
-        staged = self._stage_copy(action)
+        self._cleanup_orphaned_temp_files()
+        stage_root = self._temp_dir / f".codexsync-stage-{uuid.uuid4().hex}"
+        staged: list[tuple[CopyAction, Path]] = []
         try:
-            os.replace(staged, action.dst)
+            # Stage and verify *every* payload outside destination state before
+            # backing up or replacing the first destination.
+            stage_root.mkdir(parents=True, exist_ok=False)
+            for index, action in enumerate(actions):
+                staged_path = stage_root / f"{index:08d}.payload"
+                self._stage_verified(action.src, staged_path)
+                staged.append((action, staged_path))
+
+            # A complete backup set exists before any destination mutation.
+            for action, _ in staged:
+                if action.dst.exists():
+                    backup_path = self._backup_manager.backup_file(action.dst, action.relative_path)
+                    if backup_path is None:
+                        raise FailSafeError("Failed to create required backup before mutation")
+
+            self._backup_manager.finalize()
+
+            if self._after_backup is not None:
+                self._after_backup()
+
+            if self._pre_commit_check is not None:
+                self._pre_commit_check()
+            for action, staged_path in staged:
+                if self._before_replace_check is not None:
+                    self._before_replace_check()
+                self._replace_staged(action, staged_path)
+            if self._after_success is not None:
+                self._after_success()
+        finally:
+            shutil.rmtree(stage_root, ignore_errors=True)
+
+    def _replace_staged(self, action: CopyAction, staged: Path) -> None:
+        self._ensure_parent(action.dst)
+        expected_hash = _sha256_file(staged)
+        try:
+            self._replace_with_retry(staged, action.dst)
         except OSError:
             if self._fail_on_unknown:
                 LOG.exception("atomic replace failed for staged file %s -> %s", staged, action.dst)
@@ -59,24 +110,51 @@ class SyncEngine:
             except OSError:
                 LOG.exception("fallback copy failed for staged file %s -> %s", staged, action.dst)
                 raise
-        finally:
-            staged.unlink(missing_ok=True)
+        if _sha256_file(action.dst) != expected_hash:
+            raise FailSafeError("Destination verification failed after atomic replace")
+
+    def _replace_with_retry(self, staged: Path, dst: Path) -> None:
+        """Atomically replace, retrying while another process holds the target.
+
+        Destinations live where a cloud client, search indexer or antivirus is
+        free to open a file at any moment; on Windows that turns ``os.replace``
+        into ``WinError 5``/``32`` for as long as the handle lives, typically
+        milliseconds.  Failing the whole mutation on one of those would strand
+        the user in ``RECOVERY_REQUIRED`` for a condition that already cleared.
+
+        The retry weakens nothing.  Every attempt is the same atomic replace,
+        the destination hash is still verified afterwards, and the process
+        safety check is re-proved before each further attempt, so a Codex that
+        starts during the wait still stops the commit.  Errors that are not a
+        transient lock are raised on the first attempt.
+        """
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(staged, dst)
+                return
+            except OSError as exc:
+                if attempt == _REPLACE_ATTEMPTS - 1 or not _is_transient_lock(exc):
+                    raise
+                LOG.warning(
+                    "atomic replace blocked by another process (%s); retry %d of %d for %s",
+                    exc, attempt + 1, _REPLACE_ATTEMPTS - 1, dst,
+                )
+                time.sleep(_REPLACE_BACKOFF_SECONDS * (2 ** attempt))
+                if self._before_replace_check is not None:
+                    self._before_replace_check()
 
     @staticmethod
     def _ensure_parent(path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _stage_copy(self, action: CopyAction) -> Path:
-        candidate = action.dst.parent / f".{action.dst.name}.{uuid.uuid4().hex}.tmp"
-        try:
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(action.src, candidate)
-            return candidate
-        except OSError:
-            fallback = self._temp_dir / f"{action.relative_path}.{uuid.uuid4().hex}.tmp"
-            fallback.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(action.src, fallback)
-            return fallback
+    @staticmethod
+    def _stage_verified(source: Path, staged: Path) -> None:
+        before = _sha256_file(source)
+        shutil.copy2(source, staged)
+        staged_hash = _sha256_file(staged)
+        after = _sha256_file(source)
+        if before != staged_hash or before != after:
+            raise FailSafeError("Source changed while preparing the mutation stage")
 
     def _cleanup_orphaned_temp_files(self) -> None:
         if not self._temp_dir.exists():
@@ -89,3 +167,11 @@ class SyncEngine:
             removed += 1
         if removed:
             LOG.info("removed %d orphaned temporary file(s) in %s", removed, self._temp_dir)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

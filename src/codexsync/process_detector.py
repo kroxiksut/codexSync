@@ -8,7 +8,9 @@ import os
 import shutil
 import subprocess
 import sys
-import time
+
+
+DETECTOR_CONTRACT_VERSION = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -19,10 +21,33 @@ class ProcessInfo:
     parent_pid: int | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class ProcessDetectorCapability:
+    platform: str
+    contract_version: int
+    supported: bool
+    detail: str
+
+
 class CodexProcessDetector:
     def __init__(self, process_names: list[str]) -> None:
         self._names = {n.lower().strip() for n in process_names if n.strip()}
         self._windows_names = {_normalize_windows_name(n) for n in self._names}
+
+    def capability(self) -> ProcessDetectorCapability:
+        if sys.platform.startswith("win"):
+            return ProcessDetectorCapability(
+                platform="windows",
+                contract_version=DETECTOR_CONTRACT_VERSION,
+                supported=True,
+                detail="Windows tasklist and CIM process-tree adapter",
+            )
+        return ProcessDetectorCapability(
+            platform=sys.platform,
+            contract_version=DETECTOR_CONTRACT_VERSION,
+            supported=False,
+            detail="No tested process-detector adapter is available for mutation commands on this platform",
+        )
 
     def is_running(self) -> bool:
         return bool(self.list_running())
@@ -42,6 +67,15 @@ class CodexProcessDetector:
             target = _normalize_windows_name(name)
             return any(_normalize_windows_name(proc.name) == target for proc in self._list_windows_all())
         return any(os.path.basename(proc.name).lower() == name for proc in self._list_posix_all())
+
+    def find_processes(self, process_names: list[str]) -> list[ProcessInfo]:
+        """Return exact-name matches from a complete native process listing."""
+        if not sys.platform.startswith("win"):
+            raise RuntimeError("complete background process detection is unavailable on this platform")
+        targets = {_normalize_windows_name(name) for name in process_names if name.strip()}
+        if not targets:
+            return []
+        return [proc for proc in self._list_windows_all_complete() if _normalize_windows_name(proc.name) in targets]
 
     def has_subprocess_marker(self, parent_process_names: list[str], marker_name: str) -> bool:
         if not sys.platform.startswith("win"):
@@ -79,7 +113,7 @@ class CodexProcessDetector:
             return roots, []
 
         parents = {_normalize_windows_name(name) for name in parent_process_names if name.strip()}
-        processes = self._list_windows_all()
+        processes = self._list_windows_all_complete()
         roots = [proc for proc in processes if _normalize_windows_name(proc.name) in parents]
         if not roots:
             return [], []
@@ -113,39 +147,19 @@ class CodexProcessDetector:
             return False
         return _matches_marker(proc, marker)
 
-    def terminate(self, processes: list[ProcessInfo], timeout_seconds: int) -> bool:
-        if not processes:
-            return True
-        if sys.platform.startswith("win"):
-            for proc in processes:
-                subprocess.run(
-                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-        else:
-            for proc in processes:
-                subprocess.run(["kill", "-TERM", str(proc.pid)], capture_output=True, text=True, check=False)
-
-        deadline = time.time() + max(timeout_seconds, 0)
-        target_pids = {proc.pid for proc in processes}
-        while True:
-            running = {proc.pid for proc in self.list_running()}
-            if not (running & target_pids):
-                return True
-            if time.time() >= deadline:
-                return False
-            time.sleep(0.5)
-
     def _list_windows(self) -> list[ProcessInfo]:
         return [proc for proc in self._list_windows_all() if _normalize_windows_name(proc.name) in self._windows_names]
 
     def _list_windows_all(self) -> list[ProcessInfo]:
+        """Compatibility helper for read-only callers that do not need a tree."""
+        return self._list_windows_all_complete()
+
+    def _list_windows_all_complete(self) -> list[ProcessInfo]:
         merged: dict[int, ProcessInfo] = {}
         for proc in self._list_windows_tasklist():
             merged[proc.pid] = proc
-        for proc in self._list_windows_cim():
+        cim_processes = self._list_windows_cim()
+        for proc in cim_processes:
             existing = merged.get(proc.pid)
             if existing is None:
                 merged[proc.pid] = proc
@@ -153,7 +167,6 @@ class CodexProcessDetector:
             merged[proc.pid] = ProcessInfo(
                 pid=proc.pid,
                 name=proc.name or existing.name,
-                command_line=proc.command_line or existing.command_line,
                 parent_pid=proc.parent_pid if proc.parent_pid is not None else existing.parent_pid,
             )
         return list(merged.values())
@@ -187,7 +200,7 @@ class CodexProcessDetector:
         script = (
             "$ErrorActionPreference='Stop'; "
             "Get-CimInstance Win32_Process | "
-            "Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"
+            "Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress"
         )
         result = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -198,14 +211,14 @@ class CodexProcessDetector:
             check=False,
         )
         if result.returncode != 0:
-            return []
+            raise RuntimeError(f"CIM process enumeration failed with exit code {result.returncode}")
         raw = result.stdout.strip()
         if not raw:
-            return []
+            raise RuntimeError("CIM process enumeration returned an empty snapshot")
         try:
             payload = json.loads(raw)
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("CIM process enumeration returned invalid JSON") from exc
         rows = payload if isinstance(payload, list) else [payload]
         processes: list[ProcessInfo] = []
         for row in rows:
@@ -223,10 +236,9 @@ class CodexProcessDetector:
             except (TypeError, ValueError):
                 parent_pid = None
             name = str(row.get("Name") or "").strip()
-            command_line = str(row.get("CommandLine") or "").strip()
             if not name:
                 continue
-            processes.append(ProcessInfo(pid=pid, name=name, command_line=command_line, parent_pid=parent_pid))
+            processes.append(ProcessInfo(pid=pid, name=name, parent_pid=parent_pid))
         return processes
 
     def _list_posix(self) -> list[ProcessInfo]:
@@ -272,7 +284,3 @@ def _matches_marker(proc: ProcessInfo, marker: str) -> bool:
     normalized_name = _normalize_windows_name(proc.name)
     if normalized_name == _normalize_windows_name(marker):
         return True
-    cmd = proc.command_line.lower()
-    if not cmd:
-        return False
-    return marker in cmd

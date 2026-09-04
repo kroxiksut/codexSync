@@ -1,4 +1,4 @@
-# AGENTS.MD
+# AGENTS.md
 
 ## Project
 

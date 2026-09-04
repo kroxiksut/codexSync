@@ -2,11 +2,11 @@
 
 ## 1. Pre-publish safety checks
 
-1. Confirm local-only constraints are documented in `AGENTS.MD` and `README.MD`.
+1. Confirm local-only constraints are documented in `AGENTS.md` and `README.md`.
 2. Confirm only `config.example.toml` is tracked (no machine-specific config).
 3. Confirm temp/cache/test runtime folders are ignored by `.gitignore`.
 4. Confirm release version is updated in `pyproject.toml`.
-5. Confirm `CHANGELOG.MD` contains a section for the release version.
+5. Confirm `CHANGELOG.md` contains a section for the release version.
 
 ## 2. Prepare repository
 

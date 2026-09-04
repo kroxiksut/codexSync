@@ -61,7 +61,7 @@ class PreflightTests(unittest.TestCase):
         try:
             config_path = _write_config(root)
             with patch(
-                "codexsync.app.collect_process_snapshot",
+                "codexsync.runtime.collect_process_snapshot",
                 return_value=ProcessSnapshot(main_processes=[], subprocesses=[], sandbox_detected=False),
             ):
                 report = run_preflight(config_path)
@@ -83,7 +83,7 @@ class PreflightTests(unittest.TestCase):
             )
 
             with patch(
-                "codexsync.app.collect_process_snapshot",
+                "codexsync.runtime.collect_process_snapshot",
                 return_value=ProcessSnapshot(main_processes=[], subprocesses=[], sandbox_detected=False),
             ):
                 report = run_preflight(config_path)
@@ -103,7 +103,7 @@ class PreflightTests(unittest.TestCase):
             orphan.write_text("x", encoding="utf-8")
 
             with patch(
-                "codexsync.app.collect_process_snapshot",
+                "codexsync.runtime.collect_process_snapshot",
                 return_value=ProcessSnapshot(main_processes=[], subprocesses=[], sandbox_detected=False),
             ):
                 report = run_preflight(config_path)
@@ -112,7 +112,7 @@ class PreflightTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_preflight_fails_when_codex_is_running(self) -> None:
+    def test_doctor_reports_running_codex_without_mutating(self) -> None:
         root = Path.cwd() / "test-sandbox" / f"preflight-process-{uuid.uuid4().hex}"
         root.mkdir(parents=True, exist_ok=False)
         try:
@@ -122,11 +122,11 @@ class PreflightTests(unittest.TestCase):
                 subprocesses=[],
                 sandbox_detected=False,
             )
-            with patch("codexsync.app.collect_process_snapshot", return_value=snapshot):
+            with patch("codexsync.runtime.collect_process_snapshot", return_value=snapshot):
                 report = run_preflight(config_path)
 
-            self.assertFalse(report.is_ok)
-            self.assertTrue(any(item.name == "codex_process" and item.status == "FAIL" for item in report.checks))
+            self.assertTrue(report.is_ok)
+            self.assertTrue(any(item.name == "codex_process" and item.status == "WARN" for item in report.checks))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

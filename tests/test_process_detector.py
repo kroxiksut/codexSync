@@ -34,9 +34,8 @@ class ProcessDetectorTests(unittest.TestCase):
             _Result(
                 returncode=0,
                 stdout=(
-                    '[{"ProcessId":1000,"ParentProcessId":10,"Name":"Codex.exe","CommandLine":"Codex.exe"},'
-                    '{"ProcessId":1001,"ParentProcessId":1000,"Name":"conhost.exe",'
-                    '"CommandLine":"... codex-windows-sandbox ..."}]'
+                    '[{"ProcessId":1000,"ParentProcessId":10,"Name":"Codex.exe"},'
+                    '{"ProcessId":1001,"ParentProcessId":1000,"Name":"codex-windows-sandbox.exe"}]'
                 ),
             ),
         ]
@@ -46,10 +45,10 @@ class ProcessDetectorTests(unittest.TestCase):
 
     @patch("codexsync.process_detector.sys.platform", "win32")
     @patch("codexsync.process_detector.subprocess.run")
-    def test_windows_does_not_match_unrelated_process_by_command_line(self, run_mock) -> None:
+    def test_windows_does_not_match_unrelated_process_by_name(self, run_mock) -> None:
         run_mock.side_effect = [
             _Result(returncode=0, stdout='"python.exe","9999","Console","1","10,000 K"\n'),
-            _Result(returncode=0, stdout='[{"ProcessId":9999,"Name":"python.exe","CommandLine":"-m codexsync"}]'),
+            _Result(returncode=0, stdout='[{"ProcessId":9999,"Name":"python.exe"}]'),
         ]
         detector = CodexProcessDetector(["codex.exe"])
         running = detector.list_running()

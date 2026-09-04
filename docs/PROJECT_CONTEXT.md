@@ -14,7 +14,7 @@ Key decisions:
 * Stop on two-sided file conflicts and require manual resolution + rerun
 * Keep logging configurable (`text|json|logfmt`) with 7-day default retention
 * In verbose mode (`-v`), print tracked Codex processes for plan/sync/restore diagnostics
-* Provide `doctor`/`preflight` diagnostics before sync to validate writable paths, process state, manifest compatibility, suspicious clock drift, and orphan temp files
+* Provide side-effect-free `doctor`/`preflight` diagnostics before sync to validate path readability, process state, manifest compatibility, session/SQLite audits, and orphan temp files
 * Use explicit CLI exit codes for automation and CI
 * CI currently targets `windows-latest` and `macos-latest`; Linux CI is intentionally disabled in MVP
 

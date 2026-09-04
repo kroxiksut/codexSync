@@ -1,170 +1,69 @@
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import patch
 import unittest
 
-from codexsync.app import ProcessSnapshot, _handle_running_codex
 from codexsync.exceptions import FailSafeError, SafetyPreconditionError
-from codexsync.models import (
-    AppConfig,
-    BackupConfig,
-    ConflictConfig,
-    FiltersConfig,
-    IdentityConfig,
-    LoggingConfig,
-    PathsConfig,
-    ProcessDetectionConfig,
-    SafetyConfig,
-    StateConfig,
-    SyncConfig,
-    TargetsConfig,
-)
-from codexsync.process_detector import ProcessInfo
+from codexsync.safety_gate import OperationKind, ProcessState, SafetyGate
 
 
-class _DetectorStub:
-    def __init__(self, terminate_ok: bool = True) -> None:
-        self._terminate_ok = terminate_ok
-        self.terminated: list[list[ProcessInfo]] = []
+class _Clock:
+    def __init__(self) -> None:
+        self.value = 0.0
 
-    def terminate(self, processes: list[ProcessInfo], timeout_seconds: int) -> bool:
-        _ = timeout_seconds
-        self.terminated.append(processes)
-        return self._terminate_ok
+    def monotonic(self) -> float:
+        return self.value
 
-
-def _build_cfg() -> AppConfig:
-    return AppConfig(
-        identity=IdentityConfig(machine_id="machine-a"),
-        paths=PathsConfig(
-            workspace_root_dir=Path("D:/x"),
-            local_state_dir=Path("C:/Users/user/.codex"),
-            cloud_root_dir=Path("D:/x/sync"),
-            backup_dir=Path("D:/x/backups"),
-            temp_dir=Path("D:/x/.tmp"),
-        ),
-        sync=SyncConfig(),
-        safety=SafetyConfig(),
-        process_detection=ProcessDetectionConfig(),
-        backup=BackupConfig(),
-        filters=FiltersConfig(),
-        targets=TargetsConfig(),
-        conflict=ConflictConfig(),
-        state=StateConfig(data_version=1),
-        logging=LoggingConfig(),
-    )
+    def sleep(self, seconds: float) -> None:
+        self.value += seconds
 
 
-class SafetyPolicyTests(unittest.TestCase):
-    @patch("codexsync.app.sys.platform", "win32")
-    @patch("codexsync.app.confirm_process_termination", return_value=True)
-    def test_manual_confirmation_enabled_by_default_prompts(self, confirm_mock) -> None:
-        cfg = _build_cfg()
-        cfg.process_detection.manual_terminate_confirmation = True
-        detector = _DetectorStub()
-        main = [ProcessInfo(pid=10, name="Codex.exe")]
-        snapshot = ProcessSnapshot(
-            main_processes=main,
-            subprocesses=[],
-            sandbox_detected=False,
+class SafetyGateTests(unittest.TestCase):
+    def _gate(self, samples: list[ProcessState]) -> SafetyGate:
+        clock = _Clock()
+        values = iter(samples)
+        last = samples[-1]
+
+        def sample() -> ProcessState:
+            nonlocal last
+            try:
+                last = next(values)
+            except StopIteration:
+                pass
+            return last
+
+        return SafetyGate(
+            sample,
+            stable_window_seconds=2.0,
+            sample_interval_seconds=0.25,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
         )
 
-        _handle_running_codex(cfg, detector, snapshot, manual_override=None)
-        self.assertEqual(detector.terminated, [main])
-        confirm_mock.assert_called_once()
+    def test_mutation_requires_continuous_stopped_window(self) -> None:
+        gate = self._gate([ProcessState.STOPPED] * 10)
+        decision = gate.require(OperationKind.SYNC)
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.process_state, ProcessState.STOPPED)
 
-    @patch("codexsync.app.sys.platform", "win32")
-    def test_sandbox_detected_blocks_without_terminate(self) -> None:
-        cfg = _build_cfg()
-        detector = _DetectorStub()
-        snapshot = ProcessSnapshot(
-            main_processes=[ProcessInfo(pid=10, name="Codex.exe")],
-            subprocesses=[],
-            sandbox_detected=True,
-        )
+    def test_process_appearing_during_window_blocks_mutation(self) -> None:
+        gate = self._gate([ProcessState.STOPPED, ProcessState.STOPPED, ProcessState.RUNNING])
         with self.assertRaises(SafetyPreconditionError):
-            _handle_running_codex(cfg, detector, snapshot, manual_override=None)
-        self.assertEqual(detector.terminated, [])
+            gate.require(OperationKind.RESTORE)
 
-    @patch("codexsync.app.sys.platform", "win32")
-    @patch("codexsync.app.confirm_process_termination", return_value=True)
-    def test_no_sandbox_prompts_and_terminates(self, _confirm_mock) -> None:
-        cfg = _build_cfg()
-        detector = _DetectorStub()
-        main = [ProcessInfo(pid=10, name="Codex.exe")]
-        snapshot = ProcessSnapshot(
-            main_processes=main,
-            subprocesses=[],
-            sandbox_detected=False,
-        )
-        _handle_running_codex(cfg, detector, snapshot, manual_override=None)
-        self.assertEqual(detector.terminated, [main])
-        _confirm_mock.assert_called_once()
-
-    @patch("codexsync.app.sys.platform", "win32")
-    @patch("codexsync.app.confirm_process_termination", return_value=True)
-    def test_manual_confirmation_disabled_in_config_skips_prompt(self, confirm_mock) -> None:
-        cfg = _build_cfg()
-        cfg.process_detection.manual_terminate_confirmation = False
-        detector = _DetectorStub()
-        main = [ProcessInfo(pid=10, name="Codex.exe")]
-        snapshot = ProcessSnapshot(
-            main_processes=main,
-            subprocesses=[],
-            sandbox_detected=False,
-        )
-
-        _handle_running_codex(cfg, detector, snapshot, manual_override=None)
-        self.assertEqual(detector.terminated, [main])
-        confirm_mock.assert_not_called()
-
-    @patch("codexsync.app.sys.platform", "win32")
-    @patch("codexsync.app.confirm_process_termination", return_value=True)
-    def test_override_true_forces_prompt_even_if_config_disabled(self, confirm_mock) -> None:
-        cfg = _build_cfg()
-        cfg.process_detection.manual_terminate_confirmation = False
-        detector = _DetectorStub()
-        main = [ProcessInfo(pid=10, name="Codex.exe")]
-        snapshot = ProcessSnapshot(
-            main_processes=main,
-            subprocesses=[],
-            sandbox_detected=False,
-        )
-
-        _handle_running_codex(cfg, detector, snapshot, manual_override=True)
-        self.assertEqual(detector.terminated, [main])
-        confirm_mock.assert_called_once()
-
-    @patch("codexsync.app.sys.platform", "win32")
-    @patch("codexsync.app.confirm_process_termination", return_value=True)
-    def test_override_false_skips_prompt_even_if_config_enabled(self, confirm_mock) -> None:
-        cfg = _build_cfg()
-        cfg.process_detection.manual_terminate_confirmation = True
-        detector = _DetectorStub()
-        main = [ProcessInfo(pid=10, name="Codex.exe")]
-        snapshot = ProcessSnapshot(
-            main_processes=main,
-            subprocesses=[],
-            sandbox_detected=False,
-        )
-
-        _handle_running_codex(cfg, detector, snapshot, manual_override=False)
-        self.assertEqual(detector.terminated, [main])
-        confirm_mock.assert_not_called()
-
-    @patch("codexsync.app.sys.platform", "win32")
-    @patch("codexsync.app.confirm_process_termination", return_value=True)
-    def test_terminate_failure_returns_failsafe(self, _confirm_mock) -> None:
-        cfg = _build_cfg()
-        detector = _DetectorStub(terminate_ok=False)
-        snapshot = ProcessSnapshot(
-            main_processes=[ProcessInfo(pid=10, name="Codex.exe")],
-            subprocesses=[],
-            sandbox_detected=False,
-        )
+    def test_unknown_process_state_fails_closed(self) -> None:
+        gate = self._gate([ProcessState.UNKNOWN])
         with self.assertRaises(FailSafeError):
-            _handle_running_codex(cfg, detector, snapshot, manual_override=None)
+            gate.require(OperationKind.SYNC)
+
+    def test_guardian_is_allowed_while_codex_runs(self) -> None:
+        gate = self._gate([ProcessState.RUNNING])
+        decision = gate.require(OperationKind.GUARDIAN_WATCH)
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.process_state, ProcessState.RUNNING)
+
+    def test_final_check_is_single_direct_sample(self) -> None:
+        gate = self._gate([ProcessState.STOPPED])
+        self.assertTrue(gate.require(OperationKind.SYNC, final=True).allowed)
 
 
 if __name__ == "__main__":

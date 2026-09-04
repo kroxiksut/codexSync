@@ -47,7 +47,7 @@ class SyncEngineTests(unittest.TestCase):
             engine.execute(plan, dry_run=False)
 
             self.assertEqual(dst.read_text(encoding="utf-8"), "new-data")
-            backup_files = [p for p in backup_root.rglob("*") if p.is_file()]
+            backup_files = [p for p in backup_root.rglob("*") if p.is_file() and not p.name.endswith(".manifest.json")]
             self.assertEqual(len(backup_files), 1)
             self.assertEqual(backup_files[0].read_text(encoding="utf-8"), "old-data")
         finally:

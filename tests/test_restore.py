@@ -6,8 +6,14 @@ import textwrap
 import unittest
 import uuid
 import zipfile
+from unittest.mock import patch
 
 from codexsync.app import restore_from_backup
+
+
+class _StoppedGate:
+    def require(self, *_args, **_kwargs):
+        return None
 
 
 class RestoreTests(unittest.TestCase):
@@ -26,10 +32,10 @@ class RestoreTests(unittest.TestCase):
 
         snapshot_old = backup_root / "machine-a-20260101T000000Z"
         snapshot_new = backup_root / "machine-a-20260101T000100Z"
-        (snapshot_old / "sessions").mkdir(parents=True, exist_ok=True)
-        (snapshot_new / "sessions").mkdir(parents=True, exist_ok=True)
-        (snapshot_old / "sessions" / "a.txt").write_text("old", encoding="utf-8")
-        (snapshot_new / "sessions" / "a.txt").write_text("new", encoding="utf-8")
+        (snapshot_old / "data").mkdir(parents=True, exist_ok=True)
+        (snapshot_new / "data").mkdir(parents=True, exist_ok=True)
+        (snapshot_old / "data" / "a.txt").write_text("old", encoding="utf-8")
+        (snapshot_new / "data" / "a.txt").write_text("new", encoding="utf-8")
 
         config_path.write_text(
             textwrap.dedent(
@@ -55,7 +61,7 @@ class RestoreTests(unittest.TestCase):
                 temp_dir = "{temp_root.as_posix()}"
 
                 [targets]
-                include_roots = ["sessions"]
+                include_roots = ["data"]
                 """
             ).strip()
             + "\n",
@@ -63,14 +69,16 @@ class RestoreTests(unittest.TestCase):
         )
 
         try:
-            result = restore_from_backup(
-                config_path=config_path,
-                snapshot_name=snapshot_new.name,
-                target="local",
-                dry_run=False,
-            )
+            with patch("codexsync.restore._make_safety_gate", return_value=_StoppedGate()):
+                result = restore_from_backup(
+                    config_path=config_path,
+                    snapshot_name=snapshot_new.name,
+                    target="local",
+                    dry_run=False,
+                    allow_legacy_snapshot=True,
+                )
 
-            restored = local_state / "sessions" / "a.txt"
+            restored = local_state / "data" / "a.txt"
             self.assertTrue(restored.exists())
             self.assertEqual(restored.read_text(encoding="utf-8"), "new")
             self.assertEqual(result.snapshot_name, snapshot_new.name)
@@ -94,7 +102,7 @@ class RestoreTests(unittest.TestCase):
 
         snapshot_zip = backup_root / "machine-a-20260101T000200Z.zip"
         with zipfile.ZipFile(snapshot_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("sessions/a.txt", "zip-new")
+            zf.writestr("data/a.txt", "zip-new")
 
         config_path.write_text(
             textwrap.dedent(
@@ -123,7 +131,7 @@ class RestoreTests(unittest.TestCase):
                 compression = "zip"
 
                 [targets]
-                include_roots = ["sessions"]
+                include_roots = ["data"]
                 """
             ).strip()
             + "\n",
@@ -131,14 +139,16 @@ class RestoreTests(unittest.TestCase):
         )
 
         try:
-            result = restore_from_backup(
-                config_path=config_path,
-                snapshot_name=snapshot_zip.name,
-                target="local",
-                dry_run=False,
-            )
+            with patch("codexsync.restore._make_safety_gate", return_value=_StoppedGate()):
+                result = restore_from_backup(
+                    config_path=config_path,
+                    snapshot_name=snapshot_zip.name,
+                    target="local",
+                    dry_run=False,
+                    allow_legacy_snapshot=True,
+                )
 
-            restored = local_state / "sessions" / "a.txt"
+            restored = local_state / "data" / "a.txt"
             self.assertTrue(restored.exists())
             self.assertEqual(restored.read_text(encoding="utf-8"), "zip-new")
             self.assertEqual(result.snapshot_name, snapshot_zip.name)

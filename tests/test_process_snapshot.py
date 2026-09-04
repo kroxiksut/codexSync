@@ -30,13 +30,13 @@ class _DetectorStub:
     def get_subprocess_tree(self, _parent_process_names: list[str]) -> tuple[list[ProcessInfo], list[ProcessInfo]]:
         return self._main, self._children
 
-    def has_marker(self, _proc: ProcessInfo, _marker_name: str) -> bool:
-        return False
+    def has_marker(self, proc: ProcessInfo, marker_name: str) -> bool:
+        return proc.name.lower().removesuffix(".exe") == marker_name.lower().removesuffix(".exe")
 
 
 class ProcessSnapshotTests(unittest.TestCase):
-    @patch("codexsync.app.sys.platform", "win32")
-    def test_windows_fallback_detects_enable_sandbox_flag(self) -> None:
+    @patch("codexsync.runtime.sys.platform", "win32")
+    def test_windows_detects_known_background_marker(self) -> None:
         cfg = AppConfig(
             identity=IdentityConfig(machine_id="machine-a"),
             paths=PathsConfig(
@@ -58,14 +58,7 @@ class ProcessSnapshotTests(unittest.TestCase):
         )
         detector = _DetectorStub(
             main=[ProcessInfo(pid=100, name="Codex.exe")],
-            children=[
-                ProcessInfo(
-                    pid=101,
-                    name="Codex.exe",
-                    command_line='"Codex.exe" --type=renderer --enable-sandbox',
-                    parent_pid=100,
-                )
-            ],
+            children=[ProcessInfo(pid=101, name="codex-windows-sandbox.exe", parent_pid=100)],
         )
 
         snapshot = collect_process_snapshot(cfg, detector=detector)

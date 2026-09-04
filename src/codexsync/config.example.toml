@@ -24,7 +24,9 @@ delete_policy = "never"
 dry_run_default = true
 # Session mode:
 # all|last_date_only (latest date folder under sessions/, if date-based layout is detected)
-session_mode = "last_date_only"
+# Keep "all": last_date_only can discard branches, so every mutation command
+# (sync/restore/repair-projects apply/recover) rejects it with exit code 4.
+session_mode = "all"
 
 [paths]
 # codexSync workspace root (used for variable expansion in other paths)
@@ -37,6 +39,31 @@ cloud_root_dir = "${workspace_root}/sync"
 backup_dir = "${workspace_root}/backups"
 # Temporary directory for atomic operations (tmp + rename)
 temp_dir = "${workspace_root}/.tmp"
+
+[guardian]
+# Immutable Guardian snapshots. Must stay outside .codex, sync, backups and temp.
+root_dir = "${workspace_root}/guardian"
+# Maximum accepted .codex-global-state.json size (1 MiB to 1 GiB).
+max_state_bytes = 67108864
+# Suspicion threshold for a verified state-count reduction.
+shrink_min_count = 2
+shrink_ratio = 0.25
+# Independent retention limits; 0 disables the corresponding limit.
+retention_days = 30
+max_snapshots = 100
+quarantine_retention_days = 30
+staging_retention_hours = 24
+poll_interval_seconds = 3
+debounce_seconds = 2
+stable_reads = 3
+stable_read_interval_seconds = 0.5
+fallback_scan_seconds = 60
+once_timeout_seconds = 120
+
+[semantic]
+# Immutable semantic publications; may be placed in a user-managed cloud folder.
+root_dir = "${workspace_root}/semantic"
+max_jsonl_line_bytes = 67108864
 
 [targets]
 # Relative paths under local_state_dir/cloud_state_dir included in sync
@@ -89,7 +116,7 @@ process_names = ["codex.exe", "codex"]
 # Small grace delay after process close before sync starts
 grace_period_seconds = 2
 # Allow automatic Codex process termination before sync (Windows only)
-allow_terminate_if_running = true
+allow_terminate_if_running = false
 # Require manual GUI confirmation before termination by default
 manual_terminate_confirmation = true
 # Confirmation channel: gui|console

@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from .exceptions import ConfigError
+from .guardian_models import GuardianConfig, require_guardian_machine_id
+from .path_mapping import PathMappingRule
 from .models import (
     AppConfig,
     BackupConfig,
@@ -15,6 +17,7 @@ from .models import (
     PathsConfig,
     ProcessDetectionConfig,
     SafetyConfig,
+    SemanticConfig,
     StateConfig,
     SyncConfig,
     TargetsConfig,
@@ -37,7 +40,7 @@ def _to_path(
     resolved = _expand_workspace_var(value, workspace_root, field_name)
     raw = Path(resolved).expanduser()
     if raw.is_absolute():
-        return raw
+        return raw.resolve()
     anchor = workspace_root if workspace_root else base_dir
     return (anchor / raw).resolve()
 
@@ -72,6 +75,9 @@ def load_config(path: Path) -> AppConfig:
     conflict_raw = raw.get("conflict", {})
     state_raw = raw.get("state", {})
     logging_raw = raw.get("logging", {})
+    guardian_raw = raw.get("guardian", {})
+    semantic_raw = raw.get("semantic", {})
+    path_mappings_raw = raw.get("path_mappings", [])
 
     identity = IdentityConfig(machine_id=identity_raw.get("machine_id"))
 
@@ -116,6 +122,41 @@ def load_config(path: Path) -> AppConfig:
         temp_dir=temp_dir,
     )
 
+    guardian_root = _to_path(
+        guardian_raw.get("root_dir", "${workspace_root}/guardian" if workspace_root_dir else "guardian"),
+        "guardian.root_dir",
+        base_dir=base_dir,
+        workspace_root=workspace_root_dir,
+    )
+    assert guardian_root is not None
+    guardian = GuardianConfig(
+        root_dir=guardian_root,
+        max_state_bytes=int(guardian_raw.get("max_state_bytes", 64 * 1024 * 1024)),
+        shrink_min_count=int(guardian_raw.get("shrink_min_count", 2)),
+        shrink_ratio=float(guardian_raw.get("shrink_ratio", 0.25)),
+        retention_days=int(guardian_raw.get("retention_days", 30)),
+        max_snapshots=int(guardian_raw.get("max_snapshots", 100)),
+        quarantine_retention_days=int(guardian_raw.get("quarantine_retention_days", 30)),
+        staging_retention_hours=int(guardian_raw.get("staging_retention_hours", 24)),
+        poll_interval_seconds=float(guardian_raw.get("poll_interval_seconds", 3)),
+        debounce_seconds=float(guardian_raw.get("debounce_seconds", 2)),
+        stable_reads=int(guardian_raw.get("stable_reads", 3)),
+        stable_read_interval_seconds=float(guardian_raw.get("stable_read_interval_seconds", 0.5)),
+        fallback_scan_seconds=float(guardian_raw.get("fallback_scan_seconds", 60)),
+        once_timeout_seconds=float(guardian_raw.get("once_timeout_seconds", 120)),
+    )
+    semantic_root = _to_path(
+        semantic_raw.get("root_dir", "${workspace_root}/semantic" if workspace_root_dir else "semantic"),
+        "semantic.root_dir",
+        base_dir=base_dir,
+        workspace_root=workspace_root_dir,
+    )
+    assert semantic_root is not None
+    semantic = SemanticConfig(
+        semantic_root,
+        int(semantic_raw.get("max_jsonl_line_bytes", 64 * 1024 * 1024)),
+    )
+
     sync = SyncConfig(
         mode=sync_raw.get("mode", "cold"),
         direction=sync_raw.get("direction", "bidirectional"),
@@ -140,7 +181,7 @@ def load_config(path: Path) -> AppConfig:
     process_detection = ProcessDetectionConfig(
         process_names=_parse_process_names(proc_raw.get("process_names", ["codex.exe", "codex"])),
         grace_period_seconds=int(proc_raw.get("grace_period_seconds", 2)),
-        allow_terminate_if_running=bool(proc_raw.get("allow_terminate_if_running", True)),
+        allow_terminate_if_running=bool(proc_raw.get("allow_terminate_if_running", False)),
         manual_terminate_confirmation=bool(proc_raw.get("manual_terminate_confirmation", True)),
         terminate_confirmation_mode=str(proc_raw.get("terminate_confirmation_mode", "gui")).strip().lower(),
         terminate_timeout_seconds=int(proc_raw.get("terminate_timeout_seconds", 20)),
@@ -200,8 +241,13 @@ def load_config(path: Path) -> AppConfig:
         conflict=conflict,
         state=state,
         logging=logging_cfg,
+        guardian=guardian,
+        path_mappings=_parse_path_mappings(path_mappings_raw),
+        semantic=semantic,
     )
     _validate_config(cfg)
+    if "guardian" in raw:
+        _require_guardian_identity(cfg)
     return cfg
 
 
@@ -243,9 +289,6 @@ def _validate_config(cfg: AppConfig) -> None:
     if not cfg.process_detection.process_names:
         raise ConfigError("process_detection.process_names must not be empty")
 
-    if cfg.process_detection.terminate_timeout_seconds < 0:
-        raise ConfigError("process_detection.terminate_timeout_seconds must be >= 0")
-
     if cfg.process_detection.terminate_confirmation_mode not in {"gui", "console"}:
         raise ConfigError("process_detection.terminate_confirmation_mode must be one of: gui, console")
 
@@ -274,6 +317,119 @@ def _validate_config(cfg: AppConfig) -> None:
 
     if cfg.paths.local_state_dir and cfg.paths.local_state_dir == cfg.paths.cloud_root_dir:
         raise ConfigError("paths.local_state_dir and paths.cloud_root_dir must be different")
+    if cfg.paths.local_state_dir:
+        local_root = cfg.paths.local_state_dir.resolve()
+        for field_name, external in (
+            ("paths.cloud_root_dir", cfg.paths.cloud_root_dir),
+            ("paths.backup_dir", cfg.paths.backup_dir),
+            ("paths.temp_dir", cfg.paths.temp_dir),
+        ):
+            if _paths_overlap(local_root, external.resolve()):
+                raise ConfigError(f"{field_name} must be outside paths.local_state_dir")
+        if cfg.state.manifest_file and _paths_overlap(local_root, cfg.state.manifest_file.resolve()):
+            raise ConfigError("state.manifest_file must be outside paths.local_state_dir")
+
+    _validate_guardian_root(cfg)
+    if not 1 * 1024 * 1024 <= cfg.guardian.max_state_bytes <= 1 * 1024 * 1024 * 1024:
+        raise ConfigError("guardian.max_state_bytes must be between 1 MiB and 1 GiB")
+    if cfg.guardian.shrink_min_count < 1:
+        raise ConfigError("guardian.shrink_min_count must be >= 1")
+    if not 0.0 <= cfg.guardian.shrink_ratio <= 1.0:
+        raise ConfigError("guardian.shrink_ratio must be between 0 and 1")
+    for field_name, value in (
+        ("guardian.retention_days", cfg.guardian.retention_days),
+        ("guardian.max_snapshots", cfg.guardian.max_snapshots),
+        ("guardian.quarantine_retention_days", cfg.guardian.quarantine_retention_days),
+        ("guardian.staging_retention_hours", cfg.guardian.staging_retention_hours),
+    ):
+        if value < 0:
+            raise ConfigError(f"{field_name} must be >= 0")
+    if cfg.guardian.stable_reads < 3:
+        raise ConfigError("guardian.stable_reads must be >= 3")
+    for field_name, value in (
+        ("guardian.poll_interval_seconds", cfg.guardian.poll_interval_seconds),
+        ("guardian.debounce_seconds", cfg.guardian.debounce_seconds),
+        ("guardian.stable_read_interval_seconds", cfg.guardian.stable_read_interval_seconds),
+        ("guardian.fallback_scan_seconds", cfg.guardian.fallback_scan_seconds),
+        ("guardian.once_timeout_seconds", cfg.guardian.once_timeout_seconds),
+    ):
+        if value <= 0:
+            raise ConfigError(f"{field_name} must be > 0")
+    if cfg.semantic.max_jsonl_line_bytes < 1024 * 1024:
+        raise ConfigError("semantic.max_jsonl_line_bytes must be at least 1 MiB")
+    semantic_root = cfg.semantic.root_dir.resolve()
+    if cfg.paths.local_state_dir and _paths_overlap(semantic_root, cfg.paths.local_state_dir.resolve()):
+        raise ConfigError("semantic.root_dir must be outside paths.local_state_dir")
+    for field_name, protected in (("paths.backup_dir", cfg.paths.backup_dir), ("paths.temp_dir", cfg.paths.temp_dir), ("guardian.root_dir", cfg.guardian.root_dir)):
+        if _paths_overlap(semantic_root, protected.resolve()):
+            raise ConfigError(f"semantic.root_dir must not overlap {field_name}")
+
+
+def _require_guardian_identity(cfg: AppConfig) -> str:
+    try:
+        return require_guardian_machine_id(cfg.identity.machine_id)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def require_guardian_identity(cfg: AppConfig) -> str:
+    """Validate machine identity immediately before any Guardian operation."""
+    return _require_guardian_identity(cfg)
+
+
+def _validate_guardian_root(cfg: AppConfig) -> None:
+    root = cfg.guardian.root_dir.resolve()
+    local_state = cfg.paths.local_state_dir.resolve() if cfg.paths.local_state_dir else None
+    if local_state and _paths_overlap(root, local_state):
+        raise ConfigError("guardian.root_dir must be outside paths.local_state_dir")
+
+    for field_name, protected_root in (
+        ("paths.backup_dir", cfg.paths.backup_dir),
+        ("paths.temp_dir", cfg.paths.temp_dir),
+        ("paths.cloud_root_dir", cfg.paths.cloud_root_dir),
+    ):
+        if _paths_overlap(root, protected_root.resolve()):
+            raise ConfigError(f"guardian.root_dir must not overlap {field_name}")
+
+
+def _parse_path_mappings(raw: Any) -> list[PathMappingRule]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ConfigError("path_mappings must be an array of tables")
+    result: list[PathMappingRule] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ConfigError("Each path_mappings entry must be a table")
+        required = ("rule_id", "source_machine", "target_machine", "from", "to")
+        if any(not isinstance(item.get(key), str) or not item[key].strip() for key in required):
+            raise ConfigError("Path mapping requires rule_id, source_machine, target_machine, from and to")
+        if item["rule_id"] in seen:
+            raise ConfigError("path_mappings.rule_id must be unique")
+        seen.add(item["rule_id"])
+        case_sensitive = item.get("case_sensitive")
+        if case_sensitive is not None and not isinstance(case_sensitive, bool):
+            raise ConfigError("path_mappings.case_sensitive must be a boolean")
+        result.append(PathMappingRule(
+            item["rule_id"], item["source_machine"], item["target_machine"],
+            item["from"], item["to"], case_sensitive,
+        ))
+    return result
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    """True when either resolved path contains the other, including junction escapes."""
+    try:
+        first.relative_to(second)
+        return True
+    except ValueError:
+        pass
+    try:
+        second.relative_to(first)
+        return True
+    except ValueError:
+        return False
 
 
 def _parse_background_process_names(proc_raw: dict[str, Any]) -> dict[str, list[str]]:

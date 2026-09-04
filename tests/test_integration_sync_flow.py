@@ -7,8 +7,14 @@ import textwrap
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 
 from codexsync.app import build_context, restore_from_backup, run_sync
+
+
+class _StoppedGate:
+    def require(self, *_args, **_kwargs):
+        return None
 
 
 def _set_mtime_ns(path: Path, mtime_ns: int) -> None:
@@ -32,8 +38,8 @@ class IntegrationSyncFlowTests(unittest.TestCase):
             temp_root.mkdir(parents=True, exist_ok=True)
             state_root.mkdir(parents=True, exist_ok=True)
 
-            local_file = local_state / "sessions" / "a.json"
-            cloud_file = cloud_root / "sessions" / "a.json"
+            local_file = local_state / "data" / "a.json"
+            cloud_file = cloud_root / "data" / "a.json"
             local_file.parent.mkdir(parents=True, exist_ok=True)
             cloud_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -68,7 +74,7 @@ class IntegrationSyncFlowTests(unittest.TestCase):
                     temp_dir = "{temp_root.as_posix()}"
 
                     [targets]
-                    include_roots = ["sessions"]
+                    include_roots = ["data"]
 
                     [backup]
                     backup_before_overwrite = true
@@ -86,7 +92,8 @@ class IntegrationSyncFlowTests(unittest.TestCase):
             )
 
             # 1) Plan should detect local -> cloud update.
-            ctx = build_context(config_path, enforce_safety=True)
+            with patch("codexsync.app._make_safety_gate", return_value=_StoppedGate()):
+                ctx = build_context(config_path, enforce_safety=True)
             self.assertEqual(len(ctx.plan.to_cloud), 1)
             self.assertEqual(len(ctx.plan.to_local), 0)
 
@@ -95,7 +102,8 @@ class IntegrationSyncFlowTests(unittest.TestCase):
             self.assertEqual(cloud_file.read_text(encoding="utf-8"), "v1")
 
             # 3) Apply should sync and create backup snapshot with old cloud content.
-            ctx = build_context(config_path, enforce_safety=True)
+            with patch("codexsync.app._make_safety_gate", return_value=_StoppedGate()):
+                ctx = build_context(config_path, enforce_safety=True)
             run_sync(ctx, dry_run=False)
             self.assertEqual(cloud_file.read_text(encoding="utf-8"), "v2")
             backup_zips = sorted(backup_root.glob("*.zip"))
@@ -105,7 +113,8 @@ class IntegrationSyncFlowTests(unittest.TestCase):
             time.sleep(1.1)  # ensure unique snapshot timestamp granularity
             local_file.write_text("v3", encoding="utf-8")
             _set_mtime_ns(local_file, time.time_ns())
-            ctx = build_context(config_path, enforce_safety=True)
+            with patch("codexsync.app._make_safety_gate", return_value=_StoppedGate()):
+                ctx = build_context(config_path, enforce_safety=True)
             run_sync(ctx, dry_run=False)
             self.assertEqual(cloud_file.read_text(encoding="utf-8"), "v3")
             backup_zips = sorted(backup_root.glob("*.zip"))
@@ -113,12 +122,13 @@ class IntegrationSyncFlowTests(unittest.TestCase):
 
             # 5) Restore latest backup to local (latest snapshot contains previous cloud version = v2).
             local_file.write_text("broken", encoding="utf-8")
-            result = restore_from_backup(
-                config_path=config_path,
-                snapshot_name=None,
-                target="local",
-                dry_run=False,
-            )
+            with patch("codexsync.restore._make_safety_gate", return_value=_StoppedGate()):
+                result = restore_from_backup(
+                    config_path=config_path,
+                    snapshot_name=None,
+                    target="local",
+                    dry_run=False,
+                )
             self.assertTrue(result.snapshot_name.endswith(".zip"))
             self.assertEqual(local_file.read_text(encoding="utf-8"), "v2")
         finally:

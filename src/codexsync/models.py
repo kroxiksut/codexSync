@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .guardian_models import GuardianConfig
+from .path_mapping import PathMappingRule
+
 
 @dataclass(slots=True)
 class PathsConfig:
@@ -40,7 +43,9 @@ class SafetyConfig:
 class ProcessDetectionConfig:
     process_names: list[str] = field(default_factory=lambda: ["codex.exe", "codex"])
     grace_period_seconds: int = 2
-    allow_terminate_if_running: bool = True
+    # Kept only to produce a clear migration error for old configuration files.
+    # codexSync 0.2 never terminates Codex.
+    allow_terminate_if_running: bool = False
     manual_terminate_confirmation: bool = True
     terminate_confirmation_mode: str = "gui"
     terminate_timeout_seconds: int = 20
@@ -94,6 +99,12 @@ class LoggingConfig:
     machine_id: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class SemanticConfig:
+    root_dir: Path
+    max_jsonl_line_bytes: int = 64 * 1024 * 1024
+
+
 @dataclass(slots=True)
 class AppConfig:
     identity: IdentityConfig
@@ -107,6 +118,9 @@ class AppConfig:
     conflict: ConflictConfig
     state: StateConfig
     logging: LoggingConfig
+    guardian: GuardianConfig = field(default_factory=lambda: GuardianConfig(root_dir=Path("guardian")))
+    path_mappings: list[PathMappingRule] = field(default_factory=list)
+    semantic: SemanticConfig = field(default_factory=lambda: SemanticConfig(root_dir=Path("semantic")))
 
 
 @dataclass(slots=True, frozen=True)
