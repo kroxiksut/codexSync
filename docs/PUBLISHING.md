@@ -105,10 +105,9 @@ the executable an order of magnitude larger; a healthy build is under about
 ### GitHub release assets
 
 - Workflow: `.github/workflows/release-exe.yml`
-- Trigger:
-  - push tag `v*` (for example `v0.2.0`)
-  - manual `workflow_dispatch` with input `release_tag`, for a tag that already
-    exists
+- Trigger: manual `workflow_dispatch` only, with input `release_tag`, for a tag
+  that already exists. The tag-push trigger is deliberately off until the GUI
+  ships — pushing `v*` publishes no executable today.
 - Output assets:
   - `codexsync-<tag>-windows-amd64.zip`
   - `codexsync-<tag>-windows-amd64.zip.sha256`

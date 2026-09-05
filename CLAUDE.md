@@ -29,7 +29,7 @@ python -m codexsync -c config.toml <cmd>  # run from a source checkout (see "Dua
 
 There is no linter, formatter, or type-checker configured — CI (`.github/workflows/ci.yml`) only runs `pytest` on `windows-latest` + `macos-latest` × Python 3.11/3.12/3.13. Do not add tool config without being asked.
 
-Windows exe build: `codexsync.spec` + `scripts/pyinstaller_entrypoint.py`, released by `.github/workflows/release-exe.yml`.
+Windows exe build: `codexsync.spec` + `scripts/pyinstaller_entrypoint.py`, released by `.github/workflows/release-exe.yml` — `workflow_dispatch` only; the tag-push trigger stays off until the GUI ships.
 
 `config.toml`, `config2.toml` and local runtime dirs are gitignored. `src/codexsync/config.example.toml` is the packaged template and the only config that ships; `config.example.toml` at the repo root is a byte-identical copy. `tests/test_config_template_parity.py` fails if the two drift and also asserts the shipped template passes `_require_mutation_compatible_config` — a template that fails it hands every `init-config` user a config whose sync/restore/repair/recover all exit 4. Changing the config schema means touching both files plus `_validate_config` in `config.py`.
 

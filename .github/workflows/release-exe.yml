@@ -1,16 +1,15 @@
 name: Release EXE
 
+# Manual only until the GUI ships: a tag push must not publish an exe yet.
+# Re-add the `push: tags: ["v*"]` trigger together with the GUI release.
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Tag to build and publish (for example v0.1.2)"
+        description: "Tag to build and publish (for example v0.2.0)"
         required: true
-        default: "v0.1.2"
+        default: "v0.2.0"
         type: string
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: write
@@ -20,13 +19,13 @@ jobs:
     name: Build and publish Windows EXE
     runs-on: windows-latest
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event.inputs.release_tag }}
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref }}
+          ref: ${{ github.event.inputs.release_tag }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -41,18 +40,11 @@ jobs:
       - name: Build EXE
         shell: powershell
         run: |
-          if (Test-Path "codexsync.spec") {
-            pyinstaller --clean --noconfirm codexsync.spec
-          } else {
-            @'
-from codexsync.cli import main
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-'@ | Out-File -FilePath ".github\pyinstaller_entrypoint.py" -Encoding ascii
-
-            pyinstaller --clean --noconfirm --onefile --name codexsync --paths src --add-data "src/codexsync/config.example.toml;codexsync" .github/pyinstaller_entrypoint.py
+          if (-not (Test-Path "codexsync.spec")) {
+            Write-Error "codexsync.spec is missing; the exe build has no entry point"
+            exit 1
           }
+          pyinstaller --clean --noconfirm codexsync.spec
 
       - name: Pack release assets
         shell: powershell

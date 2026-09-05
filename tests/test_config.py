@@ -16,21 +16,19 @@ class ConfigTests(unittest.TestCase):
         if os.name == "nt":
             workspace_root = "D:/codexSync"
             local_state = "C:/Users/user/.codex_test"
-            expected_workspace = str(Path("D:/codexSync"))
-            expected_cloud = str(Path("D:/codexSync/sync"))
-            expected_backup = str(Path("D:/codexSync/backups"))
-            expected_temp = str(Path("D:/codexSync/.tmp"))
-            expected_manifest = str(Path("D:/codexSync/state/manifest.json"))
-            expected_log = str(Path("D:/codexSync/logs/codexsync.log"))
         else:
             workspace_root = "/tmp/codexSync"
             local_state = "/tmp/.codex_test"
-            expected_workspace = str(Path("/tmp/codexSync"))
-            expected_cloud = str(Path("/tmp/codexSync/sync"))
-            expected_backup = str(Path("/tmp/codexSync/backups"))
-            expected_temp = str(Path("/tmp/codexSync/.tmp"))
-            expected_manifest = str(Path("/tmp/codexSync/state/manifest.json"))
-            expected_log = str(Path("/tmp/codexSync/logs/codexsync.log"))
+
+        # load_config resolves every path, so the expectations must be resolved
+        # too: on macOS /tmp is a symlink to /private/tmp.
+        resolved_workspace = Path(workspace_root).resolve()
+        expected_workspace = str(resolved_workspace)
+        expected_cloud = str(resolved_workspace / "sync")
+        expected_backup = str(resolved_workspace / "backups")
+        expected_temp = str(resolved_workspace / ".tmp")
+        expected_manifest = str(resolved_workspace / "state" / "manifest.json")
+        expected_log = str(resolved_workspace / "logs" / "codexsync.log")
 
         root = Path.cwd() / "test-sandbox" / f"config-{uuid.uuid4().hex}"
         root.mkdir(parents=True, exist_ok=False)
