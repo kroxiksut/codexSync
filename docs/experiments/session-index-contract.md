@@ -5,6 +5,11 @@
 **Not yet run.** `PROVEN_CONTRACTS` in `src/codexsync/session_index.py` is empty,
 so codexSync parses and audits the index but refuses to render a new one.
 
+Reading is not gated and is already wired: `sessions index` reports what each
+side's index holds and where the two disagree, and `doctor` carries the same
+check. Both say `UNPROVEN_CONSUMER_CONTRACT`, which is this experiment. What
+stays blocked is only the write — merging two indexes into a new file.
+
 ## Why this cannot be settled by reading code
 
 `session_index.jsonl` is an append/update journal: the same session id may

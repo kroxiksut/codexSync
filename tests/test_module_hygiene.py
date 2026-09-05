@@ -52,7 +52,10 @@ def _loaded_names(tree: ast.AST) -> set[str]:
 class ModuleHygieneTests(unittest.TestCase):
     def test_every_module_resolves_the_names_it_uses(self) -> None:
         offenders: dict[str, list[str]] = {}
-        modules = sorted(PACKAGE.glob("*.py"))
+        # rglob, so the optional GUI package is walked too: nothing there is
+        # reached by a test that renders a window, which is exactly the shape
+        # of code this guard exists for.
+        modules = sorted(PACKAGE.rglob("*.py"))
         self.assertTrue(modules, f"no modules found under {PACKAGE}")
         for module in modules:
             tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))

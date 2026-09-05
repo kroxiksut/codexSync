@@ -2,6 +2,8 @@
 
 Open-source utility for syncing local Codex state between personal machines using a cloud-synced folder.
 
+Russian version: [README.ru.md](./README.ru.md).
+
 > [!IMPORTANT]
 > Current real-world validation is Windows-to-Windows only.
 > macOS support exists in code/CI, but end-to-end handoff on real macOS machines is not yet validated.
@@ -12,9 +14,24 @@ Developers may want to continue working with Codex on another machine without lo
 
 ## What this does
 
-* Syncs local Codex state directory
-* Works only after Codex process is closed
-* Uses any cloud-synced folder (Dropbox, OneDrive, Syncthing, etc.)
+* **Syncs** the local Codex state directory through any cloud-synced folder
+  (Dropbox, OneDrive, Yandex.Disk, Syncthing…), backup-first, only while Codex
+  is closed.
+* **Guards the global state.** `guardian` takes immutable, verified snapshots
+  of `.codex-global-state.json` while Codex is running, writing only outside
+  `.codex`, so a crash or a BSOD leaves a restorable `latest-good`.
+* **Recovers from an interrupted mutation.** Every write is wrapped in a lock, a
+  durable journal and a verified backup, and `recover inspect|resume|rollback`
+  is the sanctioned way out of one that stopped halfway.
+* **Repairs a machine handoff.** `repair-projects` rebuilds project bindings
+  after paths moved, from what the sessions actually say, as an exact plan you
+  confirm by its id.
+* **Moves session history between machines.** `sessions` classifies every branch
+  semantically — identical, fast-forward, archive transition, divergence — and
+  never merges, sorts or picks a winner by timestamp.
+* **Finds a chat and puts it under a project.** `chats` lists what exists, says
+  *why* each chat sits where it does, and moves one with the same confirmation
+  protocol as everything else.
 
 ## What this does NOT do
 
@@ -28,20 +45,30 @@ Developers may want to continue working with Codex on another machine without lo
 
 ## Design principles
 
-* Simple and predictable
-* Safe (no corruption)
-* Offline-friendly
-* Backup-first
-* Windows-first
+* **Backup-first, and fail closed.** Uncertainty is never resolved optimistically.
+* **One authority, one envelope.** Exactly one place decides whether state may
+  change, and exactly one path performs the change.
+* **Say why, do not guess.** A branch that cannot be classified, a project that
+  matches two candidates, a runtime behaviour that has not been observed — each
+  is reported with a code, not approximated.
+* **No integration with Codex internals.** codexSync never starts or stops
+  Codex, reads no tokens and writes no SQLite.
+* **Offline-friendly, zero runtime dependencies** in the core and the CLI.
+* Windows-first; macOS supported in code and CI.
 
-## How it works (MVP)
+## How it works
 
-1. Detect if Codex is running
-2. If not running:
-
-   * Compare local and cloud state
-   * Sync newer files
-   * Create backup before overwrite
+1. Decide whether Codex is running. An *undetermined* answer counts as running:
+   nothing that mutates state is optimistic.
+2. Read-only commands (`doctor`, `plan`, every `scan`, `chats`, `guardian`) run
+   either way. A result taken while Codex is open is marked `volatile` and
+   cannot be reused by a mutation.
+3. A mutation runs only with Codex closed, and always through the same
+   envelope: a non-stealable lock, a durable journal, a verified backup of
+   everything it will replace, a final process check immediately before the
+   commit, staging on the same volume, an atomic replace, then `COMMITTED`.
+4. Anything ambiguous stops instead of guessing, with an exit code that says
+   which kind of stop it was.
 
 ## Conflict policy
 
@@ -93,9 +120,10 @@ Developers may want to continue working with Codex on another machine without lo
 - Runtime support is currently Windows-first.
 - macOS support is allowed in current project scope (Apple Silicon target).
 - Linux runtime support is intentionally out of MVP scope for now.
-- CI currently runs on:
-  - `windows-latest`
-  - `macos-latest`
+- CI runs `pytest` on `windows-latest` and `macos-latest`, for Python 3.11,
+  3.12 and 3.13. There is no linter or type-checker; two tests carry that
+  weight instead — a static guard against names used but never imported, and a
+  guard that fails the moment a write targets the Codex state directory.
 
 ## CLI commands
 
@@ -104,6 +132,35 @@ Run from project root:
 ```powershell
 python -m codexsync -c config.toml <command>
 ```
+
+Every command at a glance. "Cold" means it refuses to run unless Codex is
+closed; everything else reads only and may run at any time.
+
+| Command | Cold? | What it does |
+|---|---|---|
+| `init-config` | — | Write a `config.toml` from the bundled template |
+| `validate` | no | Load and check the configuration, nothing else |
+| `doctor` / `preflight` | no | Environment diagnostics; identical, and side-effect free |
+| `plan` | no | Show what a sync would copy (marked `volatile` if Codex is open) |
+| `sync` | **yes** | Copy state both ways, backup-first |
+| `restore` | **yes** | Restore files from a verified backup snapshot |
+| `guardian watch` | no | Keep taking snapshots of the global state while Codex runs |
+| `guardian snapshot --once` | no | Take one snapshot now |
+| `guardian scheduler` | no | Render user-level scheduler templates |
+| `repair-projects scan` | no | Build an immutable, hashed repair plan |
+| `repair-projects apply` | **yes** | Apply one exact plan, quoted by its id |
+| `sessions scan` | no | Classify every session branch on both sides |
+| `sessions index` | no | Report what each `session_index.jsonl` holds |
+| `sessions resolve` | no | Record one decision about a divergence |
+| `sessions apply` | **yes** | Transfer whole branches under one confirmed plan |
+| `chats list` / `chats tree` | no | Find chats and see which project each is in |
+| `chats move` | **yes** | Put chosen chats under one project |
+| `recover inspect` | no | Read one mutation journal without side effects |
+| `recover resume` / `rollback` | **yes** | Close an interrupted mutation |
+
+Two rules apply to every mutating command and are not configurable: it refuses
+while Codex is open *or* undetermined, and it takes a verified backup before it
+replaces anything.
 
 Generate `config.toml` from bundled template:
 
@@ -309,12 +366,74 @@ locally (`mirror_layout_id` in the report records which mirror layout was used).
 This is what lets a stale or missing cloud copy be rebuilt, since sessions are
 semantic-owned and never copied by plain `sync`.
 
+Because no runtime reads the mirror, a branch may be stored there compressed:
+`semantic.mirror_compression` takes `none`, `gzip` or `xz` (default `xz`, which
+measured about a fifth of the original size on real session data). Only the
+mirror is affected — a branch written back into `.codex` is always plain JSONL.
+
+The setting names the container for a branch the mirror does not hold yet. A
+branch already there keeps the container it is stored in, reported as
+`MIRROR_CONTAINER_KEPT`: the container is part of the file name, nothing deletes
+the old name because `delete_policy` is `never`, and two names for one session
+id would make the catalogue treat both as ambiguous and drop the session from
+every later plan. Converting an existing mirror therefore needs a delete, and is
+refused for the same reason an archive transition is.
+Compression is a property of the container and never of the history: branch
+hashes, record counts and every branch comparison are taken from the
+decompressed stream, so a compressed mirror copy is `IDENTICAL` to the plain
+local branch rather than a divergence. The container is named in the mirror
+layout id and hashed into the plan id, so changing it invalidates an existing
+plan instead of silently renaming every destination underneath a confirmation
+you already gave.
+
 An apply is therefore partial by design: a conflict or a target collision stops
 it, because each names a decision only you can make, while items blocked on an
 unproven layout or a SQLite-held binding are reported and left exactly where
 they are. Active/archive transitions are also reported but not applied in 0.2:
 moving a branch between `sessions/` and `archived_sessions/` requires a delete,
 and `delete_policy` is `never`.
+
+### The session index
+
+`session_index.jsonl` is an append/update journal, not a list of the sessions
+that exist: one id may appear on several lines, a session may have no line at
+all, and a line may name a file that is gone. None of that is an error, and
+codexSync never "cleans it up".
+
+`sessions index` reports what each side's index holds and where the two
+disagree. It reads only, runs while Codex is open, and names no session ids or
+thread names — a divergent record is addressed by a hashed id, exactly like a
+divergent branch.
+
+```powershell
+python -m codexsync -c config.toml sessions index
+```
+
+Two things are worth knowing about, and both are reported rather than acted on.
+A repeated id has two plausible readings — the last line wins, or the greatest
+`updated_at` wins — which differ exactly when a clock ran backwards;
+disagreement is reported as `REDUCTION_AMBIGUOUS`, and `doctor` carries the same
+check. And the two sides may hold a different record for one session, which is
+a rename divergence and a decision rather than a merge.
+
+No index is ever rewritten while the consumer contract is unproven, which the
+report says as `UNPROVEN_CONSUMER_CONTRACT`. See
+[docs/experiments/session-index-contract.md](./docs/experiments/session-index-contract.md).
+
+## The GUI is not part of this release
+
+0.2 is a command-line release. An optional extra exists as groundwork —
+`codexsync[gui]`, a Qt-free controller, a launcher and one read-only screen —
+but it is **not a finished interface**, and installing it will not let you drive
+codexSync from a window. Everything below and above is the CLI.
+
+The groundwork is kept because two properties are cheaper to establish than to
+retrofit, and both are enforced by tests rather than by intent: the core and the
+CLI keep zero runtime dependencies, so `pip install codexsync` never pulls Qt;
+and nothing in the GUI package may reach the sync engine, the backup manager,
+the operation lock, the journal or the safety gate. A second shell that decided
+for itself when a write is allowed would leave two safety stories for one
+operation, with only one of them written down.
 
 ## Finding a chat and putting it under a project
 
@@ -517,7 +636,15 @@ Important:
 
 ## Status
 
-MVP (ready for public repository and community testing)
+0.2 — command-line release. Guardian, a safety spine for every mutation, machine
+handoff repair, semantic session transfer and chats.
+
+Practically exercised Windows-to-Windows. macOS is supported in code and CI but
+the end-to-end handoff has not been validated on real macOS machines. Two
+capabilities are deliberately inert until a controlled experiment on disposable
+state records what the Codex runtime actually does — writing a transferred
+branch *into* `.codex`, and rewriting `session_index.jsonl`. Both are reported
+rather than guessed; see [docs/experiments](./docs/experiments).
 
 ## Publishing
 

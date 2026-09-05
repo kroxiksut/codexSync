@@ -10,6 +10,7 @@ from .app import (
     build_context,
     apply_repair_projects,
     apply_session_transfer,
+    audit_session_index,
     build_guardian_runner,
     collect_process_snapshot,
     inspect_recovery,
@@ -217,7 +218,10 @@ def print_chat_tree(
         return
 
     total = sum(len(chats) for _, _, _, chats in rendered)
-    print(f"Projects: {len(rendered)}   chats: {total}")
+    # The `(no project)` bucket is a group but not a project: counting it makes
+    # the state look like it holds one project more than it does.
+    project_count = sum(1 for _, project_id, _, _ in rendered if project_id is not None)
+    print(f"Projects: {project_count}   chats: {total}")
     _print_legend(directory)
     for label, _, view, chats in rendered:
         roots = "  ".join(view.roots) if view and view.roots else ""
@@ -344,6 +348,10 @@ def build_parser() -> argparse.ArgumentParser:
     sessions_scan.add_argument("--resolutions", default=None, help="Recorded conflict decisions to apply")
     sessions_scan.add_argument("--output", default=None, help="Optional redacted JSON report path")
     sessions_scan.add_argument("--save-plan", default=None, help="Save the frozen plan for a later apply")
+    sessions_sub.add_parser(
+        "index",
+        help="Report what each side's session_index.jsonl contains; writes nothing",
+    )
     sessions_resolve = sessions_sub.add_parser(
         "resolve", help="Record one versioned choice between two divergent branches"
     )
@@ -598,6 +606,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.save_plan:
                 save_transfer_plan(plan, Path(args.save_plan).expanduser().resolve())
             return int(ExitCode.CONFLICT_DETECTED if plan.blocked_items else ExitCode.OK)
+
+        if args.command == "sessions" and args.sessions_command == "index":
+            report = audit_session_index(config_path)
+            print(json.dumps(report, sort_keys=True, indent=2))
+            # A divergent record for one session is a decision, exactly like a
+            # divergent branch, so it leaves by the same door as `sessions scan`.
+            return int(
+                ExitCode.CONFLICT_DETECTED if report["differing"] else ExitCode.OK
+            )
 
         if args.command == "sessions" and args.sessions_command == "resolve":
             resolution = record_branch_resolution(

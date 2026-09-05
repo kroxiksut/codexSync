@@ -22,6 +22,7 @@ from .models import AppConfig, FileMeta, SyncManifest, SyncPlan
 from .process_detector import CodexProcessDetector, ProcessInfo
 from .safety_gate import ProcessState, SafetyGate
 from .scanner import scan_tree
+from .session_index import SESSION_INDEX_FILE
 
 LOG = logging.getLogger(__name__)
 
@@ -153,7 +154,7 @@ def _is_semantic_owned(relative_path: str) -> bool:
     name = rel.rsplit("/", 1)[-1]
     return (
         rel == ".codex-global-state.json"
-        or rel == "session_index.jsonl"
+        or rel == SESSION_INDEX_FILE
         or rel.startswith("sessions/")
         or rel.startswith("archived_sessions/")
         or rel.startswith("sqlite/")

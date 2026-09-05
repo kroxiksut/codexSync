@@ -20,6 +20,7 @@ from codexsync.semantic_transfer import (
     save_transfer_plan,
     target_relative_path,
 )
+from codexsync.semantic_transfer import _catalogue_objection
 from codexsync.session_catalog import SessionCatalog, SessionDescriptor, SessionState
 from codexsync.sqlite_audit import PlacementStatus, ThreadPlacements
 
@@ -401,6 +402,129 @@ class TransferPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_transfer_plan(path)
 
+
+class LayoutTemplateTests(unittest.TestCase):
+    """What a proven layout template has to be able to say.
+
+    Measured on the state this was written against: 228 active branches live at
+    ``sessions/<year>/<month>/<day>/<file>`` and 23 archived ones lie flat at
+    ``archived_sessions/<file>``. A template that can name only the state folder
+    and the file describes the second shape and silently puts every branch of
+    the first in a directory the thread catalogue does not name -- a session the
+    runtime never shows, with no error. These tests run the branch that
+    ``PROVEN_LAYOUTS`` keeps shut, because nothing else ever will.
+    """
+
+    PARTITIONED = "{state}/{source_dir}/{file_name}"
+
+    def tearDown(self) -> None:
+        PROVEN_LAYOUTS.clear()
+
+    def _descriptor(self, relative_path: str, *, state=SessionState.ACTIVE, session_id="s1"):
+        return SessionDescriptor(session_id, state, relative_path, "0" * 64, 0, 1)
+
+    def _render(self, template: str, relative_path: str, **kwargs) -> str:
+        PROVEN_LAYOUTS["probe"] = template
+        return target_relative_path("probe", self._descriptor(relative_path, **kwargs))
+
+    def test_a_date_partitioned_branch_keeps_its_date_folders(self) -> None:
+        self.assertEqual(
+            self._render(self.PARTITIONED, "sessions/2026/03/12/rollout-a.jsonl"),
+            "sessions/2026/03/12/rollout-a.jsonl",
+        )
+
+    def test_the_same_template_renders_a_flat_archived_branch(self) -> None:
+        """One template covers both shapes: the empty segment disappears."""
+        self.assertEqual(
+            self._render(
+                self.PARTITIONED,
+                "archived_sessions/rollout-a.jsonl",
+                state=SessionState.ARCHIVED,
+            ),
+            "archived_sessions/rollout-a.jsonl",
+        )
+
+    def test_the_state_folder_is_the_template_choice_not_the_source_one(self) -> None:
+        """A branch active there and archived here lands under the local folder."""
+        self.assertEqual(
+            self._render(
+                self.PARTITIONED, "sessions/2026/03/12/a.jsonl", state=SessionState.ARCHIVED
+            ),
+            "archived_sessions/2026/03/12/a.jsonl",
+        )
+
+    def test_a_container_never_survives_into_the_destination_name(self) -> None:
+        self.assertEqual(
+            self._render(self.PARTITIONED, "sessions/2026/03/12/a.jsonl.xz"),
+            "sessions/2026/03/12/a.jsonl",
+        )
+
+    def test_a_flat_template_is_what_the_catalogue_refuses(self) -> None:
+        """The regression itself, stated as the catalogue sees it."""
+        descriptor = self._descriptor("sessions/2026/03/12/a.jsonl")
+        placements = _catalogue({"s1": "sessions/2026/03/12/a.jsonl"})
+
+        PROVEN_LAYOUTS["probe"] = PROVEN
+        flat = target_relative_path("probe", descriptor)
+        self.assertEqual(flat, "sessions/a.jsonl")
+        self.assertEqual(
+            _catalogue_objection(placements, "s1", flat), ("CATALOG_PLACES_ELSEWHERE",)
+        )
+
+        PROVEN_LAYOUTS["probe"] = self.PARTITIONED
+        kept = target_relative_path("probe", descriptor)
+        self.assertIsNone(_catalogue_objection(placements, "s1", kept))
+
+    def test_the_session_id_is_available_to_a_template(self) -> None:
+        self.assertEqual(
+            self._render("{state}/{session_id}.jsonl", "sessions/2026/03/12/a.jsonl"),
+            "sessions/s1.jsonl",
+        )
+
+    def test_a_template_naming_an_id_the_branch_lacks_is_refused(self) -> None:
+        PROVEN_LAYOUTS["probe"] = "{state}/{session_id}.jsonl"
+        descriptor = SessionDescriptor(
+            None, SessionState.ACTIVE, "sessions/a.jsonl", "0" * 64, 0, 1
+        )
+        with self.assertRaises(FailSafeError):
+            target_relative_path("probe", descriptor)
+
+    def test_an_unknown_placeholder_is_refused_rather_than_raising_keyerror(self) -> None:
+        with self.assertRaises(FailSafeError):
+            self._render("{state}/{machine}/{file_name}", "sessions/a.jsonl")
+
+    def test_a_template_that_escapes_the_state_root_is_refused(self) -> None:
+        with self.assertRaises(FailSafeError):
+            self._render("{state}/../{file_name}", "sessions/a.jsonl")
+
+    def test_a_malformed_template_is_refused_rather_than_raising_valueerror(self) -> None:
+        with self.assertRaises(FailSafeError):
+            self._render("{state}/{file_name", "sessions/a.jsonl")
+
+
+class PlanCompatibilityTests(unittest.TestCase):
+    """A plan from an older build is named as such, not as a corrupt one."""
+
+    def setUp(self) -> None:
+        self.root = Path.cwd() / "test-sandbox" / f"plan-compat-{uuid.uuid4().hex}"
+        self.root.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_a_plan_without_a_mirror_layout_id_says_what_it_is(self) -> None:
+        path = self.root / "plan.json"
+        raw = {
+            "format": "codexsync-session-transfer-v1",
+            "version": 1, "plan_id": "x", "created_at_utc": "2026-01-01T00:00:00Z",
+            "source_machine": "a", "target_machine": "b", "layout_id": "unproven",
+            "canonical_version": "canonical-json-v1", "volatile": False,
+            "items": [], "codes": [],
+        }
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaises(ValueError) as caught:
+            load_transfer_plan(path)
+        self.assertIn("predates the mirror layout id", str(caught.exception))
 
 if __name__ == "__main__":
     unittest.main()

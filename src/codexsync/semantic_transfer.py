@@ -42,6 +42,7 @@ import json
 from pathlib import Path
 
 from .exceptions import FailSafeError
+from .jsonl_codec import JsonlCodec, codec_of, logical_name, with_codec
 from .semantic_merge import (
     CANONICAL_DIGEST_VERSION,
     BranchComparison,
@@ -104,11 +105,65 @@ class ResolutionChoice(str, Enum):
 #: separate destination and are not gated on this dict.
 PROVEN_LAYOUTS: dict[str, str] = {}
 
+#: State directories a branch can live under, and therefore the first segment
+#: of every source relative path the catalogue produces.
+_STATE_DIRS = ("sessions", "archived_sessions")
+
+#: Placeholders a layout template may use.
+#:
+#: ``source_dir`` is the directory a branch sat in *below* its state folder on
+#: the machine it came from, and it exists because a real machine does not have
+#: one layout. On the state this was measured against, 228 active branches live
+#: in ``sessions/<year>/<month>/<day>/`` while 23 archived ones lie flat in
+#: ``archived_sessions/``. A template that could only name the state folder and
+#: the file describes the second and puts every branch of the first in the
+#: wrong directory -- where the thread catalogue does not name it, which is a
+#: session the runtime never shows and no error anywhere.
+#:
+#: An empty segment disappears from the rendered path, so the single template
+#: ``{state}/{source_dir}/{file_name}`` describes both shapes at once.
+_LAYOUT_FIELDS = ("state", "source_dir", "file_name", "session_id")
+
 #: Layout of the codexSync cloud mirror. Recorded as an id so a plan still
 #: names the layout every destination was chosen under, but it is not a
 #: PROVEN_LAYOUTS entry: it describes codexSync's own directory rather than a
 #: runtime whose behaviour would have to be observed.
 MIRROR_LAYOUT_ID = "codexsync-mirror-v1"
+
+#: Mirror layout per container. The codec changes the file name of every
+#: destination, so it is part of the layout rather than a detail beneath it,
+#: and since the id is hashed into the plan a plan frozen for one container can
+#: never be applied under another.
+#:
+#: It names the container a branch the mirror does not yet hold is written in.
+#: A branch already there keeps the container it is already stored in, because
+#: changing it would leave the old file behind under its old name; each item's
+#: `target_relative_path` is what actually decides, and the plan id covers all
+#: of them.
+_MIRROR_LAYOUT_IDS: dict[JsonlCodec, str] = {
+    JsonlCodec.NONE: MIRROR_LAYOUT_ID,
+    JsonlCodec.GZIP: "codexsync-mirror-gzip-v1",
+    JsonlCodec.XZ: "codexsync-mirror-xz-v1",
+}
+
+
+def mirror_layout_id(codec: JsonlCodec) -> str:
+    return _MIRROR_LAYOUT_IDS[codec]
+
+
+def mirror_codec_for(layout_id: str) -> JsonlCodec:
+    """The container a plan's mirror destinations were named under.
+
+    A plan carries its layout, not the config, so an apply writes what the id
+    the user confirmed describes. An unknown id is refused rather than guessed:
+    a wrong container here would write a compressed body under a plain name.
+    """
+    for codec, known in _MIRROR_LAYOUT_IDS.items():
+        if known == layout_id:
+            return codec
+    raise FailSafeError(
+        f"Transfer plan names an unknown mirror layout {layout_id!r}; rebuild the plan"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +252,7 @@ def build_transfer_plan(
     confirmed_bases: set[str] | None = None,
     placements: ThreadPlacements | None = None,
     layout_id: str = "unproven",
+    mirror_codec: JsonlCodec = JsonlCodec.NONE,
     max_line_bytes: int = 64 * 1024 * 1024,
     volatile: bool = False,
 ) -> TransferPlan:
@@ -239,6 +295,7 @@ def build_transfer_plan(
                 _one_sided_item(
                     session_hash, session_id, local, remote,
                     placements=placements, layout_id=layout_id,
+                    mirror_codec=mirror_codec,
                     claimed_targets=claimed_targets,
                 )
             )
@@ -258,6 +315,7 @@ def build_transfer_plan(
             resolutions_by_session=by_session,
             placements=placements,
             layout_id=layout_id,
+            mirror_codec=mirror_codec,
             claimed_targets=claimed_targets,
         )
         items.append(item)
@@ -268,7 +326,7 @@ def build_transfer_plan(
     plan = TransferPlan(
         TRANSFER_PLAN_VERSION, "", _now(), source_machine, target_machine,
         layout_id, CANONICAL_DIGEST_VERSION, volatile,
-        tuple(items), tuple(dict.fromkeys(codes)),
+        tuple(items), tuple(dict.fromkeys(codes)), mirror_layout_id(mirror_codec),
     )
     return _with_plan_id(plan)
 
@@ -284,6 +342,7 @@ def _decide(
     resolutions_by_session: dict[str, BranchResolution],
     placements: ThreadPlacements | None,
     layout_id: str,
+    mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
 ) -> TransferItem:
     def make(action: TransferAction, *, target: str | None = None, conflict: str | None = None,
@@ -320,7 +379,8 @@ def _decide(
         )
         return _gate_write(
             make, resolved, session_id, local, remote,
-            placements=placements, layout_id=layout_id, claimed_targets=claimed_targets,
+            placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
+            claimed_targets=claimed_targets,
             conflict=conflict, extra=("RESOLVED_BY_USER",),
         )
 
@@ -331,7 +391,8 @@ def _decide(
     }[comparison.relation]
     return _gate_write(
         make, action, session_id, local, remote,
-        placements=placements, layout_id=layout_id, claimed_targets=claimed_targets,
+        placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
+        claimed_targets=claimed_targets,
     )
 
 
@@ -343,6 +404,7 @@ def _one_sided_item(
     *,
     placements: ThreadPlacements | None,
     layout_id: str,
+    mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
 ) -> TransferItem:
     """Decide a session that exists on one side only.
@@ -370,7 +432,8 @@ def _one_sided_item(
 
     return _gate_write(
         make, action, session_id, local, remote,
-        placements=placements, layout_id=layout_id, claimed_targets=claimed_targets,
+        placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
+        claimed_targets=claimed_targets,
         extra=("SESSION_ON_ONE_SIDE_ONLY",),
     )
 
@@ -384,6 +447,7 @@ def _gate_write(
     *,
     placements: ThreadPlacements | None,
     layout_id: str,
+    mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
     conflict: str | None = None,
     extra: tuple[str, ...] = (),
@@ -396,8 +460,23 @@ def _gate_write(
         # layout is ours and the source path is the answer rather than a guess.
         # Nothing has to find this file afterwards, so the catalogue is not
         # consulted either.
-        side, target = "mirror", mirror_relative_path(source)
+        #
+        # The container is the one the mirror already holds this branch in, and
+        # only a branch the mirror does not have yet gets the configured one.
+        # Changing the container renames the destination, and nothing deletes
+        # the old name because `delete_policy` is never -- so writing the
+        # configured container over a mirror that stores the branch plainly
+        # leaves two files for one session id, which the catalogue reads as
+        # `DUPLICATE_SESSION_ID`. Both copies then drop out of `valid` and the
+        # session is never compared, mirrored or fast-forwarded again, with no
+        # error at all. Converting an existing mirror needs a delete, so it is
+        # refused here in the same way an archive transition is.
+        stored = codec_of(remote.relative_path) if remote is not None else None
+        codec = mirror_codec if stored is None else stored
+        side, target = "mirror", mirror_relative_path(source, codec)
         extra = extra + ("MIRROR_DESTINATION",)
+        if stored is not None and stored is not mirror_codec:
+            extra = extra + ("MIRROR_CONTAINER_KEPT",)
     elif layout_id not in PROVEN_LAYOUTS:
         return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra)
     else:
@@ -443,16 +522,21 @@ def _catalogue_objection(
     return None
 
 
-def mirror_relative_path(source: SessionDescriptor) -> str:
+def mirror_relative_path(
+    source: SessionDescriptor, codec: JsonlCodec = JsonlCodec.NONE
+) -> str:
     """Destination path for a branch written into the codexSync cloud mirror.
 
     The mirror is not a Codex state directory: nothing but codexSync reads it,
-    so a branch keeps the relative path it has where it came from. That makes
-    the mirror a faithful copy and keeps the way back an ordinary transfer,
-    which is still gated on a proven layout because the way back lands in a
-    directory the runtime does read.
+    so a branch keeps the relative path it has where it came from, and may keep
+    it in a compressed container. That makes the mirror a faithful copy and
+    keeps the way back an ordinary transfer, which is still gated on a proven
+    layout because the way back lands in a directory the runtime does read.
+
+    The logical path is taken first, so a branch already read out of the mirror
+    is restored to the same name rather than gaining a second suffix.
     """
-    return source.relative_path
+    return with_codec(source.relative_path, codec)
 
 
 def target_relative_path(layout_id: str, source: SessionDescriptor) -> str:
@@ -461,16 +545,65 @@ def target_relative_path(layout_id: str, source: SessionDescriptor) -> str:
     Refuses on an unproven layout: the source filename records where the branch
     used to live on another machine, which is evidence about that machine and
     not an instruction for this one.
+
+    The logical name is used, never the stored one. A branch coming back out of
+    the cloud mirror is stored in a container there, and the Codex runtime
+    reads plain JSONL: a destination still carrying `.xz` would be a session
+    the runtime never sees, with no error anywhere.
+
+    The template is rendered with ``state``, ``source_dir``, ``file_name`` and
+    ``session_id``; empty segments collapse, so one template can describe a
+    date-partitioned ``sessions/`` tree and a flat ``archived_sessions/`` one.
     """
     if layout_id not in PROVEN_LAYOUTS:
         raise FailSafeError(
             f"Session layout {layout_id!r} is not proven, so a destination path cannot be chosen. "
             "Run the controlled experiment in docs/experiments/session-layout-adapter.md."
         )
-    return PROVEN_LAYOUTS[layout_id].format(
-        state="archived_sessions" if source.state is SessionState.ARCHIVED else "sessions",
-        file_name=source.relative_path.rsplit("/", 1)[-1],
-    )
+    template = PROVEN_LAYOUTS[layout_id]
+    if "{session_id}" in template and not source.session_id:
+        raise FailSafeError(
+            f"Session layout {layout_id!r} names the session id, which this branch does not carry"
+        )
+    try:
+        rendered = template.format(
+            state="archived_sessions" if source.state is SessionState.ARCHIVED else "sessions",
+            source_dir=_source_dir(source.relative_path),
+            file_name=logical_name(source.relative_path.rsplit("/", 1)[-1]),
+            session_id=source.session_id or "",
+        )
+    except (KeyError, IndexError, ValueError) as exc:
+        # ValueError is an unbalanced brace in the template: malformed rather
+        # than unknown, but the same answer -- the layout cannot be rendered.
+        raise FailSafeError(
+            f"Session layout {layout_id!r} cannot be rendered ({exc}); "
+            f"known placeholders are {', '.join(_LAYOUT_FIELDS)}"
+        ) from exc
+    # An empty `source_dir` collapses here rather than leaving `sessions//file`,
+    # which is what lets one template cover a partitioned and a flat state
+    # directory at the same time.
+    segments = [segment for segment in rendered.split("/") if segment]
+    if not segments or any(segment in {".", ".."} for segment in segments):
+        raise FailSafeError(
+            f"Session layout {layout_id!r} rendered {rendered!r}, which is not a usable path"
+        )
+    return "/".join(segments)
+
+
+def _source_dir(relative_path: str) -> str:
+    """The directory a branch sat in below its state folder, on its own machine.
+
+    The state folder itself is dropped because ``{state}`` names it: the source
+    may have held the branch as active while it is archived here, and the
+    template decides which folder it lands in.
+    """
+    directory, _, _ = relative_path.rpartition("/")
+    head, _, tail = directory.partition("/")
+    return tail if head in _STATE_DIRS else directory
+
+
+class _PlanRejected(ValueError):
+    """A plan refused for a reason worth telling the user."""
 
 
 def save_transfer_plan(plan: TransferPlan, path: Path) -> Path:
@@ -486,7 +619,14 @@ def load_transfer_plan(path: Path) -> TransferPlan:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if raw.get("format") != TRANSFER_PLAN_FORMAT:
-            raise ValueError("unsupported transfer plan format")
+            raise _PlanRejected("unsupported transfer plan format")
+        if "mirror_layout_id" not in raw:
+            # The field joined the hashed plan material, so such a plan could
+            # not match its own id even if the value were guessed. Say which
+            # plan it is rather than letting it read as a corrupt one.
+            raise _PlanRejected(
+                "transfer plan predates the mirror layout id; rescan to build a current plan"
+            )
         items = tuple(
             TransferItem(
                 str(entry["session_hash"]),
@@ -509,6 +649,11 @@ def load_transfer_plan(path: Path) -> TransferPlan:
             tuple(str(code) for code in raw.get("codes", ())),
             str(raw["mirror_layout_id"]),
         )
+    except _PlanRejected:
+        # A refusal that already knows why: the generic guard below would
+        # replace it with "invalid", which is exactly the message that leaves a
+        # user unable to tell an old plan from a corrupt one.
+        raise
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("Transfer plan is invalid") from exc
     if _with_plan_id(plan).plan_id != plan.plan_id:

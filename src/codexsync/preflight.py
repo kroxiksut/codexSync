@@ -25,6 +25,7 @@ from .models import AppConfig
 from .runtime import _make_safety_gate
 from .safety_gate import OperationKind, ProcessState
 from .session_catalog import scan_sessions
+from .session_index import SESSION_INDEX_FILE, parse_session_index
 from .sqlite_audit import audit_sqlite
 from .state_locator import resolve_state_dirs
 
@@ -110,6 +111,7 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
         except Exception as exc:
             checks.append(PreflightCheckResult("sqlite_audit", "WARN", f"SQLite audit unavailable: {exc}"))
     if local_dir is not None:
+        checks.append(_check_session_index(local_dir))
         checks.append(_check_global_state_schema(local_dir, cfg))
         checks.append(_check_guardian_latest_good(cfg))
     checks.append(_check_orphan_temp_files(cfg.paths.temp_dir))
@@ -146,6 +148,38 @@ def _check_process_state(cfg: AppConfig, operation: OperationKind) -> PreflightC
         return PreflightCheckResult("codex_process", status, decision.reason)
     status = "FAIL" if operation in {OperationKind.SYNC, OperationKind.RESTORE, OperationKind.REPAIR_APPLY} else "WARN"
     return PreflightCheckResult("codex_process", status, decision.reason)
+
+def _check_session_index(local_dir: Path) -> PreflightCheckResult:
+    """Say what the index holds, and never that it is wrong for holding it.
+
+    A repeated id and a session with no line at all are both normal in an
+    append/update journal, so neither is a warning. What is worth a warning is
+    a record that will not parse, a half-written tail, or the two plausible
+    readings of a repeated id disagreeing -- which happens exactly when a clock
+    ran backwards. An absent index is reported as absent, because it does not
+    mean the sessions are absent.
+    """
+    try:
+        result = parse_session_index(local_dir / SESSION_INDEX_FILE)
+    except OSError as exc:
+        return PreflightCheckResult("session_index", "WARN", f"Index unreadable: {exc}")
+    if "MISSING_INDEX" in result.codes:
+        return PreflightCheckResult(
+            "session_index", "PASS", f"No {SESSION_INDEX_FILE}; sessions are read from disk"
+        )
+    if "EMPTY_INDEX" in result.codes:
+        return PreflightCheckResult(
+            "session_index", "PASS", f"{SESSION_INDEX_FILE} is empty; sessions are read from disk"
+        )
+    codes = [code for code in result.codes if code not in {"MISSING_INDEX", "EMPTY_INDEX"}]
+    status = "WARN" if codes or not result.reductions_agree else "PASS"
+    return PreflightCheckResult(
+        "session_index", status,
+        f"records={len(result.records)} sessions={len(result.reduced)} "
+        f"contract={result.contract.value} reductions_agree={result.reductions_agree} "
+        f"codes={','.join(codes) or 'none'}",
+    )
+
 
 def _check_global_state_schema(local_dir: Path, cfg: AppConfig) -> PreflightCheckResult:
     """Report whether Guardian can recognise this machine's state at all.

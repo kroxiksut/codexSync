@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import shutil
+import textwrap
 import unittest
 import uuid
 
+from codexsync.app import audit_session_index
 from codexsync.exceptions import FailSafeError
 from codexsync.session_index import (
     PROVEN_CONTRACTS,
+    SESSION_INDEX_FILE,
     IndexContract,
     Reduction,
     merge_session_indexes,
     parse_session_index,
     render_session_index,
 )
+
+INDEX_NEWLINE = b"\n"
 
 
 class SessionIndexTests(unittest.TestCase):
@@ -194,6 +200,126 @@ class SessionIndexTests(unittest.TestCase):
         path.write_bytes(payload)
         return path
 
+
+class SessionIndexAuditTests(unittest.TestCase):
+    """`sessions index`: what the two indexes hold, and where they disagree.
+
+    Reading is always safe, so this is available while the consumer contract is
+    still unproven -- and it says so, because a user who sees no index being
+    written deserves the reason rather than silence.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path.cwd() / "test-sandbox" / f"index-audit-{uuid.uuid4().hex}"
+        self.local = self.root / "local-state"
+        self.cloud = self.root / "cloud"
+        self.local.mkdir(parents=True)
+        self.cloud.mkdir(parents=True)
+        self.config_path = self.root / "config.toml"
+        self.config_path.write_text(
+            textwrap.dedent(
+                f"""
+                [sync]
+                mode = "cold"
+
+                [paths]
+                local_state_dir = "{self.local.as_posix()}"
+                cloud_root_dir = "{self.cloud.as_posix()}"
+                backup_dir = "{(self.root / 'backups').as_posix()}"
+                temp_dir = "{(self.root / '.tmp').as_posix()}"
+
+                [state]
+                manifest_file = "{(self.root / 'state' / 'manifest.json').as_posix()}"
+
+                [targets]
+                include_roots = ["sessions"]
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _index(self, directory: Path, rows: list[dict]) -> None:
+        (directory / SESSION_INDEX_FILE).write_bytes(
+            b"".join(json.dumps(row, sort_keys=True).encode("utf-8") + INDEX_NEWLINE for row in rows)
+        )
+
+    def test_an_absent_index_on_both_sides_is_reported_and_not_an_error(self) -> None:
+        report = audit_session_index(self.config_path)
+        self.assertFalse(report["local"]["present"])
+        self.assertFalse(report["cloud"]["present"])
+        self.assertEqual(report["differing"], 0)
+
+    def test_a_repeated_id_counts_once_as_a_session(self) -> None:
+        self._index(self.local, [
+            {"id": "s1", "thread_name": "one", "updated_at": "2026-01-01T00:00:00Z"},
+            {"id": "s1", "thread_name": "renamed", "updated_at": "2026-01-02T00:00:00Z"},
+        ])
+        report = audit_session_index(self.config_path)
+        self.assertEqual(report["local"]["records"], 2)
+        self.assertEqual(report["local"]["sessions"], 1)
+
+    def test_a_session_only_one_side_knows_is_counted_not_conflicted(self) -> None:
+        self._index(self.local, [{"id": "s1", "thread_name": "a", "updated_at": "2026-01-01T00:00:00Z"}])
+        self._index(self.cloud, [])
+        report = audit_session_index(self.config_path)
+        self.assertEqual(report["only_local"], 1)
+        self.assertEqual(report["differing"], 0)
+        self.assertNotIn("INDEX_CONFLICT", report["codes"])
+
+    def test_a_divergent_rename_is_a_conflict_addressed_by_a_hashed_id(self) -> None:
+        self._index(self.local, [{"id": "s1", "thread_name": "here", "updated_at": "2026-01-02T00:00:00Z"}])
+        self._index(self.cloud, [{"id": "s1", "thread_name": "there", "updated_at": "2026-01-03T00:00:00Z"}])
+        report = audit_session_index(self.config_path)
+        self.assertEqual(report["differing"], 1)
+        self.assertIn("INDEX_CONFLICT", report["codes"])
+        self.assertEqual(
+            report["differing_ids"],
+            [hashlib.sha256(b"s1").hexdigest()],
+            "a session id is user content and leaves only as a hash",
+        )
+
+    def test_no_thread_name_or_plain_session_id_reaches_the_report(self) -> None:
+        self._index(self.local, [{"id": "s1", "thread_name": "a private title", "updated_at": "2026-01-02T00:00:00Z"}])
+        self._index(self.cloud, [{"id": "s1", "thread_name": "another title", "updated_at": "2026-01-03T00:00:00Z"}])
+        rendered = json.dumps(audit_session_index(self.config_path))
+        self.assertNotIn("a private title", rendered)
+        self.assertNotIn("another title", rendered)
+        self.assertNotIn('"s1"', rendered)
+
+    def test_the_unproven_contract_is_reported_as_the_standing_reason(self) -> None:
+        self.assertEqual(PROVEN_CONTRACTS, {}, "no contract may be assumed proven")
+        self._index(self.local, [{"id": "s1", "thread_name": "a", "updated_at": "2026-01-01T00:00:00Z"}])
+        report = audit_session_index(self.config_path)
+        self.assertFalse(report["contract_proven"])
+        self.assertIn("UNPROVEN_CONSUMER_CONTRACT", report["codes"])
+
+
+class EmptyIndexTests(unittest.TestCase):
+    """A file that exists but holds nothing says what an absent one says."""
+
+    def setUp(self) -> None:
+        self.root = Path.cwd() / "test-sandbox" / f"empty-index-{uuid.uuid4().hex}"
+        self.root.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_an_empty_index_is_empty_and_not_an_unknown_contract(self) -> None:
+        path = self.root / SESSION_INDEX_FILE
+        path.write_bytes(b"")
+        result = parse_session_index(path)
+        self.assertEqual(result.codes, ("EMPTY_INDEX",))
+        self.assertEqual(result.records, ())
+        self.assertTrue(result.reductions_agree)
+
+    def test_a_whitespace_only_index_is_treated_the_same(self) -> None:
+        path = self.root / SESSION_INDEX_FILE
+        path.write_bytes(b"\n\n")
+        self.assertEqual(parse_session_index(path).codes, ("EMPTY_INDEX",))
 
 if __name__ == "__main__":
     unittest.main()

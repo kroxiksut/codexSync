@@ -48,5 +48,11 @@ config.local.toml
 
 # Russian working documents (local planning notes, not part of the repository)
 *.ru.md
+CLAUDE.md
 # Exception: user-facing translations are tracked
 !README.ru.md
+
+# Saved operation plans: local, machine-specific, and pinned to state bytes
+sessions-plan.json
+repair-plan.json
+resolutions.json

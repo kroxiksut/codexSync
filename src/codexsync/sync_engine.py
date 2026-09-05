@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from .backup import BackupManager
 from .exceptions import FailSafeError
+from .jsonl_codec import JsonlCodec, codec_of, open_jsonl, transcode
 from .models import CopyAction, SyncPlan
 
 LOG = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class SyncEngine:
             stage_root.mkdir(parents=True, exist_ok=False)
             for index, action in enumerate(actions):
                 staged_path = stage_root / f"{index:08d}.payload"
-                self._stage_verified(action.src, staged_path)
+                self._stage_verified(action.src, staged_path, action.codec)
                 staged.append((action, staged_path))
 
             # A complete backup set exists before any destination mutation.
@@ -148,11 +149,36 @@ class SyncEngine:
         path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _stage_verified(source: Path, staged: Path) -> None:
-        before = _sha256_file(source)
-        shutil.copy2(source, staged)
-        staged_hash = _sha256_file(staged)
-        after = _sha256_file(source)
+    def _stage_verified(source: Path, staged: Path, codec: JsonlCodec | None = None) -> None:
+        """Stage the payload and prove it is the source, byte for byte.
+
+        ``codec`` is the container the *destination* wants, and only a caller
+        that knows it is moving a session branch passes one. ``None`` — every
+        ordinary file copy — carries the bytes across untouched, whatever the
+        file happens to be called. A user file named `notes.jsonl.gz` under an
+        included root is a user file, and a sync that unpacked it because of
+        its name would leave content that no longer matches the name.
+
+        Where a branch is being moved the source has a container of its own,
+        read from its name, and the two need not agree: it goes into the cloud
+        mirror compressed and comes back out plain. Where they differ the staged
+        file is a container, so what has to equal the source is what it
+        decompresses to. Hashing the logical stream on both sides keeps the
+        original guarantee exactly: a source that moved mid-copy, and a codec
+        that lost a byte, both fail here rather than after a destination has
+        been replaced.
+        """
+        source_codec = codec_of(source) or JsonlCodec.NONE
+        if codec is None or source_codec is codec:
+            before = _sha256_file(source)
+            shutil.copy2(source, staged)
+            staged_hash = _sha256_file(staged)
+            after = _sha256_file(source)
+        else:
+            before = _sha256_stream(source, source_codec)
+            transcode(source, staged, source_codec, codec)
+            staged_hash = _sha256_stream(staged, codec)
+            after = _sha256_stream(source, source_codec)
         if before != staged_hash or before != after:
             raise FailSafeError("Source changed while preparing the mutation stage")
 
@@ -172,6 +198,15 @@ class SyncEngine:
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_stream(path: Path, codec: JsonlCodec) -> str:
+    """Hash what a staged container decompresses to, never its stored bytes."""
+    digest = hashlib.sha256()
+    with open_jsonl(path, codec) as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()

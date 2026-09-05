@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import Iterator
 
+from .jsonl_codec import JSONL_READ_ERRORS, is_branch_file, logical_name, open_jsonl
+
 
 DEFAULT_MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024
 
@@ -105,7 +107,9 @@ def _walk_jsonl(directory: Path, state_root: Path) -> Iterator[Path]:
             safe_dirs.append(name)
         dirs[:] = safe_dirs
         for name in files:
-            if not name.lower().endswith(".jsonl"):
+            # A branch is recognised by its logical name, not by its container:
+            # the cloud mirror may store the same history compressed.
+            if not is_branch_file(name):
                 continue
             path = current_path / name
             if path.is_symlink() or _is_reparse(path):
@@ -130,7 +134,9 @@ def _scan_jsonl(
     codes: list[str] = []
     complete_tail = True
     try:
-        with path.open("rb") as handle:
+        # Every metric below is taken from the decompressed stream, so a branch
+        # kept in a compressed container is the same branch as the plain one.
+        with open_jsonl(path) as handle:
             while True:
                 line = handle.readline(max_line_bytes + 1)
                 if not line:
@@ -174,20 +180,37 @@ def _scan_jsonl(
                     timestamp = payload.get("timestamp") if isinstance(payload.get("timestamp"), str) else None
                     parent_id = payload.get("parent_thread_id") if isinstance(payload.get("parent_thread_id"), str) else None
                 elif record.get("type") == "session_meta":
-                    codes.append("DUPLICATE_SESSION_META")
-    except OSError:
+                    # A second `session_meta` is how the runtime records that
+                    # the session was resumed, not damage: on the machine this
+                    # was measured against, 54 of 252 files carry one (up to 298
+                    # in a single file, 267 MiB of 864 MiB in total) and in none
+                    # of them does the id, cwd, timestamp, source, originator or
+                    # parent differ from the first. Only the identity has to
+                    # agree; the later record also carries fields the first one
+                    # predates, such as `memory_mode`.
+                    repeated = record.get("payload")
+                    repeated_id = repeated.get("id") if isinstance(repeated, dict) else None
+                    if session_id is not None and repeated_id == session_id:
+                        codes.append("RESUMED_SESSION")
+                    else:
+                        # Two identities in one file: which history this is
+                        # cannot be decided, so it is not decided.
+                        codes.append("CONFLICTING_SESSION_META")
+    except JSONL_READ_ERRORS:
+        # Includes a truncated or corrupt container, which is what a mirror
+        # being written by a cloud client looks like mid-copy.
         codes.append("READ_ERROR")
     after = path.stat()
     if _signature(before) != _signature(after):
         codes.append("READ_CHANGED")
     if not complete_tail:
         codes.append("INCOMPLETE_TAIL" if volatile else "INVALID_TAIL")
-    hint = path.stem
+    hint = Path(logical_name(path.name)).stem
     if session_id and session_id not in hint:
         codes.append("FILENAME_ID_MISMATCH")
     invalid_codes = {
         "LINE_TOO_LARGE", "NUL_BYTE", "UNSUPPORTED_BOM", "INVALID_RECORD", "RECORD_NOT_OBJECT",
-        "MISSING_INITIAL_SESSION_META", "MISSING_SESSION_ID", "DUPLICATE_SESSION_META", "READ_ERROR",
+        "MISSING_INITIAL_SESSION_META", "MISSING_SESSION_ID", "CONFLICTING_SESSION_META", "READ_ERROR",
         "READ_CHANGED", "INVALID_TAIL",
     }
     state = SessionState.INVALID if invalid_codes.intersection(codes) else lifecycle

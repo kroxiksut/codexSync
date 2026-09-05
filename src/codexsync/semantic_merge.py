@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 import unicodedata
 
+from .jsonl_codec import JSONL_READ_ERRORS, open_jsonl
+
 
 class BranchRelation(str, Enum):
     #: Same records in the same order.
@@ -142,7 +144,7 @@ def compare_session_branches(
     """
     try:
         reading = _read_pair(local, remote, max_line_bytes)
-    except (OSError, ValueError) as exc:
+    except (*JSONL_READ_ERRORS, ValueError) as exc:
         return BranchComparison(
             BranchRelation.INVALID, 0, 0, 0, "", "", detail=f"branch unreadable: {exc}"
         )
@@ -198,7 +200,7 @@ def _read_pair(
     diverged = False
     status = CanonicalStatus.EXACT
 
-    with local.open("rb") as local_handle, remote.open("rb") as remote_handle:
+    with open_jsonl(local) as local_handle, open_jsonl(remote) as remote_handle:
         while True:
             local_line = _readline(local_handle, max_line_bytes)
             remote_line = _readline(remote_handle, max_line_bytes)

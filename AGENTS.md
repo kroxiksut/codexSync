@@ -36,6 +36,29 @@ Implement:
 5. Backup before overwrite
 6. Exclude temp/lock/cache files
 
+## 0.2 capabilities
+
+The MVP list above is delivered. 0.2 adds, on the same safety model:
+
+7. Guardian: immutable, verified snapshots of `.codex-global-state.json` taken
+   while Codex is running, written only outside `.codex`
+8. One authority over every mutation (`safety_gate`) and one envelope around it:
+   lock, durable journal, verified backup, final process check, atomic replace
+9. `recover inspect|resume|rollback` as the only way out of an interrupted
+   mutation
+10. `repair-projects`: rebuild project bindings after a machine handoff, as an
+    exact plan confirmed by its id
+11. `sessions`: semantic classification and transfer of session branches; a
+    divergence is reported, never merged
+12. `chats`: find a chat, see why it sits where it does, move it under a project
+
+Not delivered and deliberately inert until a controlled experiment records the
+runtime's real behaviour: writing a transferred branch into `.codex`, and
+rewriting `session_index.jsonl`.
+
+A GUI exists only as groundwork behind the optional `codexsync[gui]` extra. 0.2
+is a command-line release.
+
 ## Safety rules
 
 * Never write into state while Codex is running

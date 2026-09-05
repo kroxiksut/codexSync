@@ -28,6 +28,12 @@ from pathlib import Path
 from .exceptions import FailSafeError
 
 
+#: Name of the index inside a Codex state directory, and of codexSync's own
+#: copy of it in the cloud root. Named once so a check, an audit and the
+#: semantic-owned path list cannot drift apart.
+SESSION_INDEX_FILE = "session_index.jsonl"
+
+
 class IndexContract(str, Enum):
     #: Records are objects carrying string ``id``/``thread_name``/``updated_at``.
     #: Recognising the shape says nothing about how a consumer reduces them.
@@ -111,6 +117,11 @@ def parse_session_index(
         return IndexParseResult((), {}, {}, contract or IndexContract.UNKNOWN, ("MISSING_INDEX",))
 
     lines = payload.splitlines(keepends=True)
+    if not payload.strip():
+        # A file that exists but holds nothing says exactly what an absent one
+        # says: no session has a line yet. Calling that an unrecognised contract
+        # would warn about a freshly created index.
+        return IndexParseResult((), {}, {}, contract or IndexContract.UNKNOWN, ("EMPTY_INDEX",))
     recognised = bool(lines)
     for number, line in enumerate(lines, 1):
         complete = line.endswith((b"\n", b"\r"))

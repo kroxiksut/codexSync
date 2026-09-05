@@ -1,4 +1,27 @@
-"""Strictly read-only, schema-level audit of Codex SQLite assets."""
+"""Strictly read-only, schema-level audit of Codex SQLite assets.
+
+Read-only here has to mean read-only about the *files*, not merely about the
+rows, and SQLite makes that harder than it looks. Opening a WAL database
+creates ``-wal`` and ``-shm`` beside it if they are absent, in C, below every
+Python-level guard this project has -- measured: a plain ``mode=ro`` open of a
+cleanly closed database created both files inside the state directory. That is
+the one thing `doctor` and every scan must never do, and it is invisible to
+`tests/test_guardian_state_isolation.py` because no Python call is involved.
+
+So the connection is chosen by what is already on disk (`_read_only_connect`):
+
+* no ``-wal`` -- nothing is pending, so the main file holds the whole truth and
+  ``immutable=1`` reads it without any WAL machinery and creates nothing. The
+  absence is re-checked afterwards, because Codex could have started meanwhile,
+  and a ``-wal`` that appeared makes the reading indeterminate rather than
+  merely old.
+* a ``-wal`` with a ``-shm`` beside it -- the normal running case. Both files
+  exist already, so opening creates nothing; the ``-shm`` mtime moves, which is
+  what any reader including Codex does to it, and its bytes do not change.
+* a ``-wal`` with no ``-shm`` -- opening would create one. Refused as
+  ``INDETERMINATE``: a crashed writer's database is exactly where guessing is
+  least affordable, and no reading is worth a write into `.codex`.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -94,8 +117,20 @@ def read_thread_placements(
     somewhere the catalogue does not name makes it invisible, with no error.
     """
     root = state_root.resolve()
+    discovered = discover_sqlite_sets(root)
+    unopenable = [
+        item for item in discovered
+        if _would_create_a_sidecar(root / Path(item.database.relative_path))
+    ]
+    if unopenable:
+        # A database we declined to open is not a database that is not there.
+        # `ABSENT` constrains nothing and would let a write proceed unchecked;
+        # the honest answer is that the catalogue could not be consulted.
+        return ThreadPlacements(
+            PlacementStatus.INDETERMINATE, {}, codes=(WAL_WITHOUT_SHARED_INDEX,)
+        )
     catalogues = [
-        item for item in discover_sqlite_sets(root)
+        item for item in discovered
         if _looks_like_thread_catalogue(root, item, timeout_seconds)
     ]
     if not catalogues:
@@ -106,17 +141,19 @@ def read_thread_placements(
     codes: list[str] = []
     for item in catalogues:
         database = root / Path(item.database.relative_path)
+        immutable = not _has_pending_frames(database)
         try:
-            connection = sqlite3.connect(
-                f"file:{database.as_posix()}?mode=ro", uri=True, timeout=timeout_seconds
-            )
+            connection = _read_only_connect(database, timeout_seconds)
         except sqlite3.Error:
             return ThreadPlacements(
                 PlacementStatus.INDETERMINATE, {}, codes=("CATALOG_UNAVAILABLE",)
             )
+        if connection is None:
+            # Opening would create a shared-index file inside the state root.
+            return ThreadPlacements(
+                PlacementStatus.INDETERMINATE, {}, codes=(WAL_WITHOUT_SHARED_INDEX,)
+            )
         try:
-            connection.execute("PRAGMA query_only=ON")
-            connection.execute(f"PRAGMA busy_timeout={max(1, int(timeout_seconds * 1000))}")
             for thread_id, rollout, is_archived in connection.execute(
                 "SELECT id, rollout_path, archived FROM threads"
             ):
@@ -131,6 +168,11 @@ def read_thread_placements(
             )
         finally:
             connection.close()
+        if _wal_appeared(database, immutable):
+            # A writer started mid-read, so this picture was never a whole state.
+            return ThreadPlacements(
+                PlacementStatus.INDETERMINATE, {}, codes=("CATALOG_CHANGED",)
+            )
     if any(value is None for value in by_session.values()):
         codes.append("ROLLOUT_PATH_OUTSIDE_STATE_ROOT")
     return ThreadPlacements(
@@ -138,17 +180,84 @@ def read_thread_placements(
     )
 
 
+#: Reason a database could not be opened without writing beside it.
+WAL_WITHOUT_SHARED_INDEX = "WAL_WITHOUT_SHARED_INDEX"
+
+
+def _sidecars(database: Path) -> tuple[Path, Path]:
+    return (
+        database.with_name(database.name + "-wal"),
+        database.with_name(database.name + "-shm"),
+    )
+
+
+def _has_pending_frames(database: Path) -> bool:
+    """Whether the write-ahead log holds anything the main file lacks.
+
+    A ``-wal`` truncated to zero bytes is what a clean checkpoint leaves: no
+    frames, so the main database is already the whole truth. That distinction
+    is what lets a closed Codex be read without rebuilding the shared index --
+    and rebuilding it is a write into `.codex`, measured on a real machine as
+    the ``-shm`` mtime moving on every `doctor`.
+    """
+    wal, _ = _sidecars(database)
+    try:
+        return wal.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _would_create_a_sidecar(database: Path) -> bool:
+    """Whether opening this database would write a file beside it."""
+    wal, shm = _sidecars(database)
+    return wal.exists() and _has_pending_frames(database) and not shm.exists()
+
+
+def _read_only_connect(database: Path, timeout_seconds: float) -> sqlite3.Connection | None:
+    """Open for reading without creating a file next to the database.
+
+    Returns ``None`` when that is impossible, which the caller reports rather
+    than works around.
+    """
+    if _would_create_a_sidecar(database):
+        return None
+    uri = f"file:{database.as_posix()}?mode=ro"
+    if not _has_pending_frames(database):
+        # No pending frames, so the main file is the whole database and the WAL
+        # machinery -- the part that creates and rewrites files -- is not needed
+        # to read it. This covers a `-wal` that exists but is empty, which is a
+        # cleanly closed Codex: opening that one normally rebuilds the stale
+        # shared index, and rebuilding it writes.
+        uri += "&immutable=1"
+    connection = sqlite3.connect(uri, uri=True, timeout=timeout_seconds)
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute(f"PRAGMA busy_timeout={max(1, int(timeout_seconds * 1000))}")
+    return connection
+
+
+def _wal_appeared(database: Path, opened_immutable: bool) -> bool:
+    """Whether a writer started while an immutable reading was in progress.
+
+    ``immutable=1`` also gives up locking, so a Codex that began writing during
+    the read would leave us holding a picture that was never a whole state. The
+    ``-wal`` appearing is that event, and the answer is to report it, not to
+    keep the reading.
+    """
+    if not opened_immutable:
+        return False
+    return _has_pending_frames(database)
+
+
 def _looks_like_thread_catalogue(root: Path, item: SQLiteSet, timeout_seconds: float) -> bool:
     """Whether this database has the exact table and columns to read."""
     database = root / Path(item.database.relative_path)
     try:
-        connection = sqlite3.connect(
-            f"file:{database.as_posix()}?mode=ro", uri=True, timeout=timeout_seconds
-        )
+        connection = _read_only_connect(database, timeout_seconds)
     except sqlite3.Error:
         return False
+    if connection is None:
+        return False
     try:
-        connection.execute("PRAGMA query_only=ON")
         columns = {str(row[1]) for row in connection.execute('PRAGMA table_info("threads")')}
     except sqlite3.Error:
         return False
@@ -210,13 +319,16 @@ def audit_sqlite(state_root: Path, *, cold: bool = False, timeout_seconds: float
 def _audit_one(root: Path, asset_set: SQLiteSet, *, cold: bool, timeout_seconds: float) -> SQLiteAuditReport:
     database = root / Path(asset_set.database.relative_path)
     before = _set_signature(root, asset_set)
-    uri = f"file:{database.as_posix()}?mode=ro"
+    immutable = not _has_pending_frames(database)
     codes: list[str] = []
     try:
-        connection = sqlite3.connect(uri, uri=True, timeout=timeout_seconds)
+        connection = _read_only_connect(database, timeout_seconds)
+        if connection is None:
+            return SQLiteAuditReport(
+                asset_set, SQLiteRole.UNKNOWN, "INDETERMINATE", None, None, None, None, 0, 0, 0,
+                codes=(WAL_WITHOUT_SHARED_INDEX,),
+            )
         try:
-            connection.execute("PRAGMA query_only=ON")
-            connection.execute(f"PRAGMA busy_timeout={max(1, int(timeout_seconds * 1000))}")
             user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
             journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
@@ -244,6 +356,8 @@ def _audit_one(root: Path, asset_set: SQLiteSet, *, cold: bool, timeout_seconds:
     after_sets = discover_sqlite_sets(root)
     after_match = next((item for item in after_sets if item.database.relative_path == asset_set.database.relative_path), None)
     if after_match is None or _set_signature(root, after_match) != before:
+        codes.append("READ_CHANGED")
+    if _wal_appeared(database, immutable):
         codes.append("READ_CHANGED")
     status = "PASS" if not codes and (quick_errors in {None, 0}) and (foreign_errors in {None, 0}) else "INDETERMINATE"
     return SQLiteAuditReport(

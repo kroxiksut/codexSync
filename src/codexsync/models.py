@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .guardian_models import GuardianConfig
+from .jsonl_codec import JsonlCodec
 from .path_mapping import PathMappingRule
 
 
@@ -103,6 +104,9 @@ class LoggingConfig:
 class SemanticConfig:
     root_dir: Path
     max_jsonl_line_bytes: int = 64 * 1024 * 1024
+    #: Container the cloud mirror stores a branch in. Only the mirror: a branch
+    #: written into a directory the Codex runtime reads is always plain JSONL.
+    mirror_compression: JsonlCodec = JsonlCodec.XZ
 
 
 @dataclass(slots=True)
@@ -136,6 +140,17 @@ class CopyAction:
     src: Path
     dst: Path
     relative_path: str
+    #: Container the destination is written in, for an action that knows it is
+    #: moving a session branch. ``None`` -- the default, and what every ordinary
+    #: file copy uses -- means the bytes are carried across untouched.
+    #:
+    #: The distinction is load-bearing: a file named `notes.jsonl.gz` under an
+    #: included root is a user's file, not a branch, and a plain `sync` that
+    #: decompressed it because of its name would write content that no longer
+    #: matches it. Only a transfer plan, which knows what it is carrying, sets
+    #: this -- to NONE for a directory the Codex runtime reads, or to the
+    #: mirror's container.
+    codec: JsonlCodec | None = None
 
 
 @dataclass(slots=True, frozen=True)

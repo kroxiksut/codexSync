@@ -72,11 +72,19 @@ from .semantic_transfer import (
     build_transfer_plan,
     descriptors_by_session_hash,
     load_transfer_plan,
+    mirror_codec_for,
     save_transfer_plan,
 )
 from .semantic_store import SemanticStore
+from .jsonl_codec import JSONL_READ_ERRORS, JsonlCodec, codec_of, open_jsonl
 from .sqlite_audit import read_thread_placements
 from .session_catalog import scan_sessions
+from .session_index import (
+    PROVEN_CONTRACTS,
+    SESSION_INDEX_FILE,
+    IndexParseResult,
+    parse_session_index,
+)
 from .stable_reader import StableReader
 from .state_locator import detect_local_state_dir, resolve_state_dirs
 from .sync_engine import SyncEngine
@@ -577,9 +585,83 @@ def scan_session_transfer(
         resolutions=resolutions,
         confirmed_bases=_recorded_bases(cfg),
         placements=read_thread_placements(local_dir),
+        mirror_codec=cfg.semantic.mirror_compression,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=volatile,
     )
+
+
+def audit_session_index(config_path: Path) -> dict:
+    """Report what each side's ``session_index.jsonl`` says. Reads only.
+
+    The index is an append/update journal, so a repeated id is normal and a
+    session with no line at all is normal: this never decides that a session
+    exists or stopped existing, and nothing here removes or rewrites a line.
+    On the machine this was measured against the local index holds 191 records
+    for 151 distinct sessions, which is what that journal shape looks like.
+
+    Two things are worth knowing about before an index is ever rewritten, and
+    both are reported rather than acted on. A repeated id has two plausible
+    readings — last line wins, or greatest ``updated_at`` wins — and they differ
+    exactly when a clock ran backwards; disagreement shows up as
+    ``REDUCTION_AMBIGUOUS``. And the two sides may hold a different record for
+    one session, which is a rename divergence: a decision, not a merge.
+
+    Rendering a new index stays refused until the consumer contract is proven
+    (``docs/experiments/session-index-contract.md``), so this command exists to
+    say what an index contains and where the two disagree, and nothing more.
+    """
+    cfg = load_config(config_path)
+    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    local = parse_session_index(local_dir / SESSION_INDEX_FILE)
+    cloud = parse_session_index(cfg.paths.cloud_root_dir / SESSION_INDEX_FILE)
+
+    only_local = sorted(set(local.reduced) - set(cloud.reduced))
+    only_cloud = sorted(set(cloud.reduced) - set(local.reduced))
+    differing = sorted(
+        session_id for session_id in set(local.reduced) & set(cloud.reduced)
+        if local.reduced[session_id].digest != cloud.reduced[session_id].digest
+    )
+
+    codes: list[str] = []
+    if differing:
+        codes.append("INDEX_CONFLICT")
+    for side in (local, cloud):
+        codes.extend(
+            code for code in side.codes if code not in {"MISSING_INDEX", "EMPTY_INDEX"}
+        )
+    if local.contract not in PROVEN_CONTRACTS:
+        # Not a fault of this state: it is the standing reason no index is
+        # rewritten, reported so the user is never left guessing why.
+        codes.append("UNPROVEN_CONSUMER_CONTRACT")
+
+    return {
+        "local": _index_side(local),
+        "cloud": _index_side(cloud),
+        "only_local": len(only_local),
+        "only_cloud": len(only_cloud),
+        "differing": len(differing),
+        # Session ids and thread names are user content and never printed; a
+        # divergence is addressed by the same hashed id `merge_session_indexes`
+        # uses for a conflict.
+        "differing_ids": [
+            hashlib.sha256(session_id.encode("utf-8")).hexdigest() for session_id in differing
+        ],
+        "contract_proven": local.contract in PROVEN_CONTRACTS,
+        "codes": list(dict.fromkeys(codes)),
+    }
+
+
+def _index_side(result: IndexParseResult) -> dict:
+    return {
+        "present": "MISSING_INDEX" not in result.codes,
+        "empty": "EMPTY_INDEX" in result.codes,
+        "records": len(result.records),
+        "sessions": len(result.reduced),
+        "contract": result.contract.value,
+        "reductions_agree": result.reductions_agree,
+        "codes": list(result.codes),
+    }
 
 
 def _recorded_bases(cfg: AppConfig) -> set[str]:
@@ -747,7 +829,9 @@ def apply_session_transfer(
             "delete; delete_policy=never. Move these by hand after taking a backup."
         )
 
-    copies = _transfer_copy_actions(plan, local_dir, cloud_dir, local_by_hash, remote_by_hash)
+    copies = _transfer_copy_actions(
+        plan, local_dir, cloud_dir, local_by_hash, remote_by_hash
+    )
     if not copies.action_count:
         LOG.info("session transfer plan %s has nothing to write", plan.plan_id)
         if not dry_run:
@@ -845,6 +929,11 @@ def _rebuild_transfer_plan(
         confirmed_bases=_recorded_bases(cfg),
         placements=read_thread_placements(local_dir),
         layout_id=plan.layout_id,
+        # The codec the plan was frozen under, not whatever the config says
+        # now. The plan is the contract the user confirmed by its id; a config
+        # edited afterwards applies to the next scan, and reading it here would
+        # rename every destination underneath a confirmation already given.
+        mirror_codec=_plan_mirror_codec(plan),
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=False,
     )
@@ -853,6 +942,10 @@ def _rebuild_transfer_plan(
         descriptors_by_session_hash(local_catalog),
         descriptors_by_session_hash(remote_catalog),
     )
+
+
+def _plan_mirror_codec(plan: TransferPlan) -> JsonlCodec:
+    return mirror_codec_for(plan.mirror_layout_id)
 
 
 def _transfer_copy_actions(
@@ -866,6 +959,10 @@ def _transfer_copy_actions(
 
     The source is always the descendant branch and is only ever read, so a
     failure at any point leaves both branches intact.
+
+    The container comes from the destination the item names, not from the
+    plan-wide mirror layout: a branch the mirror already stores keeps the
+    container it is stored in, so within one plan the two can differ.
     """
     to_local: list[CopyAction] = []
     to_cloud: list[CopyAction] = []
@@ -877,9 +974,12 @@ def _transfer_copy_actions(
         if item.action is TransferAction.FAST_FORWARD_LOCAL:
             source = remote_by_hash.get(item.session_hash)
             root, bucket = local_dir, to_local
+            # A destination the Codex runtime reads is never transformed.
+            codec = JsonlCodec.NONE
         else:
             source = local_by_hash.get(item.session_hash)
             root, bucket = cloud_dir, to_cloud
+            codec = codec_of(item.target_relative_path) or JsonlCodec.NONE
         if source is None:
             raise FailSafeError("A planned branch is no longer present on its source side")
         destination = root / Path(*item.target_relative_path.split("/"))
@@ -890,6 +990,7 @@ def _transfer_copy_actions(
                 src=source_root / Path(*source.relative_path.split("/")),
                 dst=destination,
                 relative_path=item.target_relative_path,
+                codec=codec,
             )
         )
     return SyncPlan(to_local=to_local, to_cloud=to_cloud)
@@ -968,7 +1069,7 @@ def _record_semantic_manifest(
                 agreed=True,
             )
             recorded += 1
-        except (OSError, FailSafeError):
+        except (*JSONL_READ_ERRORS, FailSafeError):
             LOG.exception("Could not record a semantic manifest entry for one session")
     LOG.info("recorded %d manifest entr(y/ies) for plan %s", recorded, plan.plan_id)
     return recorded
@@ -986,10 +1087,17 @@ def _verify_transferred_branches(
         written = root / Path(*(item.target_relative_path or "").split("/"))
         digest = hashlib.sha256()
         records = 0
-        with written.open("rb") as handle:
-            for line in handle:
-                records += 1
-                digest.update(line)
+        try:
+            with open_jsonl(written) as handle:
+                for line in handle:
+                    records += 1
+                    digest.update(line)
+        except JSONL_READ_ERRORS as exc:
+            # A branch that cannot be read back is a failed commit, not an
+            # internal error: say so with the exception the recovery path knows.
+            raise FailSafeError(
+                f"Transferred branch could not be read back after writing: {exc}"
+            ) from exc
         planned_records = (
             item.remote_records if item.action is TransferAction.FAST_FORWARD_LOCAL else item.local_records
         )

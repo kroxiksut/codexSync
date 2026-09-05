@@ -6,6 +6,7 @@ from typing import Any
 
 from .exceptions import ConfigError
 from .guardian_models import GuardianConfig, require_guardian_machine_id
+from .jsonl_codec import parse_codec
 from .path_mapping import PathMappingRule
 from .models import (
     AppConfig,
@@ -152,9 +153,14 @@ def load_config(path: Path) -> AppConfig:
         workspace_root=workspace_root_dir,
     )
     assert semantic_root is not None
+    try:
+        mirror_compression = parse_codec(str(semantic_raw.get("mirror_compression", "xz")))
+    except ValueError as exc:
+        raise ConfigError(f"semantic.mirror_compression: {exc}") from exc
     semantic = SemanticConfig(
         semantic_root,
         int(semantic_raw.get("max_jsonl_line_bytes", 64 * 1024 * 1024)),
+        mirror_compression,
     )
 
     sync = SyncConfig(

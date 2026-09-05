@@ -17,7 +17,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # The CLI exe must never grow a Qt payload just because the build machine
+    # happens to have the optional extra installed. Nothing in the CLI import
+    # graph reaches PySide6, and this makes that a build-time guarantee rather
+    # than a property of whatever was in site-packages that day.
+    excludes=["PySide6", "shiboken6", "PySide6.QtCore", "PySide6.QtWidgets", "PySide6.QtGui"],
     noarchive=False,
     optimize=0,
 )

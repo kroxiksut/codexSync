@@ -44,6 +44,8 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 
+from .jsonl_codec import open_jsonl
+
 from .exceptions import FailSafeError
 
 
@@ -252,8 +254,12 @@ class SemanticStore:
             return destination
         stage = self.root / ".staging" / "conflicts" / uuid4().hex
         _mkdir_private(stage)
-        shutil.copyfile(left, stage / "left.jsonl")
-        shutil.copyfile(right, stage / "right.jsonl")
+        # The bundle is the archival copy of a history that lost, so it keeps
+        # plain JSONL whichever container the branch was read from. Its hashes
+        # are the logical ones the plan named, which is what makes the conflict
+        # id here the same id the user confirmed.
+        _copy_logical(left, stage / "left.jsonl")
+        _copy_logical(right, stage / "right.jsonl")
         _chmod_file(stage / "left.jsonl")
         _chmod_file(stage / "right.jsonl")
         _write_json(stage / "manifest.json", {
@@ -313,10 +319,16 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _copy_logical(source: Path, destination: Path) -> None:
+    """Write the branch's JSONL bytes, decompressing a mirror copy on the way."""
+    with open_jsonl(source) as reader, destination.open("wb") as writer:
+        shutil.copyfileobj(reader, writer, 1024 * 1024)
+
+
 def _file_metrics(path: Path) -> tuple[str, int, int]:
     digest = hashlib.sha256()
     size = lines = 0
-    with path.open("rb") as handle:
+    with open_jsonl(path) as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
             size += len(chunk)

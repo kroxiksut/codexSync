@@ -64,6 +64,14 @@ once_timeout_seconds = 120
 # Immutable semantic publications; may be placed in a user-managed cloud folder.
 root_dir = "${workspace_root}/semantic"
 max_jsonl_line_bytes = 67108864
+# Container the cloud mirror stores a session branch in: none|gzip|xz.
+# Only the mirror is affected; a branch written back into the Codex state
+# directory is always plain JSONL. Branch hashes, record counts and every
+# comparison are taken from the decompressed stream, so a compressed mirror
+# copy is the same branch as the plain one rather than a divergence.
+# Changing this renames every mirror destination and so changes the plan id:
+# rescan and confirm the new id before applying.
+mirror_compression = "xz"
 
 [targets]
 # Relative paths under local_state_dir/cloud_state_dir included in sync
