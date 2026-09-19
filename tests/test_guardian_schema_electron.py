@@ -21,6 +21,7 @@ from codexsync.guardian_schema import (
     BROKEN_ORDER_REFERENCE,
     ELECTRON_V2_SCHEMA,
     LEGACY_V1_SCHEMA,
+    PROJECT_NOT_IN_ORDER,
     UNKNOWN_SCHEMA,
     validate_global_state_references,
 )
@@ -83,6 +84,33 @@ class ElectronStateSchemaTests(unittest.TestCase):
         report = validate_global_state_references(_payload(state))
         self.assertEqual(report.status, ValidationStatus.INVALID)
         self.assertIn(BROKEN_ORDER_REFERENCE, report.codes)
+
+    def test_a_project_the_order_omits_is_a_warning_not_a_rejection(self) -> None:
+        """Observed on a real desktop state: Codex itself wrote projects its order omits.
+
+        Holding this shape to the v1 completeness rule quarantined every real
+        snapshot and made every global-state commit refuse its own result.
+        """
+        state = _electron_state(**{"project-order": ["p1"]})
+        report = validate_global_state_references(_payload(state))
+        self.assertEqual(report.status, ValidationStatus.PASS_WITH_WARNING)
+        self.assertEqual(report.codes, (PROJECT_NOT_IN_ORDER,))
+        self.assertEqual(report.project_count, 2)
+
+    def test_an_omitted_project_does_not_hide_a_broken_binding(self) -> None:
+        state = _electron_state(**{
+            "project-order": ["p1"],
+            "thread-project-assignments": {"t1": {"projectKind": "local", "projectId": "gone"}},
+        })
+        report = validate_global_state_references(_payload(state))
+        self.assertEqual(report.status, ValidationStatus.INVALID)
+        self.assertIn(BROKEN_BINDING_REFERENCE, report.codes)
+
+    def test_the_legacy_shape_still_requires_a_complete_order(self) -> None:
+        legacy = {"local-projects": {"a": {"root": "C:/a"}, "b": {"root": "C:/b"}}, "project-order": ["a"]}
+        report = validate_global_state_references(_payload(legacy))
+        self.assertEqual(report.status, ValidationStatus.INVALID)
+        self.assertEqual(report.schema_id, LEGACY_V1_SCHEMA)
 
     def test_an_unfamiliar_binding_kind_is_unknown_rather_than_half_understood(self) -> None:
         state = _electron_state(

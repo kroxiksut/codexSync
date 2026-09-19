@@ -13,6 +13,8 @@ BROKEN_PROJECT_REFERENCE = "BROKEN_PROJECT_REFERENCE"
 BROKEN_ORDER_REFERENCE = "BROKEN_ORDER_REFERENCE"
 BROKEN_BINDING_REFERENCE = "BROKEN_BINDING_REFERENCE"
 DUPLICATE_ORDER_REFERENCE = "DUPLICATE_ORDER_REFERENCE"
+#: A warning, not a failure: a project the sidebar order does not list.
+PROJECT_NOT_IN_ORDER = "PROJECT_NOT_IN_ORDER"
 
 LEGACY_V1_SCHEMA = "legacy-v1"
 #: The shape written by the Electron Codex desktop app: bindings carry
@@ -382,12 +384,22 @@ def _validate_references(references: StateReferences, byte_report: ValidationRep
         return _report(ValidationStatus.INVALID, DUPLICATE_ORDER_REFERENCE, references, byte_report)
     if not set(order).issubset(project_ids):
         return _report(ValidationStatus.INVALID, BROKEN_ORDER_REFERENCE, references, byte_report)
+    unordered = set(order) != set(project_ids)
     # The v1 fixture contract requires a complete order, including for an empty state.
-    if set(order) != set(project_ids):
+    if unordered and references.schema_id == LEGACY_V1_SCHEMA:
         return _report(ValidationStatus.INVALID, BROKEN_PROJECT_REFERENCE, references, byte_report)
     known_binding_ids = project_ids | references.app_server_project_ids
     if references.has_dangling_explicit_binding or not set(references.binding_project_ids).issubset(known_binding_ids):
         return _report(ValidationStatus.INVALID, BROKEN_BINDING_REFERENCE, references, byte_report)
+    if unordered:
+        # The desktop build writes projects that its sidebar order does not
+        # list: observed on 2026-09-13, two projects created in one millisecond
+        # and absent from `project-order` in a state Codex itself had just
+        # written. Holding the Electron shape to the v1 rule quarantined every
+        # real snapshot and made every commit_global_state post-validation
+        # refuse. An order naming a *missing* project is still invalid above;
+        # a project the order omits loses nothing, so it is reported, not fatal.
+        return _report(ValidationStatus.PASS_WITH_WARNING, PROJECT_NOT_IN_ORDER, references, byte_report)
     return _report(ValidationStatus.PASS, None, references, byte_report)
 
 

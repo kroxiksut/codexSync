@@ -5,6 +5,7 @@ import json
 import shutil
 from pathlib import Path
 
+from .guardian_accept import SHRINK_ACCEPTED
 from .guardian_manifest import load_guardian_manifest, verify_guardian_snapshot
 from .guardian_models import (
     GUARDIAN_COMMITTED_NAME,
@@ -25,7 +26,12 @@ def prune_snapshots(
     max_snapshots: int = 100,
     now: datetime | None = None,
 ) -> list[str]:
-    """Prune only verified snapshots, never latest-good or its predecessor."""
+    """Prune only verified snapshots, never latest-good or its predecessor.
+
+    Also never a snapshot a person accepted over a suspicious shrink, nor the
+    baseline it overrode (``guardian_accept``). Both are rare, and the second
+    is the only record of what the state looked like before the drop.
+    """
     if retention_days < 0 or max_snapshots < 0:
         raise ValueError("Guardian retention values must be >= 0")
     root = root_dir.resolve()
@@ -33,6 +39,7 @@ def prune_snapshots(
     if not snapshots_root.is_dir():
         return []
     entries: list[tuple[datetime, GuardianSnapshot]] = []
+    decisions: set[str] = set()
     for directory in snapshots_root.iterdir():
         if directory.is_symlink() or not directory.is_dir() or not (directory / GUARDIAN_COMMITTED_NAME).is_file():
             continue
@@ -46,9 +53,13 @@ def prune_snapshots(
         except Exception:
             continue
         entries.append((created, snapshot))
+        if SHRINK_ACCEPTED in manifest.validation_codes:
+            decisions.add(manifest.snapshot_id)
+            if manifest.previous_good_snapshot_id is not None:
+                decisions.add(manifest.previous_good_snapshot_id)
     entries.sort(key=lambda item: item[1].generation, reverse=True)
     latest = resolve_or_restore_latest_good(root, machine_id)
-    protected = {latest.snapshot_id} if latest else set()
+    protected = ({latest.snapshot_id} if latest else set()) | decisions
     if latest:
         older = [item[1] for item in entries if item[1].generation < latest.generation]
         if older:

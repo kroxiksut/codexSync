@@ -109,6 +109,33 @@ class SemanticConfig:
     mirror_compression: JsonlCodec = JsonlCodec.XZ
 
 
+#: Jobs the scheduler may run. Every one of them is read-only towards the Codex
+#: state: a scheduled task fires with nobody watching, so it can never be the
+#: thing that decides a write is safe. `sync` is deliberately not a mode.
+SCHEDULER_MODES: tuple[str, ...] = ("guardian_snapshot", "preflight", "sync_dry_run")
+
+#: Shortest accepted repeat interval. The operating system schedulers cannot
+#: reliably honour less, and a Guardian snapshot already polls on its own.
+MIN_SCHEDULER_INTERVAL_SECONDS = 60
+
+
+@dataclass(slots=True, frozen=True)
+class SchedulerConfig:
+    """The `[scheduler]` section (CS-232): periodic safe work as a user-level task.
+
+    Values are stored as read from the file and checked by `_validate_config`
+    rather than coerced here, so `enabled = "true"` is refused instead of being
+    silently read as a truthy string.
+    """
+
+    enabled: bool = False
+    mode: str = "guardian_snapshot"
+    interval_seconds: int = 60
+    run_at_login: bool = True
+    startup_delay_seconds: int = 0
+    jitter_seconds: int = 0
+
+
 @dataclass(slots=True)
 class AppConfig:
     identity: IdentityConfig
@@ -125,6 +152,7 @@ class AppConfig:
     guardian: GuardianConfig = field(default_factory=lambda: GuardianConfig(root_dir=Path("guardian")))
     path_mappings: list[PathMappingRule] = field(default_factory=list)
     semantic: SemanticConfig = field(default_factory=lambda: SemanticConfig(root_dir=Path("semantic")))
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
 
 
 @dataclass(slots=True, frozen=True)
@@ -172,11 +200,33 @@ class SyncManifest:
 
 
 @dataclass(slots=True)
+class DeleteAction:
+    """One file to remove because the other side proved it was removed there.
+
+    Only ever produced under `sync.delete_policy = "propagate"`, and only for a
+    path the previous manifest shows both sides held and this side has not
+    touched since (`D-013`). Carries the relative path so the file can be
+    backed up -- and restored -- by the same name as any overwrite.
+    """
+
+    path: Path
+    relative_path: str
+    #: ``local`` or ``cloud``: which side the file is being removed from.
+    side: str
+
+
+@dataclass
 class SyncPlan:
     to_local: list[CopyAction] = field(default_factory=list)
     to_cloud: list[CopyAction] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)
+    #: Files a proven deletion on the other side removes here.
+    deletions: list[DeleteAction] = field(default_factory=list)
+    #: Paths a one-way direction did not act on. They are *not* synchronised,
+    #: which is why the manifest carries their previous entry over unchanged
+    #: instead of recording what both sides look like now (`D-012`).
+    skipped: list[str] = field(default_factory=list)
 
     @property
     def action_count(self) -> int:
-        return len(self.to_local) + len(self.to_cloud)
+        return len(self.to_local) + len(self.to_cloud) + len(self.deletions)

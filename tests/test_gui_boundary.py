@@ -56,7 +56,14 @@ FORBIDDEN = frozenset({
     "guardian_store",
     "guardian_runner",
     "semantic_store",
+    # Both write files; the window reaches them only through app.py.
+    "config_edit",
+    "system_scheduler",
 })
+
+#: The modules allowed to import Qt. Everything else in the package -- the
+#: launcher, the controller, the catalogue, the theme -- must import without it.
+QT_MODULES = ("window.py", "widgets.py", "screens")
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -109,7 +116,8 @@ class BoundaryTests(unittest.TestCase):
     def test_no_qt_import_survives_outside_the_window(self) -> None:
         """Importing the package must not pull the toolkit in by itself."""
         for path in sorted(GUI.rglob("*.py")):
-            if path.name == "window.py":
+            relative = path.relative_to(GUI).parts
+            if relative[0] in QT_MODULES:
                 continue
             with self.subTest(module=path.name):
                 self.assertNotIn("PySide6", _imported_modules(path))

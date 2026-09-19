@@ -20,6 +20,11 @@ Before your first contribution is accepted, you must agree to the terms in [CLA.
 4. Add or update tests when behavior changes.
 5. Open a pull request.
 
+## Documentation
+
+- User documentation lives in `docs/en/`, with the same pages in Russian in `docs/ru/` and in Chinese in `docs/zh/`; a change to one language is a change to all three. `python -m pytest tests/test_docs_links.py` checks that the pages match and that every link resolves.
+- Developer documents live in `docs/dev/`: [decisions](./docs/dev/DECISIONS.md), the [release checklist](./docs/dev/PUBLISHING.md), and the [controlled experiments](./docs/dev/experiments) that open the gates which are still closed.
+
 ## Test and Platform Notes
 
 - Project packaging requires Python `3.11+` (see `pyproject.toml`).

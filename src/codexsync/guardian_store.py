@@ -45,6 +45,10 @@ QUARANTINE_REASON_CODES = frozenset(
         "BROKEN_PROJECT_REFERENCE", "BROKEN_ORDER_REFERENCE", "BROKEN_BINDING_REFERENCE",
         "PROJECT_COUNT_DROP", "BINDING_COUNT_DROP", "READ_CHANGED", "READ_ERROR", "VALIDATOR_ERROR",
         "DUPLICATE_ORDER_REFERENCE", "BASELINE_UNVERIFIED", "BASELINE_SCHEMA_MISMATCH",
+        # Warnings ride along with a rejection: a state that carries one and is
+        # then judged a suspicious shrink must still reach quarantine, not crash
+        # the pipeline before it (observed on a real state on 2026-09-13).
+        "PROJECT_NOT_IN_ORDER", "UTF8_BOM",
     }
 )
 

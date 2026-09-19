@@ -8,17 +8,20 @@ need PySide6 to look at it.
 The argument surface deliberately stops at ``-c``. Every other choice belongs
 to a screen, where it can be shown next to what it affects; a GUI that also
 took the CLI's flags would be a second place to spell the same options wrong.
+
+Without ``-c`` the file is chosen by `locations.choose_config_path`: the path
+last opened, then the working directory, then the exe's folder, then the
+per-user location. Naming a missing path with ``-c`` still wins -- that is a
+request to create the config there.
 """
 from __future__ import annotations
 
 import argparse
 import importlib.util
-from pathlib import Path
 import sys
 
 from ..exit_codes import ExitCode
 from . import MISSING_QT_MESSAGE
-from .controller import Controller
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Optional graphical shell over the codexSync core.",
     )
     parser.add_argument(
-        "-c", "--config", default="config.toml",
+        "-c", "--config", default=None,
         help="Path to the same config.toml the command line uses",
     )
     return parser
@@ -50,7 +53,6 @@ def _qt_is_available() -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config_path = Path(args.config).expanduser()
 
     if not _qt_is_available():
         # The extra was never installed. That is a configuration answer, not a
@@ -65,7 +67,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from .window import launch
 
-    return launch(Controller(config_path))
+    # Which config to open is decided inside `launch`: the remembered path
+    # lives in QSettings, and this module may not name the toolkit -- the
+    # boundary test reads its imports and a launcher that cannot be read
+    # without PySide6 is the thing that test exists to prevent.
+    return launch(args.config)
 
 
 if __name__ == "__main__":

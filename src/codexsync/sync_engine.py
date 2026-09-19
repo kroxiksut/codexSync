@@ -13,7 +13,7 @@ from collections.abc import Callable
 from .backup import BackupManager
 from .exceptions import FailSafeError
 from .jsonl_codec import JsonlCodec, codec_of, open_jsonl, transcode
-from .models import CopyAction, SyncPlan
+from .models import CopyAction, DeleteAction, SyncPlan
 
 LOG = logging.getLogger(__name__)
 
@@ -55,8 +55,13 @@ class SyncEngine:
 
     def execute(self, plan: SyncPlan, dry_run: bool = True) -> None:
         actions = [*plan.to_local, *plan.to_cloud]
+        deletions = list(plan.deletions)
         for action in actions:
             LOG.info("copy %s -> %s", action.src, action.dst)
+        for deletion in deletions:
+            # Its own line, at its own level: a deletion is the one action that
+            # cannot be undone by running the sync again (`AI_RULES` 6).
+            LOG.warning("delete %s (%s side)", deletion.path, deletion.side)
         if dry_run:
             return
         if not self._backup_before_overwrite:
@@ -80,6 +85,15 @@ class SyncEngine:
                     backup_path = self._backup_manager.backup_file(action.dst, action.relative_path)
                     if backup_path is None:
                         raise FailSafeError("Failed to create required backup before mutation")
+            for deletion in deletions:
+                # A file that vanished between the plan and now is not a file
+                # this run may delete: the plan described something else.
+                backup_path = self._backup_manager.backup_file(deletion.path, deletion.relative_path)
+                if backup_path is None:
+                    raise FailSafeError(
+                        f"Cannot delete {deletion.relative_path}: it could not be backed up"
+                    )
+                LOG.warning("backup before delete %s -> %s", deletion.path, backup_path)
 
             self._backup_manager.finalize()
 
@@ -92,10 +106,34 @@ class SyncEngine:
                 if self._before_replace_check is not None:
                     self._before_replace_check()
                 self._replace_staged(action, staged_path)
+            for deletion in deletions:
+                if self._before_replace_check is not None:
+                    self._before_replace_check()
+                self._remove_backed_up(deletion)
             if self._after_success is not None:
                 self._after_success()
         finally:
             shutil.rmtree(stage_root, ignore_errors=True)
+
+    def _remove_backed_up(self, deletion: DeleteAction) -> None:
+        """Remove one file whose backup is already committed and verified.
+
+        The backup was written and hashed in the backup phase above, before any
+        destination was touched, so by the time this runs the copy that
+        `recover --rollback` would restore from already exists.
+        """
+        try:
+            deletion.path.unlink()
+        except FileNotFoundError:
+            # Someone else removed it while this ran. The end state is the one
+            # the plan asked for, and the backup still holds the content.
+            LOG.warning("delete %s: already gone", deletion.path)
+            return
+        except OSError as exc:
+            raise FailSafeError(f"Could not delete {deletion.relative_path}: {exc}") from exc
+        if deletion.path.exists():
+            raise FailSafeError(f"Deletion of {deletion.relative_path} did not take effect")
+        LOG.warning("deleted %s", deletion.path)
 
     def _replace_staged(self, action: CopyAction, staged: Path) -> None:
         self._ensure_parent(action.dst)

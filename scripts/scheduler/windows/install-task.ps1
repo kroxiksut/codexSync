@@ -4,6 +4,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# DEPRECATED: task.config.ps1 is a second source of scheduler settings next to
+# config.toml. Kept working for existing installs; see docs/en/CONFIGURATION.md.
+Write-Warning ("DEPRECATED: install-task.ps1 and task.config.ps1 will be removed in a later release. " +
+    "Set [scheduler] in config.toml and run 'codexsync -c <config.toml> automation apply' instead. " +
+    "If you continue, remove this task first (remove-task.ps1) before using automation apply, so two tasks do not run.")
+
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "Config file not found: $ConfigPath"
 }

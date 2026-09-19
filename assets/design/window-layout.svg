@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Каркас окна codexSync</title>
+  <desc id="desc">Макет программы с боковой навигацией, обзором и проверочным запуском.</desc>
+  <rect width="1200" height="760" rx="18" fill="#F4F6FA"/>
+  <rect x="18" y="18" width="1164" height="724" rx="14" fill="#FFFFFF" stroke="#DFE4EC"/>
+  <path d="M52 68c22-20 48-20 70 0M52 96c22 20 48 20 70 0" fill="none" stroke="#1D5FD0" stroke-width="10" stroke-linecap="round"/>
+  <path d="M79 70 62 82l17 12M95 70l17 12-17 12" fill="none" stroke="#1B2430" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="140" y="90" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="24" font-weight="500">codexSync</text>
+  <line x1="252" y1="18" x2="252" y2="742" stroke="#DFE4EC"/>
+  <g fill="#667085" font-family="Segoe UI, sans-serif" font-size="15">
+    <text x="52" y="158">Обзор</text><text x="52" y="202">Первый запуск</text><text x="52" y="246">Синхронизация</text>
+    <text x="52" y="290">Привязка чатов</text><text x="52" y="334">Сессии</text><text x="52" y="378">Проекты</text>
+    <text x="52" y="422">Хранитель снимков</text><text x="52" y="466">Резервные копии</text>
+    <text x="52" y="510">Восстановление</text><text x="52" y="554">Настройки</text>
+  </g>
+  <rect x="36" y="132" width="188" height="40" rx="7" fill="#E7F0FF"/>
+  <text x="52" y="158" fill="#1D5FD0" font-family="Segoe UI, sans-serif" font-size="15" font-weight="500">Обзор</text>
+  <text x="292" y="80" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="28" font-weight="500">Обзор</text>
+  <text x="292" y="108" fill="#667085" font-family="Segoe UI, sans-serif" font-size="15">Ручная проверка этой машины. Она не разрешает запись.</text>
+  <rect x="292" y="140" width="850" height="82" rx="9" fill="#E5F6ED"/>
+  <circle cx="318" cy="170" r="6" fill="#137A4C"/>
+  <text x="338" y="168" fill="#137A4C" font-family="Segoe UI, sans-serif" font-size="16" font-weight="500">Codex, вероятно, закрыт</text>
+  <text x="338" y="194" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="14">Изменения всё равно проверят это перед записью.</text>
+  <rect x="292" y="244" width="850" height="282" rx="9" fill="#FFFFFF" stroke="#DFE4EC"/>
+  <text x="316" y="282" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="18" font-weight="500">Проверки окружения</text>
+  <text x="913" y="282" fill="#667085" font-family="Segoe UI, sans-serif" font-size="14">8 пройдено · 1 предупреждение</text>
+  <line x1="316" y1="304" x2="1118" y2="304" stroke="#DFE4EC"/>
+  <circle cx="328" cy="340" r="7" fill="#137A4C"/><text x="350" y="345" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="15">Каталоги состояния</text><text x="1005" y="345" fill="#137A4C" font-family="Segoe UI, sans-serif" font-size="13">ОК</text>
+  <line x1="316" y1="366" x2="1118" y2="366" stroke="#DFE4EC"/>
+  <circle cx="328" cy="402" r="7" fill="#137A4C"/><text x="350" y="407" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="15">Снимок состояния</text><text x="1005" y="407" fill="#137A4C" font-family="Segoe UI, sans-serif" font-size="13">ОК</text>
+  <line x1="316" y1="428" x2="1118" y2="428" stroke="#DFE4EC"/>
+  <circle cx="328" cy="464" r="7" fill="#985B00"/><text x="350" y="469" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="15">Индекс сессий</text><text x="965" y="469" fill="#985B00" font-family="Segoe UI, sans-serif" font-size="13">ВНИМАНИЕ</text>
+  <rect x="292" y="558" width="246" height="44" rx="7" fill="#1D5FD0"/>
+  <text x="322" y="586" fill="#FFFFFF" font-family="Segoe UI, sans-serif" font-size="15" font-weight="500">Проверочный запуск</text>
+  <text x="292" y="640" fill="#667085" font-family="Segoe UI, sans-serif" font-size="14">Он строит и проверяет план, но не копирует и не записывает файлы.</text>
+  <rect x="292" y="664" width="850" height="54" rx="9" fill="#FFFFFF" stroke="#DFE4EC"/>
+  <text x="316" y="697" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="15">Автоматизация: проверочный запуск каждые 15 минут после входа в Windows</text>
+  <text x="1016" y="697" fill="#137A4C" font-family="Segoe UI, sans-serif" font-size="13">ВКЛЮЧЕНА</text>
+</svg>

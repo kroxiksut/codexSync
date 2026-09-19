@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -11,8 +12,8 @@ import uuid
 
 from codexsync.app import build_context, run_sync
 from codexsync.exceptions import FailSafeError
-from codexsync.mutation_journal import JournalState, JournalStore
-from codexsync.recovery import RecoveryAction, resume_operation, rollback_operation
+from codexsync.mutation_journal import JournalState, JournalStore, MutationJournal
+from codexsync.recovery import JournalInfo, RecoveryAction, list_journals, resume_operation, rollback_operation
 from codexsync.safety_gate import OperationKind, ProcessState, SafetyDecision
 
 
@@ -184,12 +185,160 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(outcome.action, RecoveryAction.NOTHING_TO_ROLL_BACK)
         self.assertEqual(self.journals.non_terminal(), [])
 
+    def test_listing_shows_an_interrupted_sync_with_both_exits_and_its_snapshot(self) -> None:
+        operation_id = self._interrupt_sync_during_commit()
+
+        [info] = list_journals(self.config_path)
+
+        self.assertEqual(info.operation_id, operation_id)
+        self.assertEqual(info.family, "sync")
+        self.assertEqual(info.state, JournalState.RECOVERY_REQUIRED.value)
+        self.assertEqual(info.action_count, 1)
+        self.assertTrue(info.readable)
+        self.assertFalse(info.terminal)
+        self.assertTrue(info.can_resume)
+        self.assertTrue(info.can_rollback)
+        self.assertEqual(info.backup_snapshot, self.journals.load(operation_id).backup_snapshot)
+        self.assertTrue(info.backup_snapshot_present)
+
     def test_recovering_a_terminal_operation_is_refused(self) -> None:
         journal = self.journals.begin("sync", "a" * 64, 1)
         self.journals.transition(journal, JournalState.FAILED)
         with patch("codexsync.recovery._make_safety_gate", return_value=_StoppedGate()):
             with self.assertRaises(FailSafeError):
                 resume_operation(self.config_path, journal.operation_id, dry_run=False)
+
+
+def _tree(root: Path) -> dict[str, tuple[bool, int, int]]:
+    """Names, sizes and mtimes under ``root``; parent mtimes catch a created-then-removed file."""
+    if not root.exists():
+        return {}
+    result = {".": (True, 0, root.stat().st_mtime_ns)}
+    for path in root.rglob("*"):
+        stat_result = path.stat()
+        result[path.relative_to(root).as_posix()] = (
+            path.is_dir(),
+            0 if path.is_dir() else stat_result.st_size,
+            stat_result.st_mtime_ns,
+        )
+    return result
+
+
+class JournalListingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path.cwd() / "test-sandbox" / f"journal-list-{uuid.uuid4().hex}"
+        (self.root / "local-state" / "data").mkdir(parents=True)
+        (self.root / "cloud" / "data").mkdir(parents=True)
+        self.config_path = _write_config(self.root)
+        self.journals = JournalStore(self.root / ".tmp")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _by_id(self) -> dict[str, JournalInfo]:
+        return {item.operation_id: item for item in list_journals(self.config_path)}
+
+    def test_no_journal_directory_lists_nothing_and_creates_nothing(self) -> None:
+        before = _tree(self.root)
+
+        self.assertEqual(list_journals(self.config_path), [])
+
+        self.assertEqual(_tree(self.root), before)
+        self.assertFalse((self.root / ".tmp").exists())
+        self.assertFalse((self.root / "backups").exists())
+
+    def test_rollback_is_offered_only_when_a_snapshot_is_recorded(self) -> None:
+        closed = self.journals.begin("sync", "a" * 64, 1)
+        self.journals.transition(closed, JournalState.FAILED)
+        named = self.journals.begin("restore", "b" * 64, 2, backup_snapshot="machine-a-20260101T000000Z-deadbeef0000")
+
+        listed = self._by_id()
+
+        self.assertTrue(listed[named.operation_id].can_resume)
+        self.assertTrue(listed[named.operation_id].can_rollback)
+        # Recorded but never created: rollback stays legal and closes as NOTHING_TO_ROLL_BACK.
+        self.assertIs(listed[named.operation_id].backup_snapshot_present, False)
+        self.assertTrue(listed[closed.operation_id].terminal)
+        self.assertIsNone(listed[closed.operation_id].backup_snapshot_present)
+        self.assertFalse(listed[closed.operation_id].can_resume, "a terminal journal has no exit")
+        self.assertFalse(listed[closed.operation_id].can_rollback)
+
+        self.journals.transition(named, JournalState.FAILED)
+        unnamed = self.journals.begin("sync", "c" * 64, 1)
+        info = self._by_id()[unnamed.operation_id]
+        self.assertTrue(info.can_resume)
+        self.assertFalse(info.can_rollback, "rollback refuses without a recorded snapshot")
+
+    def test_unreadable_journals_are_listed_as_evidence_instead_of_failing(self) -> None:
+        good = self.journals.begin("sync", "a" * 64, 3)
+        self.journals.transition(good, JournalState.FAILED)
+        broken_id = str(uuid.uuid4())
+        (self.journals.root / f"{broken_id}.json").write_text("{not json", encoding="utf-8")
+        impostor_id = str(uuid.uuid4())
+        (self.journals.root / f"{impostor_id}.json").write_text(
+            json.dumps({
+                "operation_id": str(uuid.uuid4()), "family": "restore", "state": "COMMITTING",
+                "created_at_utc": "2026-01-01T00:00:00.000000Z", "plan_hash": "a" * 64,
+                "action_count": 4, "backup_snapshot": None,
+            }),
+            encoding="utf-8",
+        )
+        with self.assertRaises(FailSafeError):
+            self.journals.non_terminal()
+
+        listed = self._by_id()
+
+        self.assertTrue(listed[good.operation_id].readable)
+        for operation_id in (broken_id, impostor_id):
+            with self.subTest(operation_id=operation_id):
+                info = listed[operation_id]
+                self.assertFalse(info.readable)
+                self.assertIsNone(info.state)
+                self.assertFalse(info.terminal, "an unreadable journal still blocks begin()")
+                self.assertFalse(info.can_resume)
+                self.assertFalse(info.can_rollback)
+        self.assertEqual(listed[impostor_id].family, "restore")
+        self.assertEqual(listed[impostor_id].action_count, 4)
+
+        # The listing's flags agree with what recover actually does.
+        with patch("codexsync.recovery._make_safety_gate", return_value=_StoppedGate()):
+            for operation_id in (broken_id, impostor_id):
+                with self.assertRaises(FailSafeError):
+                    resume_operation(self.config_path, operation_id, dry_run=True)
+
+    def test_non_terminal_first_then_newest_first(self) -> None:
+        # Explicit timestamps: consecutive begin() calls can share a clock tick
+        # on Windows, which would make the expected order a coin toss.
+        def journal(state: JournalState, created: str) -> MutationJournal:
+            written = MutationJournal(str(uuid.uuid4()), "sync", state, created, "a" * 64, 1)
+            self.journals.write(written)
+            return written
+
+        oldest = journal(JournalState.FAILED, "2026-01-01T00:00:00.000000Z")
+        old_open = journal(JournalState.PREPARED, "2026-01-02T00:00:00.000000Z")
+        newest = journal(JournalState.COMMITTED, "2026-01-04T00:00:00.000000Z")
+        new_open = journal(JournalState.RECOVERY_REQUIRED, "2026-01-03T00:00:00.000000Z")
+        broken_id = str(uuid.uuid4())
+        (self.journals.root / f"{broken_id}.json").write_text("", encoding="utf-8")
+
+        order = [item.operation_id for item in list_journals(self.config_path)]
+
+        self.assertEqual(
+            order,
+            [new_open.operation_id, old_open.operation_id, broken_id, newest.operation_id, oldest.operation_id],
+        )
+
+    def test_listing_creates_nothing(self) -> None:
+        journal = self.journals.begin("sync", "a" * 64, 1, backup_snapshot="machine-a-20260101T000000Z-deadbeef0000")
+        (self.journals.root / f"{uuid.uuid4()}.json").write_text("{", encoding="utf-8")
+        before = _tree(self.root)
+
+        listed = list_journals(self.config_path)
+
+        self.assertEqual(len(listed), 2)
+        self.assertEqual(_tree(self.root), before)
+        self.assertEqual(self.journals.load(journal.operation_id).state, JournalState.PREPARED)
+        self.assertFalse((self.root / "backups").exists())
 
 
 if __name__ == "__main__":

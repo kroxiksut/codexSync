@@ -47,6 +47,7 @@ from pathlib import Path
 
 from .guardian_schema import binding_project_id, detect_state_schema
 from .path_mapping import PathMappingError, PathMappingRule, apply_path_mapping
+from .progress import ProgressCallback, report
 from .session_catalog import (
     DEFAULT_MAX_JSONL_LINE_BYTES,
     SessionCatalog,
@@ -107,6 +108,9 @@ class ChatEntry:
     parent_id: str | None = None
     title: str | None = None
     codes: tuple[str, ...] = ()
+    #: Size of the branch file on disk. Comes from the catalogue, which
+    #: measured it while hashing, so nothing is stat'ed twice for it.
+    byte_count: int = 0
 
     @property
     def short_id(self) -> str:
@@ -170,6 +174,7 @@ def build_chat_directory(
     rules: list[PathMappingRule] | None = None,
     source_machine: str | None = None,
     target_machine: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> ChatDirectory:
     """Read the state and the sessions and say where every chat sits.
 
@@ -187,10 +192,18 @@ def build_chat_directory(
         assignments = {}
 
     if catalog is None:
-        catalog = scan_sessions(state_root, max_line_bytes=max_line_bytes, volatile=volatile)
+        catalog = scan_sessions(
+            state_root, max_line_bytes=max_line_bytes, volatile=volatile, progress=progress,
+        )
     codes: list[str] = []
     chats: list[ChatEntry] = []
-    for descriptor in catalog.descriptors:
+    # The second pass: every descriptor's file is opened again for its meta
+    # record and its title, which is why this phase is reported separately
+    # from the hashing that produced the catalogue.
+    total = len(catalog.descriptors)
+    report(progress, "chats", 0, total)
+    for done, descriptor in enumerate(catalog.descriptors, start=1):
+        report(progress, "chats", done, total)
         if not descriptor.session_id:
             continue
         path = state_root / Path(*descriptor.relative_path.split("/"))
@@ -208,6 +221,7 @@ def build_chat_directory(
                 descriptor.session_id, descriptor.relative_path, descriptor.state, kind,
                 association, project_id, descriptor.timestamp, descriptor.cwd,
                 descriptor.line_count, descriptor.parent_id, title, entry_codes,
+                descriptor.byte_count,
             )
         )
         codes.extend(entry_codes)

@@ -27,6 +27,7 @@ from .safety_gate import OperationKind, ProcessState
 from .session_catalog import scan_sessions
 from .session_index import SESSION_INDEX_FILE, parse_session_index
 from .sqlite_audit import audit_sqlite
+from .project_registry import PROVEN_PROJECT_REGISTRY, registry_note
 from .state_locator import resolve_state_dirs
 
 LOG = logging.getLogger(__name__)
@@ -76,6 +77,8 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
     except Exception as exc:
         checks.append(PreflightCheckResult("state_dirs", "FAIL", f"State directories are not ready: {exc}"))
 
+    checks.append(_check_sync_rules(cfg))
+    checks.append(_check_project_registry())
     if local_dir is not None:
         checks.append(_check_path_available("local_state", local_dir))
     if cloud_dir is not None:
@@ -126,6 +129,36 @@ def print_preflight_report(report: PreflightReport) -> None:
         "Summary: "
         f"pass={len(report.passed)} warn={len(report.warnings)} fail={len(report.failures)}"
     )
+
+def _check_sync_rules(cfg: AppConfig) -> PreflightCheckResult:
+    """Say what this config lets a sync do, before it does it.
+
+    A one-way direction and deletion propagation are both settings that change
+    what a later run writes without changing what any plan looks like on the
+    surface, so `doctor` names them (`D-012`, `D-013`).
+    """
+    detail = f"direction={cfg.sync.direction}; delete_policy={cfg.sync.delete_policy}"
+    if cfg.sync.delete_policy == "propagate":
+        return PreflightCheckResult(
+            "sync_rules", "WARN",
+            f"{detail}; a proven deletion on one side removes the file here, after a verified backup",
+        )
+    return PreflightCheckResult("sync_rules", "PASS", detail)
+
+
+def _check_project_registry() -> PreflightCheckResult:
+    """Say plainly that a project root is rewritten in the JSON only.
+
+    Codex keeps projects in `state_*.sqlite` as well, and codexSync never
+    writes there. Whether the runtime follows a JSON-only root change is
+    unverified, so a person deciding to move a project should be told before
+    they rely on it, not after.
+    """
+    schema = next(iter(PROVEN_PROJECT_REGISTRY), None)
+    if schema is not None:
+        return PreflightCheckResult("project_registry", "PASS", registry_note(schema))
+    return PreflightCheckResult("project_registry", "WARN", registry_note(None))
+
 
 def _check_path_available(name: str, directory: Path) -> PreflightCheckResult:
     """A diagnostic availability check that never creates a directory or probe."""
@@ -236,7 +269,44 @@ def _check_guardian_latest_good(cfg: AppConfig) -> PreflightCheckResult:
             "guardian_latest_good", "FAIL",
             "latest-good points at a snapshot that is missing or uncommitted",
         )
+    stuck = _shrinks_quarantined_since(cfg.guardian.root_dir, machine, snapshot)
+    if stuck:
+        return PreflightCheckResult(
+            "guardian_latest_good", "WARN",
+            f"Restorable snapshot {snapshot_id}, but {stuck} newer state(s) went to quarantine for a drop in "
+            "projects or bindings, so latest-good is no longer advancing; `guardian accept` shows why the "
+            "counts fell and can take the current state as the new baseline",
+        )
     return PreflightCheckResult("guardian_latest_good", "PASS", f"Restorable snapshot {snapshot_id}")
+
+
+_SHRINK_CODES = frozenset({"PROJECT_COUNT_DROP", "BINDING_COUNT_DROP"})
+
+
+def _shrinks_quarantined_since(root: Path, machine: str, snapshot: Path) -> int:
+    """Quarantine events newer than latest-good that were rejected only as a shrink.
+
+    Reads manifests only. Timestamps are compared as the store writes them
+    (fixed-width UTC ISO strings), so string order is time order.
+    """
+    try:
+        created = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))["created_at_utc"]
+    except (OSError, KeyError, TypeError, ValueError):
+        return 0
+    base = root / "quarantine" / machine
+    if not isinstance(created, str) or not base.is_dir():
+        return 0
+    count = 0
+    for event in base.iterdir():
+        try:
+            raw = json.loads((event / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        codes = raw.get("reason_codes") if isinstance(raw, dict) else None
+        when = raw.get("created_at_utc") if isinstance(raw, dict) else None
+        if isinstance(codes, list) and isinstance(when, str) and when > created and _SHRINK_CODES & set(codes):
+            count += 1
+    return count
 
 
 def _check_orphan_temp_files(temp_dir: Path) -> PreflightCheckResult:

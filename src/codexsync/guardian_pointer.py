@@ -44,6 +44,28 @@ def resolve_or_restore_latest_good(root_dir: Path, machine_id: str) -> GuardianS
     return recovered
 
 
+def find_latest_good(root_dir: Path, machine_id: str) -> tuple[GuardianSnapshot | None, bool]:
+    """``resolve_or_restore_latest_good`` minus the rebuild: ``(snapshot, resolved)``.
+
+    ``resolved`` is false when committed snapshots exist but the pointer does
+    not name a verified one. The writer would rebuild the pointer then; a
+    caller that only looks must say so instead, because a pointer that moved
+    because someone looked is a silent state change.
+    """
+    root = root_dir.resolve()
+    machine = require_guardian_machine_id(machine_id)
+    if not root.is_dir():
+        return None, True
+    pointer = _read_pointer(_pointer_path(root, machine))
+    if pointer is not None and pointer.machine_id == machine:
+        snapshot = _snapshot_from_pointer(root, pointer)
+        if snapshot is not None:
+            return snapshot, True
+    if _scan_latest_committed(root, machine) is None and pointer is None:
+        return None, True
+    return None, False
+
+
 def publish_latest_good(root_dir: Path, candidate: GuardianSnapshot) -> GuardianSnapshot:
     """Advance latest-good only to a verified, strictly newer, distinct snapshot."""
     root = root_dir.resolve()

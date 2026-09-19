@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Настройки автоматизации codexSync</title>
+  <desc id="desc">Экран настройки запуска после входа в Windows и периодической проверочной синхронизации.</desc>
+  <rect width="1200" height="760" rx="18" fill="#F4F6FA"/>
+  <rect x="18" y="18" width="1164" height="724" rx="14" fill="#FFFFFF" stroke="#DFE4EC"/>
+  <text x="56" y="76" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="25" font-weight="500">Настройки</text>
+  <text x="56" y="106" fill="#667085" font-family="Segoe UI, sans-serif" font-size="15">Настройки сохраняются в config.toml; задача Windows — их применённое представление.</text>
+  <rect x="56" y="138" width="122" height="38" rx="7" fill="#FFFFFF" stroke="#DFE4EC"/><text x="80" y="163" fill="#667085" font-family="Segoe UI, sans-serif" font-size="14">Основное</text>
+  <rect x="188" y="138" width="138" height="38" rx="7" fill="#FFFFFF" stroke="#DFE4EC"/><text x="212" y="163" fill="#667085" font-family="Segoe UI, sans-serif" font-size="14">Синхронизация</text>
+  <rect x="336" y="138" width="160" height="38" rx="7" fill="#FFFFFF" stroke="#DFE4EC"/><text x="360" y="163" fill="#667085" font-family="Segoe UI, sans-serif" font-size="14">Защита и снимки</text>
+  <rect x="506" y="138" width="146" height="38" rx="7" fill="#E7F0FF" stroke="#1D5FD0"/><text x="530" y="163" fill="#1D5FD0" font-family="Segoe UI, sans-serif" font-size="14" font-weight="500">Автоматизация</text>
+  <rect x="56" y="202" width="1088" height="72" rx="9" fill="#E5F6ED"/>
+  <circle cx="84" cy="235" r="6" fill="#137A4C"/><text x="104" y="232" fill="#137A4C" font-family="Segoe UI, sans-serif" font-size="16" font-weight="500">Автоматизация включена</text>
+  <text x="104" y="255" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="14">Проверочный запуск каждые 15 минут. Следующее выполнение: сегодня, 15:30.</text>
+  <rect x="56" y="298" width="526" height="330" rx="9" fill="#FFFFFF" stroke="#DFE4EC"/>
+  <text x="82" y="336" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="18" font-weight="500">Что выполнять</text><text x="397" y="336" fill="#667085" font-family="Segoe UI, sans-serif" font-size="13">Только безопасные действия</text>
+  <text x="82" y="376" fill="#667085" font-family="Segoe UI, sans-serif" font-size="13">Режим</text><rect x="82" y="386" width="470" height="38" rx="7" fill="#FFFFFF" stroke="#DFE4EC"/><text x="96" y="411" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="14">Проверочный запуск — рекомендуется</text>
+  <text x="82" y="458" fill="#667085" font-family="Segoe UI, sans-serif" font-size="13">Синхронизация с записью и восстановление не запускаются автоматически.</text>
+  <rect x="82" y="500" width="18" height="18" rx="3" fill="#1D5FD0"/><path d="M86 509l4 4 7-8" fill="none" stroke="#FFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><text x="112" y="515" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="14">Включить автоматизацию на этой машине</text>
+  <rect x="608" y="298" width="536" height="330" rx="9" fill="#FFFFFF" stroke="#DFE4EC"/>
+  <text x="634" y="336" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="18" font-weight="500">Когда выполнять</text><text x="1013" y="336" fill="#667085" font-family="Segoe UI, sans-serif" font-size="13">Текущая машина</text>
+  <text x="634" y="376" fill="#667085" font-family="Segoe UI, sans-serif" font-size="13">Период</text><rect x="634" y="386" width="220" height="38" rx="7" fill="#FFFFFF" stroke="#DFE4EC"/><text x="648" y="411" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="14">15 минут</text>
+  <rect x="634" y="456" width="18" height="18" rx="3" fill="#1D5FD0"/><path d="M638 465l4 4 7-8" fill="none" stroke="#FFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><text x="664" y="471" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="14">Запускать после входа в Windows</text>
+  <text x="634" y="514" fill="#667085" font-family="Segoe UI, sans-serif" font-size="13">Минимальный период — 60 секунд. Само окно не запускается.</text>
+  <text x="634" y="551" fill="#667085" font-family="Segoe UI, sans-serif" font-size="13">Задержка после входа: 0 секунд · случайная задержка: 0 секунд</text>
+  <rect x="56" y="652" width="188" height="44" rx="7" fill="#FFFFFF" stroke="#DFE4EC"/><text x="83" y="680" fill="#1B2430" font-family="Segoe UI, sans-serif" font-size="15">Выполнить сейчас</text>
+  <rect x="256" y="652" width="242" height="44" rx="7" fill="#1D5FD0"/><text x="281" y="680" fill="#FFFFFF" font-family="Segoe UI, sans-serif" font-size="15" font-weight="500">Сохранить и обновить задачу</text>
+</svg>

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .exceptions import ConfigError
 from .models import FileMeta, ManifestEntry, SnapshotFingerprint, SyncManifest
@@ -61,11 +61,34 @@ def save_manifest(manifest: SyncManifest, path: Path | None) -> None:
     os.replace(tmp_path, path)
 
 
-def build_manifest(local_index: dict[str, FileMeta], cloud_index: dict[str, FileMeta], data_version: int) -> SyncManifest:
+def build_manifest(
+    local_index: dict[str, FileMeta],
+    cloud_index: dict[str, FileMeta],
+    data_version: int,
+    previous: SyncManifest | None = None,
+    skipped: Iterable[str] = (),
+) -> SyncManifest:
+    """Record what both sides look like now -- except where nothing was synced.
+
+    A one-way run leaves the other side untouched (`D-012`), and writing its
+    current fingerprint would claim the two sides had agreed. The next
+    bidirectional run would then see no change on either side and keep the
+    older file for good. So a skipped path keeps the entry the previous
+    manifest held, and a skipped path that has no previous entry gets none:
+    "never synchronised" is the truth, and it is also what makes the next run
+    treat it as a first sync rather than as an agreement.
+    """
     all_paths = sorted(set(local_index) | set(cloud_index))
+    skipped_paths = set(skipped)
+    previous_files = previous.files if previous else {}
     files: dict[str, ManifestEntry] = {}
 
     for rel_path in all_paths:
+        if rel_path in skipped_paths:
+            carried = previous_files.get(rel_path)
+            if carried is not None:
+                files[rel_path] = carried
+            continue
         local_meta = local_index.get(rel_path)
         cloud_meta = cloud_index.get(rel_path)
         files[rel_path] = ManifestEntry(

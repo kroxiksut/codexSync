@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .jsonl_codec import JSONL_READ_ERRORS, is_branch_file, logical_name, open_jsonl
+from .progress import ProgressCallback, report
 
 
 DEFAULT_MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024
@@ -63,17 +64,27 @@ def scan_sessions(
     max_line_bytes: int = DEFAULT_MAX_JSONL_LINE_BYTES,
     volatile: bool = False,
     source_machine: str | None = None,
+    progress: ProgressCallback | None = None,
+    phase: str = "sessions",
 ) -> SessionCatalog:
     root = state_root.resolve()
     descriptors: list[SessionDescriptor] = []
+    # Both trees are walked first. Listing them is cheap and hashing them is
+    # not, so this is what makes the count a total rather than a guess.
+    found: list[tuple[Path, SessionState]] = []
     for directory_name, state in (("sessions", SessionState.ACTIVE), ("archived_sessions", SessionState.ARCHIVED)):
         directory = root / directory_name
         if not directory.is_dir():
             continue
-        for path in _walk_jsonl(directory, root):
-            descriptors.append(
-                _scan_jsonl(path, root, state, max_line_bytes, volatile, source_machine)
-            )
+        found.extend((path, state) for path in _walk_jsonl(directory, root))
+
+    total = len(found)
+    report(progress, phase, 0, total)
+    for done, (path, state) in enumerate(found, start=1):
+        descriptors.append(
+            _scan_jsonl(path, root, state, max_line_bytes, volatile, source_machine)
+        )
+        report(progress, phase, done, total)
 
     by_id: dict[str, list[SessionDescriptor]] = {}
     for item in descriptors:

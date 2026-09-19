@@ -27,6 +27,8 @@ class OperationKind(str, Enum):
     SESSION_APPLY = "session_apply"
     RECOVER_RESUME = "recover_resume"
     RECOVER_ROLLBACK = "recover_rollback"
+    GUARDIAN_RESTORE = "guardian_restore"
+    PROJECT_MOVE = "project_move"
 
 
 class ProcessState(str, Enum):
@@ -65,6 +67,8 @@ OPERATION_PROFILES: dict[OperationKind, OperationProfile] = {
     OperationKind.SESSION_APPLY: OperationProfile(OperationKind.SESSION_APPLY, True, True, False),
     OperationKind.RECOVER_RESUME: OperationProfile(OperationKind.RECOVER_RESUME, True, True, False),
     OperationKind.RECOVER_ROLLBACK: OperationProfile(OperationKind.RECOVER_ROLLBACK, True, True, False),
+    OperationKind.GUARDIAN_RESTORE: OperationProfile(OperationKind.GUARDIAN_RESTORE, True, True, False),
+    OperationKind.PROJECT_MOVE: OperationProfile(OperationKind.PROJECT_MOVE, True, True, False),
 }
 
 

@@ -9,7 +9,7 @@ description = "Local-first Codex state sync utility"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "codexSync contributors" }]
-license = "GPL-3.0-only"
+license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 keywords = ["codex", "sync", "backup", "cli", "local-first"]
 classifiers = [
@@ -47,7 +47,7 @@ codexsync-gui = "codexsync.gui.__main__:main"
 package-dir = { "" = "src" }
 
 [tool.setuptools.package-data]
-codexsync = ["config.example.toml"]
+codexsync = ["config.example.toml", "gui/locale/*.json", "gui/resources/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

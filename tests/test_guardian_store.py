@@ -89,6 +89,43 @@ class GuardianStoreTests(unittest.TestCase):
                 (root / GUARDIAN_QUARANTINE_DIR_NAME / "machine-a" / unstable.quarantine_event_id / "source.bin").exists()
             )
 
+    def test_every_code_the_validators_can_emit_is_accepted_by_quarantine(self) -> None:
+        """A code quarantine does not know turns a rejection into a crash.
+
+        Found on a real state: a warning (`PROJECT_NOT_IN_ORDER`) rode along
+        with a suspicious binding drop, and `guardian snapshot` stopped with
+        "unsupported reason codes" instead of quarantining. Read the codes from
+        the modules that produce them, so a new one cannot be forgotten.
+        """
+        import ast
+
+        from codexsync import guardian_runner, guardian_schema, guardian_shrink, guardian_validation
+        from codexsync.guardian_store import QUARANTINE_REASON_CODES
+
+        emitted: set[str] = set()
+        for module in (guardian_validation, guardian_schema, guardian_shrink, guardian_runner):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            for node in tree.body:
+                if (
+                    isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+                    and node.value.value.isupper() and "_" in node.value.value
+                    and node.targets[0].id.lstrip("_").isupper()
+                    and not node.targets[0].id.endswith("_SCHEMA")
+                ):
+                    emitted.add(node.value.value)
+        self.assertIn("PROJECT_NOT_IN_ORDER", emitted, "the scan stopped seeing the codes")
+        self.assertEqual(sorted(emitted - QUARANTINE_REASON_CODES), [])
+
+    def test_a_warning_riding_along_with_a_shrink_is_quarantined(self) -> None:
+        with self._store_case() as (_root, store):
+            result = store.quarantine(
+                self._observation(b"{}"),
+                ValidationReport(ValidationStatus.SUSPICIOUS, ("PROJECT_NOT_IN_ORDER", "BINDING_COUNT_DROP")),
+            )
+            self.assertIsNotNone(result.quarantine_event_id)
+
     def test_quarantine_deduplicates_same_payload_and_reason(self) -> None:
         with self._store_case() as (_root, store):
             report = ValidationReport(ValidationStatus.INVALID, ("NUL_BYTE",))

@@ -1,3 +1,29 @@
+"""Is Codex running? Answered per platform, and never guessed.
+
+Windows is the tested path. The POSIX one exists because the same question has
+to be answerable on a Mac, where the desktop build was renamed `ChatGPT.app` in
+July 2026 while keeping the bundle id `com.openai.codex` -- a machine whose
+`process_names` still says `codex` sees only the bundled `codex app-server`
+child, and would read a running Codex as stopped.
+
+Two things about POSIX matching are not details:
+
+* **A name is a whole basename, never a substring.** `ChatGPT` alone would
+  match the ordinary ChatGPT desktop app, which has nothing to do with Codex,
+  so the app itself is recognised by a *path* marker
+  (`ChatGPT.app/Contents/MacOS/`) and never by its bare name.
+* **Linux truncates.** `ps -o comm=` gives at most 15 characters there, so
+  `codex-linux-sandbox` arrives as `codex-linux-san` and a configured full name
+  must match its own truncation too.
+
+`capability()` stays the gate. Reporting a platform as supported means a
+mutation may proceed on the strength of this listing, and a parser nobody has
+run against a live Codex could report "stopped" while it is open -- the one
+mistake this project cannot make. So a platform counts as supported only after
+someone has run `docs/dev/experiments/process-detector-macos.md` on it and recorded
+the result in `PROVEN_DETECTORS`. Until then macOS and Linux answer `UNKNOWN`,
+and `safety.fail_on_unknown` turns that into a refusal.
+"""
 from __future__ import annotations
 
 import csv
@@ -11,6 +37,16 @@ import sys
 
 
 DETECTOR_CONTRACT_VERSION = 1
+
+#: Platforms whose adapter has been run against a live Codex, mapping
+#: ``sys.platform`` to the observation that proved it (OS build and Codex
+#: version). **Filled only from `docs/dev/experiments/process-detector-macos.md`,
+#: never from reading the code.** Windows is not listed here: its adapter is
+#: what the project has always shipped and what CI exercises.
+PROVEN_DETECTORS: dict[str, str] = {}
+
+#: Longest name `ps -o comm=` prints on Linux before it truncates.
+LINUX_COMM_LIMIT = 15
 
 
 @dataclass(slots=True, frozen=True)
@@ -42,11 +78,22 @@ class CodexProcessDetector:
                 supported=True,
                 detail="Windows tasklist and CIM process-tree adapter",
             )
+        proof = PROVEN_DETECTORS.get(sys.platform)
+        if proof:
+            return ProcessDetectorCapability(
+                platform=sys.platform,
+                contract_version=DETECTOR_CONTRACT_VERSION,
+                supported=True,
+                detail=f"ps adapter, confirmed against a live Codex: {proof}",
+            )
         return ProcessDetectorCapability(
             platform=sys.platform,
             contract_version=DETECTOR_CONTRACT_VERSION,
             supported=False,
-            detail="No tested process-detector adapter is available for mutation commands on this platform",
+            detail=(
+                "The ps adapter for this platform has not been run against a live Codex "
+                "(docs/dev/experiments/process-detector-macos.md); mutations stay closed"
+            ),
         )
 
     def is_running(self) -> bool:
@@ -66,16 +113,24 @@ class CodexProcessDetector:
         if sys.platform.startswith("win"):
             target = _normalize_windows_name(name)
             return any(_normalize_windows_name(proc.name) == target for proc in self._list_windows_all())
-        return any(os.path.basename(proc.name).lower() == name for proc in self._list_posix_all())
+        return any(_posix_name_matches(proc, name) for proc in self._list_posix_all())
 
     def find_processes(self, process_names: list[str]) -> list[ProcessInfo]:
-        """Return exact-name matches from a complete native process listing."""
-        if not sys.platform.startswith("win"):
-            raise RuntimeError("complete background process detection is unavailable on this platform")
-        targets = {_normalize_windows_name(name) for name in process_names if name.strip()}
-        if not targets:
-            return []
-        return [proc for proc in self._list_windows_all_complete() if _normalize_windows_name(proc.name) in targets]
+        """Exact matches for these names in a complete native process listing.
+
+        A name containing a separator is a path marker and is matched against
+        the command path instead: that is how `ChatGPT.app/Contents/MacOS/` is
+        told apart from the ChatGPT app of the same name.
+        """
+        if sys.platform.startswith("win"):
+            targets = {_normalize_windows_name(name) for name in process_names if name.strip()}
+            if not targets:
+                return []
+            return [
+                proc for proc in self._list_windows_all_complete()
+                if _normalize_windows_name(proc.name) in targets
+            ]
+        return _match_posix(self._list_posix_all(), process_names)
 
     def has_subprocess_marker(self, parent_process_names: list[str], marker_name: str) -> bool:
         if not sys.platform.startswith("win"):
@@ -242,36 +297,93 @@ class CodexProcessDetector:
         return processes
 
     def _list_posix(self) -> list[ProcessInfo]:
-        return [
-            proc
-            for proc in self._list_posix_all()
-            if os.path.basename(proc.name).lower() in self._names
-        ]
+        return _match_posix(self._list_posix_all(), sorted(self._names))
 
     def _list_posix_all(self) -> list[ProcessInfo]:
+        """Every process, with both its short name and its full command.
+
+        Two listings keyed by pid rather than one with both columns: `comm` on
+        macOS is a full path that contains spaces ("ChatGPT Helper (Renderer)"),
+        so a single line carrying both fields could not be split back apart.
+        """
         ps = shutil.which("ps")
         if not ps:
             raise RuntimeError("ps is not available for process detection")
-        result = subprocess.run(
-            [ps, "-A", "-o", "pid=", "-o", "comm="],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"ps failed with exit code {result.returncode}")
+        names = _parse_ps(_run_ps(ps, "comm="))
+        commands = _parse_ps(_run_ps(ps, "command="))
+        return [
+            ProcessInfo(pid=pid, name=name, command_line=commands.get(pid, ""))
+            for pid, name in sorted(names.items())
+        ]
 
-        processes: list[ProcessInfo] = []
-        for line in result.stdout.splitlines():
-            parts = line.strip().split(maxsplit=1)
-            if len(parts) != 2:
-                continue
-            try:
-                pid = int(parts[0])
-            except ValueError:
-                continue
-            processes.append(ProcessInfo(pid=pid, name=parts[1].strip()))
-        return processes
+def _run_ps(ps: str, column: str) -> str:
+    result = subprocess.run(
+        [ps, "-A", "-o", "pid=", "-o", column],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ps failed with exit code {result.returncode}")
+    return result.stdout
+
+
+def _parse_ps(output: str) -> dict[int, str]:
+    """``pid -> the rest of the line``. The rest may hold spaces and brackets."""
+    rows: dict[int, str] = {}
+    for line in output.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        rows[pid] = parts[1].strip()
+    return rows
+
+
+def _posix_path_marker(name: str) -> bool:
+    """A configured entry that names a location rather than a process."""
+    return "/" in name
+
+
+def _posix_name_matches(proc: ProcessInfo, target: str) -> bool:
+    """One configured name against one process, by whole basename.
+
+    On Linux the listing is cut to 15 characters, so a configured
+    `codex-linux-sandbox` has to match the `codex-linux-san` that arrives. The
+    comparison is still a whole name: a truncation is compared with the
+    target's own truncation, never with a prefix of arbitrary length.
+    """
+    actual = os.path.basename(proc.name).strip().lower()
+    if not actual:
+        return False
+    if actual == target:
+        return True
+    if sys.platform.startswith("linux") and len(target) > LINUX_COMM_LIMIT:
+        return actual == target[:LINUX_COMM_LIMIT]
+    return False
+
+
+def _posix_marker_matches(proc: ProcessInfo, marker: str) -> bool:
+    """A path marker against a process's own path, on a segment boundary."""
+    marker = marker.strip().lower().replace("\\", "/")
+    haystacks = [proc.name.lower().replace("\\", "/"), proc.command_line.lower().replace("\\", "/")]
+    return any(marker in value for value in haystacks if value)
+
+
+def _match_posix(processes: list[ProcessInfo], wanted: list[str]) -> list[ProcessInfo]:
+    names = {name.strip().lower() for name in wanted if name.strip() and not _posix_path_marker(name)}
+    markers = [name.strip() for name in wanted if name.strip() and _posix_path_marker(name)]
+    found: list[ProcessInfo] = []
+    for proc in processes:
+        if any(_posix_name_matches(proc, name) for name in names):
+            found.append(proc)
+        elif any(_posix_marker_matches(proc, marker) for marker in markers):
+            found.append(proc)
+    return found
+
 
 def _normalize_windows_name(name: str) -> str:
     lowered = name.lower().strip()

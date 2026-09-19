@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import json
 import logging
 from pathlib import Path
 
@@ -56,6 +57,120 @@ class RecoveryOutcome:
     snapshot: str | None
     restored_files: int
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class JournalInfo:
+    """One mutation journal as a recovery screen needs to show it."""
+
+    operation_id: str
+    family: str | None
+    #: ``JournalState`` value; ``None`` when the journal cannot be read.
+    state: str | None
+    created_at_utc: str | None
+    action_count: int | None
+    backup_snapshot: str | None
+    terminal: bool
+    #: ``False`` means ``recover`` would refuse this journal while ``begin`` is
+    #: still blocked by it. The descriptive fields then hold whatever could be
+    #: salvaged from the file, as evidence only.
+    readable: bool
+    #: What ``recover`` allows for this journal, so a GUI offers only legal exits.
+    can_resume: bool
+    can_rollback: bool
+    #: Whether the recorded snapshot exists in ``paths.backup_dir``; ``None``
+    #: when none is recorded. Absent is not an error: rollback then closes the
+    #: journal as ``NOTHING_TO_ROLL_BACK``.
+    backup_snapshot_present: bool | None
+
+
+def list_journals(config_path: Path) -> list[JournalInfo]:
+    """List every mutation journal without creating, repairing or closing one.
+
+    Non-terminal journals come first because they are the ones blocking every
+    later mutation; within each group the newest is first. Unlike
+    ``JournalStore.non_terminal``, which raises on the first unreadable file
+    (correctly, for a gate), this lists a damaged journal as
+    ``readable=False``: a recovery screen that fails to open on exactly the
+    evidence it exists to show leaves the user nothing but deleting files by
+    hand. An unreadable journal still blocks ``begin``, so it sorts with the
+    non-terminal ones.
+    """
+    cfg = load_config(config_path)
+    store = JournalStore(cfg.paths.temp_dir)
+    if not store.root.is_dir():
+        return []
+    result = [
+        _describe_journal(store, path, cfg.paths.backup_dir)
+        for path in store.root.glob("*.json")
+        if path.is_file()
+    ]
+    # Two stable sorts: newest first, then non-terminal before terminal.
+    result.sort(key=lambda item: (item.created_at_utc or "", item.operation_id), reverse=True)
+    result.sort(key=lambda item: item.terminal)
+    return result
+
+
+def _describe_journal(store: JournalStore, path: Path, backup_root: Path) -> JournalInfo:
+    operation_id = path.stem
+    try:
+        journal: MutationJournal | None = store.load(operation_id)
+    except FailSafeError:
+        journal = None
+    if journal is not None and journal.operation_id == operation_id:
+        terminal = journal.state in TERMINAL
+        return JournalInfo(
+            operation_id=operation_id,
+            family=journal.family,
+            state=journal.state.value,
+            created_at_utc=journal.created_at_utc,
+            action_count=journal.action_count,
+            backup_snapshot=journal.backup_snapshot,
+            terminal=terminal,
+            readable=True,
+            can_resume=not terminal,
+            can_rollback=not terminal and journal.backup_snapshot is not None,
+            backup_snapshot_present=_snapshot_presence(backup_root, journal.backup_snapshot),
+        )
+    # Unreadable, or it claims another operation's identity, which
+    # ``_load_recoverable`` refuses. Salvage correctly typed fields for display.
+    raw = _salvage_journal_fields(path)
+    family = raw.get("family")
+    created = raw.get("created_at_utc")
+    action_count = raw.get("action_count")
+    snapshot = raw.get("backup_snapshot")
+    snapshot = snapshot if isinstance(snapshot, str) and snapshot else None
+    return JournalInfo(
+        operation_id=operation_id,
+        family=family if isinstance(family, str) else None,
+        state=None,
+        created_at_utc=created if isinstance(created, str) else None,
+        action_count=action_count if isinstance(action_count, int) and not isinstance(action_count, bool) else None,
+        backup_snapshot=snapshot,
+        terminal=False,
+        readable=False,
+        can_resume=False,
+        can_rollback=False,
+        backup_snapshot_present=_snapshot_presence(backup_root, snapshot),
+    )
+
+
+def _salvage_journal_fields(path: Path) -> dict:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _snapshot_presence(backup_root: Path, snapshot_name: str | None) -> bool | None:
+    if snapshot_name is None:
+        return None
+    # A name with a separator can only come from a damaged or edited journal and
+    # never names a snapshot inside the backup directory, so it is not followed.
+    if "/" in snapshot_name or "\\" in snapshot_name or snapshot_name in {".", ".."}:
+        return False
+    return _locate_snapshot(backup_root, snapshot_name) is not None
 
 
 def resume_operation(config_path: Path, operation_id: str, *, dry_run: bool) -> RecoveryOutcome:

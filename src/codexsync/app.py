@@ -18,7 +18,25 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import load_config
+from .config import PATH_SUBSTITUTIONS, load_config, preview_path
+from .progress import PHASES, ProgressCallback
+from .mapping_hints import MappingHints, build_mapping_hints
+from .sync_candidates import SyncCandidate, list_sync_candidates
+from .automation import AutomationView, apply_automation, automation_status, remove_automation
+from .config_edit import (
+    ConfigDocument,
+    ConfigHistoryEntry,
+    SavedConfig,
+    config_diff,
+    create_config,
+    list_config_history,
+    read_config_document,
+    remove_key,
+    replace_array_of_tables,
+    save_config_text,
+    set_value,
+    validate_config_text,
+)
 from .config import require_guardian_identity
 from .exceptions import ConfigError, ConflictError, FailSafeError
 from .backup import BackupManager
@@ -47,8 +65,20 @@ from .preflight import (
     print_preflight_report,
     run_preflight,
 )
-from .repair_plan import RepairActionKind, RepairPlan, build_repair_plan, load_repair_plan
-from .restore import RestoreResult, restore_from_backup
+from .repair_plan import RepairActionKind, RepairPlan, build_repair_plan, load_repair_plan, save_repair_plan
+from .restore import BackupSnapshotInfo, RestoreResult, list_backup_snapshots, restore_from_backup
+from .recovery import JournalInfo, RecoveryOutcome, list_journals, resume_operation, rollback_operation
+from .guardian_inventory import GuardianInventory, read_guardian_inventory
+from .guardian_accept import GuardianAcceptPlan, ShrinkExplanation
+from .guardian_restore import GuardianRestorePlan, build_guardian_restore_plan, verify_restore_still_valid
+from .project_move import (
+    ProjectMovePlan,
+    ProjectMoveResult,
+    apply_project_move,
+    build_project_move_plan,
+    load_project_move_plan,
+    save_project_move_plan,
+)
 from .runtime import (
     ProcessSnapshot,
     _apply_session_mode,  # noqa: F401  (re-exported: imported by tests)
@@ -64,6 +94,13 @@ from .runtime import (
     initialize_runtime_paths,
 )
 from .safety_gate import OperationKind, ProcessState, SafetyGate
+from .session_scope import (
+    SessionScope,
+    build_session_scope,
+    load_session_scope,
+    save_session_scope,
+    scope_path_for,
+)
 from .semantic_transfer import (
     BranchResolution,
     ResolutionChoice,
@@ -88,11 +125,63 @@ from .session_index import (
 from .stable_reader import StableReader
 from .state_locator import detect_local_state_dir, resolve_state_dirs
 from .sync_engine import SyncEngine
-from .version import PRODUCER_VERSION
+from .version import PRODUCER_VERSION, __version__
 
 LOG = logging.getLogger(__name__)
 
 __all__ = [
+    "__version__",
+    "PRODUCER_VERSION",
+    "SessionScope",
+    "load_session_scope",
+    "build_working_set",
+    "read_working_set",
+    "write_working_set",
+    "MappingHints",
+    "suggest_path_mappings",
+    "PATH_SUBSTITUTIONS",
+    "SyncCandidate",
+    "list_sync_candidates",
+    "PHASES",
+    "ProgressCallback",
+    "preview_path",
+    "GuardianRestorePlan",
+    "GuardianAcceptPlan",
+    "ShrinkExplanation",
+    "accept_guardian_baseline",
+    "ProjectMovePlan",
+    "ProjectMoveResult",
+    "apply_project_move_plan",
+    "restore_global_state",
+    "save_project_move_plan",
+    "scan_project_move",
+    "AutomationRun",
+    "AutomationView",
+    "apply_automation",
+    "automation_status",
+    "remove_automation",
+    "run_automation_job",
+    "ConfigDocument",
+    "ConfigHistoryEntry",
+    "SavedConfig",
+    "config_diff",
+    "create_config",
+    "list_config_history",
+    "read_config_document",
+    "remove_key",
+    "replace_array_of_tables",
+    "save_config_text",
+    "set_value",
+    "validate_config_text",
+    "BackupSnapshotInfo",
+    "GuardianInventory",
+    "JournalInfo",
+    "RecoveryOutcome",
+    "list_backup_snapshots",
+    "list_journals",
+    "read_guardian_inventory",
+    "resume_operation",
+    "rollback_operation",
     "AppContext",
     "PreflightCheckResult",
     "PreflightReport",
@@ -108,6 +197,7 @@ __all__ = [
     "inspect_recovery",
     "print_plan",
     "load_branch_resolutions",
+    "load_config",
     "print_preflight_report",
     "record_branch_resolution",
     "restore_from_backup",
@@ -118,6 +208,7 @@ __all__ = [
     "scan_session_transfer",
     "run_preflight",
     "run_sync",
+    "save_repair_plan",
     "scan_repair_projects",
     "validate_config_only",
 ]
@@ -166,6 +257,8 @@ def build_context(
         tolerance_seconds=cfg.sync.time_tolerance_seconds,
         conflict_policy=cfg.conflict.policy,
         equal_mtime_action=cfg.sync.equal_mtime_action,
+        direction=cfg.sync.direction,
+        delete_policy=cfg.sync.delete_policy,
     )
     return AppContext(
         config=cfg,
@@ -202,6 +295,7 @@ def scan_repair_projects(
     *,
     source_machine: str,
     target_machine: str,
+    progress: ProgressCallback | None = None,
 ) -> RepairPlan:
     cfg = load_config(config_path)
     local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
@@ -215,6 +309,7 @@ def scan_repair_projects(
         local_dir,
         volatile=volatile,
         source_machine=source_machine,
+        progress=progress,
     )
     return build_repair_plan(
         catalog,
@@ -415,11 +510,79 @@ def commit_global_state(
             raise
 
 
+def _plans_dir(cfg: AppConfig) -> Path:
+    """Where working sets and conflict resolutions live, beside each other."""
+    root = cfg.paths.workspace_root_dir or cfg.paths.backup_dir.parent
+    return root / "plans"
+
+
+def read_working_set(config_path: Path, *, source_machine: str, target_machine: str) -> SessionScope:
+    """The stored working set for this pair of machines, or an empty one."""
+    cfg = load_config(config_path)
+    return load_session_scope(scope_path_for(_plans_dir(cfg), source_machine, target_machine))
+
+
+def write_working_set(
+    config_path: Path,
+    scope: SessionScope,
+    *,
+    source_machine: str,
+    target_machine: str,
+) -> Path:
+    """Store the chosen projects and chats beside the conflict resolutions."""
+    cfg = load_config(config_path)
+    return save_session_scope(
+        scope, scope_path_for(_plans_dir(cfg), source_machine, target_machine)
+    )
+
+
+def build_working_set(
+    config_path: Path,
+    *,
+    projects: tuple[str, ...] = (),
+    chats: tuple[str, ...] = (),
+    progress: ProgressCallback | None = None,
+) -> SessionScope:
+    """Expand chosen projects and chats into the sessions they cover. Reads only.
+
+    The thread catalogue is read too, so the set can say which of its chats
+    this machine cannot place -- they are mirrored either way, but they will
+    not appear in Codex here, and that is worth knowing before the transfer
+    rather than after it.
+    """
+    cfg = load_config(config_path)
+    directory = scan_chats(config_path, progress=progress)
+    return build_session_scope(
+        directory, projects=projects, chats=chats,
+        placements=read_thread_placements(detect_local_state_dir(cfg.paths.local_state_dir)),
+    )
+
+
+def suggest_path_mappings(
+    config_path: Path,
+    *,
+    progress: ProgressCallback | None = None,
+) -> MappingHints:
+    """Candidates for a `[[path_mappings]]` rule, read from this machine.
+
+    Built on the same chat scan the chats screen runs, so the folders offered
+    are the ones chats actually name; a settings form calls this instead of
+    asking the person to remember the other machine's paths.
+    """
+    cfg = load_config(config_path)
+    directory = scan_chats(config_path, progress=progress)
+    names = {cfg.identity.machine_id} if cfg.identity.machine_id else set()
+    for rule in cfg.path_mappings:
+        names.update((rule.source_machine, rule.target_machine))
+    return build_mapping_hints(directory, machines=tuple(sorted(name for name in names if name)))
+
+
 def scan_chats(
     config_path: Path,
     *,
     source_machine: str | None = None,
     target_machine: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> ChatDirectory:
     """List every chat and the project it currently sits under. Reads only.
 
@@ -441,6 +604,7 @@ def scan_chats(
         rules=cfg.path_mappings,
         source_machine=source_machine,
         target_machine=target_machine,
+        progress=progress,
     )
 
 
@@ -557,11 +721,18 @@ def scan_session_transfer(
     source_machine: str,
     target_machine: str,
     resolutions_path: Path | None = None,
+    progress: ProgressCallback | None = None,
+    scope: SessionScope | None = None,
 ) -> TransferPlan:
     """Classify every session branch on both sides. Reads only.
 
     Runs while Codex is open, like `plan`, but the result is marked volatile and
     a mutation must rebuild it.
+
+    ``scope`` narrows what may be written into `.codex` to one working set
+    (`session_scope`). The cloud mirror is written in full regardless, so the
+    backup never becomes partial, and a plan without a scope behaves -- and
+    hashes -- exactly as it did before working sets existed.
     """
     cfg = load_config(config_path)
     local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
@@ -572,10 +743,12 @@ def scan_session_transfer(
     local_catalog = scan_sessions(
         local_dir, volatile=volatile, source_machine=source_machine,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
+        progress=progress,
     )
     remote_catalog = scan_sessions(
         cloud_dir, volatile=volatile, source_machine=target_machine,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
+        progress=progress, phase="sessions_cloud",
     )
     resolutions = load_branch_resolutions(resolutions_path) if resolutions_path else {}
     return build_transfer_plan(
@@ -588,6 +761,7 @@ def scan_session_transfer(
         mirror_codec=cfg.semantic.mirror_compression,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=volatile,
+        scope=scope.session_hashes if scope is not None and not scope.is_empty else None,
     )
 
 
@@ -608,7 +782,7 @@ def audit_session_index(config_path: Path) -> dict:
     one session, which is a rename divergence: a decision, not a merge.
 
     Rendering a new index stays refused until the consumer contract is proven
-    (``docs/experiments/session-index-contract.md``), so this command exists to
+    (``docs/dev/experiments/session-index-contract.md``), so this command exists to
     say what an index contains and where the two disagree, and nothing more.
     """
     cfg = load_config(config_path)
@@ -936,6 +1110,10 @@ def _rebuild_transfer_plan(
         mirror_codec=_plan_mirror_codec(plan),
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=False,
+        # The working set the plan was confirmed under, never the one stored
+        # now: the id covers the scope, so a set edited after the scan applies
+        # to the next scan, not to a confirmation already given.
+        scope=plan.scope or None,
     )
     return (
         fresh,
@@ -1115,12 +1293,19 @@ def inspect_recovery(config_path: Path, operation_id: str) -> MutationJournal:
     return journal
 
 
-def print_plan(plan: SyncPlan, *, volatile: bool = False) -> None:
+def print_plan(plan: SyncPlan, *, volatile: bool = False, direction: str = "bidirectional") -> None:
     print("Plan:")
     if volatile:
         print("  state: VOLATILE (Codex is running or process state is unknown; rebuild before apply)")
+    print(f"  direction: {direction}")
     print(f"  to_local: {len(plan.to_local)}")
     print(f"  to_cloud: {len(plan.to_cloud)}")
+    if plan.deletions:
+        print(f"  deletions: {len(plan.deletions)}")
+    if plan.skipped:
+        # Named, because a one-way run that copied nothing has to say why, and
+        # because these paths stay unsynchronised in the manifest (`D-012`).
+        print(f"  skipped by direction: {len(plan.skipped)}")
     print(f"  actions: {plan.action_count}")
     print(f"  conflicts: {len(plan.conflicts)}")
     for rel_path in plan.conflicts:
@@ -1129,6 +1314,10 @@ def print_plan(plan: SyncPlan, *, volatile: bool = False) -> None:
         print(f"    cloud -> local: {item.relative_path}")
     for item in plan.to_cloud:
         print(f"    local -> cloud: {item.relative_path}")
+    for item in plan.deletions:
+        print(f"    delete on {item.side}: {item.relative_path}")
+    for rel_path in plan.skipped:
+        print(f"    skipped: {rel_path}")
 
 
 def run_sync(ctx: AppContext, dry_run: bool) -> None:
@@ -1188,7 +1377,13 @@ def run_sync(ctx: AppContext, dry_run: bool) -> None:
         try:
             engine.execute(ctx.plan, dry_run=False)
             local_idx, cloud_idx = _build_indexes(ctx.config, ctx.local_dir, ctx.cloud_dir)
-            manifest = build_manifest(local_idx, cloud_idx, ctx.config.state.data_version)
+            # The paths this direction did not act on keep their old entry:
+            # recording them now would say the two sides agreed (`D-012`).
+            previous = load_manifest(ctx.config.state.manifest_file, ctx.config.state.data_version)
+            manifest = build_manifest(
+                local_idx, cloud_idx, ctx.config.state.data_version,
+                previous=previous, skipped=ctx.plan.skipped,
+            )
             save_manifest(manifest, ctx.config.state.manifest_file)
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
             mgr.prune()
@@ -1211,3 +1406,237 @@ def validate_config_only(config_path: Path) -> None:
         _ = resolve_state_dirs(cfg.paths.local_state_dir, cfg.paths.cloud_root_dir)
     except ConfigError:
         raise
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationRun:
+    """One run of the configured safe job, performed now, in this process."""
+
+    mode: str
+    #: guardian_snapshot: the Guardian outcome status; preflight: PASSED or
+    #: FAILED; sync_dry_run: DRY_RUN_FINISHED.
+    status: str
+    detail: str = ""
+    actions: int | None = None
+
+
+def run_automation_job(config_path: Path) -> AutomationRun:
+    """Run the job `[scheduler]` names, exactly as the scheduled command would.
+
+    Each branch calls what the corresponding CLI command calls, so a "run now"
+    button and the scheduled task cannot disagree about what the job does or
+    about when it is refused -- a dry-run sync still needs Codex closed.
+    """
+    cfg = load_config(config_path)
+    mode = cfg.scheduler.mode
+    if mode == "guardian_snapshot":
+        outcome = build_guardian_runner(config_path).once()
+        return AutomationRun(mode, outcome.status.value, outcome.detail or "")
+    if mode == "preflight":
+        report = run_preflight(config_path, operation=OperationKind.SYNC)
+        failed = ", ".join(item.name for item in report.failures)
+        return AutomationRun(mode, "PASSED" if report.is_ok else "FAILED", failed)
+    if mode == "sync_dry_run":
+        ctx = build_context(config_path, enforce_safety=True)
+        run_sync(ctx, dry_run=True)
+        return AutomationRun(mode, "DRY_RUN_FINISHED", actions=ctx.plan.action_count)
+    raise ConfigError(f"scheduler.mode {mode!r} cannot be run")
+
+
+def accept_guardian_baseline(
+    config_path: Path,
+    *,
+    confirm_plan: str | None = None,
+) -> tuple[GuardianAcceptPlan, str | None]:
+    """Preview, or perform, accepting the current state as Guardian's new baseline.
+
+    Returns the plan and, once accepted, the id of the snapshot that became
+    latest-good. Both halves run while Codex is open: the state is only read
+    and the only writes land in the Guardian root, exactly as for a snapshot.
+    What makes it a decision rather than a snapshot is the plan id, which pins
+    the drop being accepted (``guardian_accept``).
+    """
+    runner = build_guardian_runner(config_path)
+    if confirm_plan is None:
+        return runner.preview_accept(), None
+    plan, snapshot = runner.accept(confirm_plan=confirm_plan)
+    return plan, snapshot.snapshot_id
+
+
+def _read_state_for_preview(cfg: AppConfig, source: Path) -> bytes | None:
+    """The live global state as a preview sees it: a stable read, or nothing."""
+    if not source.is_file():
+        return None
+    return StableReader(source, max_bytes=cfg.guardian.max_state_bytes).read_once().observation.payload
+
+
+def restore_global_state(
+    config_path: Path,
+    *,
+    snapshot_id: str,
+    confirm_plan: str | None = None,
+    dry_run: bool = False,
+) -> tuple[GuardianRestorePlan, int]:
+    """Preview, or perform, putting a verified Guardian snapshot back.
+
+    Without ``confirm_plan`` this reads only and works while Codex runs. With
+    it, Codex must be closed, the plan is rebuilt from the state as it is now
+    and must still carry the confirmed id, and the write goes through
+    ``commit_global_state`` -- the replaced file is backed up and verified
+    first, and restored if the result does not validate.
+
+    A missing state file is refused rather than created: the envelope's first
+    step is a verified backup of what it replaces, and there is nothing to back
+    up. Starting Codex once recreates the file; restore over that.
+    """
+    cfg = load_config(config_path)
+    machine = require_guardian_identity(cfg)
+    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    source = local_dir / ".codex-global-state.json"
+    root = cfg.guardian.root_dir
+    if confirm_plan is None:
+        current = _read_state_for_preview(cfg, source)
+        plan, _ = build_guardian_restore_plan(
+            root_dir=root, machine_id=machine, snapshot_id=snapshot_id, current_state=current
+        )
+        return plan, 0
+
+    _require_mutation_compatible_config(cfg)
+    gate = _make_safety_gate(cfg)
+    gate.require(OperationKind.GUARDIAN_RESTORE)
+    if not source.is_file():
+        raise FailSafeError(
+            f"There is no {source.name} to replace, so no verified backup of it can be made. "
+            "Start Codex once so it writes the file, close it, and restore again."
+        )
+    current = source.read_bytes()
+    plan, _ = build_guardian_restore_plan(
+        root_dir=root, machine_id=machine, snapshot_id=snapshot_id, current_state=current
+    )
+    payload = verify_restore_still_valid(plan, root_dir=root, current_state=current, confirm_plan=confirm_plan)
+    if dry_run:
+        LOG.info("guardian restore dry-run: plan %s would replace %s with snapshot %s", plan.plan_id, source, snapshot_id)
+        return plan, 1
+    written = commit_global_state(
+        cfg, gate, OperationKind.GUARDIAN_RESTORE,
+        family="guardian-restore", plan_id=plan.plan_id, action_count=1,
+        state_root=local_dir, source=source, original=current, candidate=payload,
+    )
+    return plan, written
+
+
+def _project_move_protected_roots(cfg: AppConfig, local_dir: Path) -> tuple[Path, ...]:
+    """Everything a moved project must not land in or around."""
+    return (
+        local_dir,
+        cfg.paths.cloud_root_dir,
+        cfg.paths.backup_dir,
+        cfg.paths.temp_dir,
+        cfg.guardian.root_dir,
+        cfg.semantic.root_dir,
+    )
+
+
+def _build_project_move(
+    cfg: AppConfig, local_dir: Path, *, project_id: str, new_root: Path, volatile: bool, state: bytes
+) -> ProjectMovePlan:
+    catalog = scan_sessions(local_dir, volatile=volatile, max_line_bytes=cfg.semantic.max_jsonl_line_bytes)
+    sessions = [(item.session_id, item.cwd) for item in catalog.valid if item.session_id]
+    return build_project_move_plan(
+        state_bytes=state,
+        project_id=project_id,
+        new_root=new_root,
+        sessions=sessions,
+        protected_roots=_project_move_protected_roots(cfg, local_dir),
+        volatile=volatile,
+    )
+
+
+def scan_project_move(config_path: Path, *, project_id: str, new_root: Path) -> ProjectMovePlan:
+    """Plan copying a project to ``new_root`` and remapping it there. Reads only.
+
+    Hashes every file of the project, so it takes as long as reading the
+    project does. Runs while Codex is open, but such a plan is volatile and an
+    apply refuses it.
+    """
+    cfg = load_config(config_path)
+    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    volatile = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
+    source = local_dir / ".codex-global-state.json"
+    state = _read_state_for_preview(cfg, source)
+    if state is None:
+        raise ConfigError(f"There is no {source.name}; open Codex once so it creates its projects")
+    return _build_project_move(
+        cfg, local_dir, project_id=_resolve_project_reference(state, project_id),
+        new_root=Path(new_root), volatile=volatile, state=state,
+    )
+
+
+def _resolve_project_reference(state: bytes, reference: str) -> str:
+    """An exact project id, or a name that names exactly one project.
+
+    An ambiguous name is refused rather than resolved to the first match: two
+    projects called the same thing are a real case (a moved project re-added),
+    and copying the wrong one is not a mistake a preview should make for you.
+    """
+    try:
+        projects = json.loads(state.decode("utf-8-sig")).get("local-projects", {})
+    except (UnicodeError, json.JSONDecodeError, AttributeError):
+        projects = {}
+    if not isinstance(projects, dict) or reference in projects:
+        return reference
+    wanted = reference.strip().casefold()
+    matches = [
+        project_id for project_id, entry in projects.items()
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str) and entry["name"].casefold() == wanted
+    ]
+    if len(matches) > 1:
+        raise ConfigError(f"{reference!r} names {len(matches)} projects; use the project id")
+    return matches[0] if matches else reference
+
+
+def apply_project_move_plan(
+    config_path: Path,
+    *,
+    plan_path: Path,
+    confirm_plan: str,
+    dry_run: bool = False,
+) -> ProjectMoveResult:
+    """Copy the project, verify it, then remap its root -- or refuse.
+
+    The old folder is never modified or deleted. The state write runs through
+    ``commit_global_state`` under its own operation kind, so a crash leaves a
+    journal that ``recover`` understands, and a verified copy a rerun picks up.
+    """
+    cfg = load_config(config_path)
+    _require_mutation_compatible_config(cfg)
+    try:
+        plan = load_project_move_plan(Path(plan_path))
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"Cannot read project move plan {plan_path}: {exc}") from exc
+    local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
+    source = local_dir / ".codex-global-state.json"
+    gate = _make_safety_gate(cfg)
+
+    def rebuild() -> ProjectMovePlan:
+        return _build_project_move(
+            cfg, local_dir, project_id=plan.project_id, new_root=Path(plan.new_root),
+            volatile=False, state=source.read_bytes(),
+        )
+
+    def commit(original: bytes, candidate: bytes, plan_id: str, action_count: int) -> int:
+        return commit_global_state(
+            cfg, gate, OperationKind.PROJECT_MOVE,
+            family="project-move", plan_id=plan_id, action_count=action_count,
+            state_root=local_dir, source=source, original=original, candidate=candidate,
+        )
+
+    return apply_project_move(
+        plan,
+        confirm_plan=confirm_plan,
+        rebuild=rebuild,
+        require_stopped=lambda: gate.require(OperationKind.PROJECT_MOVE),
+        read_state=source.read_bytes,
+        commit_state=commit,
+        dry_run=dry_run,
+    )

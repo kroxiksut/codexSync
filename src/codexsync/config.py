@@ -9,6 +9,8 @@ from .guardian_models import GuardianConfig, require_guardian_machine_id
 from .jsonl_codec import parse_codec
 from .path_mapping import PathMappingRule
 from .models import (
+    MIN_SCHEDULER_INTERVAL_SECONDS,
+    SCHEDULER_MODES,
     AppConfig,
     BackupConfig,
     ConflictConfig,
@@ -18,11 +20,36 @@ from .models import (
     PathsConfig,
     ProcessDetectionConfig,
     SafetyConfig,
+    SchedulerConfig,
     SemanticConfig,
     StateConfig,
     SyncConfig,
     TargetsConfig,
 )
+
+
+#: Every substitution a path value may use, in one place. A screen that lists
+#: them reads this rather than keeping a second copy in a language file, so a
+#: new substitution cannot be documented in one language and forgotten in the
+#: other -- or documented and never implemented.
+PATH_SUBSTITUTIONS: tuple[str, ...] = ("${workspace_root}",)
+
+
+def preview_path(
+    value: str,
+    *,
+    base_dir: Path,
+    workspace_root: Path | None = None,
+) -> Path | None:
+    """What a path field in the config would resolve to, without loading it.
+
+    The same resolution the loader performs, exposed so a settings screen can
+    show the computed path under the box as it is typed. Raises ``ConfigError``
+    for a value the loader would also refuse -- which is the answer to show.
+    """
+    return _to_path(
+        value, "path", base_dir=base_dir, workspace_root=workspace_root, required=False
+    )
 
 
 def _to_path(
@@ -60,10 +87,41 @@ def _expand_workspace_var(raw_value: str, workspace_root: Path | None, field_nam
 def load_config(path: Path) -> AppConfig:
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ConfigError(f"Cannot read config file: {path}. {exc}") from exc
+    return parse_config_text(
+        decode_config_bytes(data, source=str(path)),
+        base_dir=path.parent.resolve(),
+        source=str(path),
+    )
 
-    base_dir = path.parent.resolve()
-    with path.open("rb") as fh:
-        raw: dict[str, Any] = tomllib.load(fh)
+
+def decode_config_bytes(data: bytes, *, source: str) -> str:
+    """Decode a config file as UTF-8, accepting a byte-order mark.
+
+    TOML is UTF-8 by definition, but Windows editors still prepend a BOM, and
+    a file one tool accepts while another refuses is worse than either rule.
+    """
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"Config file is not valid UTF-8: {source}. {exc}") from exc
+
+
+def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>") -> AppConfig:
+    """Parse and validate config text as if it were a file inside ``base_dir``.
+
+    This is the only loader: `load_config` reads a file and calls it, and a
+    GUI validating an unsaved edit calls it directly. A second validator for
+    unsaved text would drift from the one the CLI enforces, and then an edit
+    the editor accepted could make every command exit 4.
+    """
+    try:
+        raw: dict[str, Any] = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Invalid TOML in {source}: {exc}") from exc
 
     identity_raw = raw.get("identity", {})
     paths_raw = raw.get("paths", {})
@@ -78,6 +136,7 @@ def load_config(path: Path) -> AppConfig:
     logging_raw = raw.get("logging", {})
     guardian_raw = raw.get("guardian", {})
     semantic_raw = raw.get("semantic", {})
+    scheduler_raw = raw.get("scheduler", {})
     path_mappings_raw = raw.get("path_mappings", [])
 
     identity = IdentityConfig(machine_id=identity_raw.get("machine_id"))
@@ -250,11 +309,61 @@ def load_config(path: Path) -> AppConfig:
         guardian=guardian,
         path_mappings=_parse_path_mappings(path_mappings_raw),
         semantic=semantic,
+        scheduler=_parse_scheduler(scheduler_raw),
     )
     _validate_config(cfg)
     if "guardian" in raw:
         _require_guardian_identity(cfg)
     return cfg
+
+
+def _parse_scheduler(raw: Any) -> SchedulerConfig:
+    """Read `[scheduler]`, ignoring keys this version does not know.
+
+    Configs written before CS-232 carry `kind = "windows_task_scheduler"` and
+    `interval_minutes`; refusing them would make a user's existing file stop
+    loading over a section that was never read. Values are passed through
+    uncoerced so `_validate_config` can refuse a wrong type rather than guess.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError("scheduler must be a table")
+    defaults = SchedulerConfig()
+    mode = raw.get("mode", defaults.mode)
+    if isinstance(mode, str):
+        mode = mode.strip().lower()
+    return SchedulerConfig(
+        enabled=raw.get("enabled", defaults.enabled),
+        mode=mode,
+        interval_seconds=raw.get("interval_seconds", defaults.interval_seconds),
+        run_at_login=raw.get("run_at_login", defaults.run_at_login),
+        startup_delay_seconds=raw.get("startup_delay_seconds", defaults.startup_delay_seconds),
+        jitter_seconds=raw.get("jitter_seconds", defaults.jitter_seconds),
+    )
+
+
+def _validate_scheduler(scheduler: SchedulerConfig) -> None:
+    for field_name, value in (
+        ("scheduler.enabled", scheduler.enabled),
+        ("scheduler.run_at_login", scheduler.run_at_login),
+    ):
+        if not isinstance(value, bool):
+            raise ConfigError(f"{field_name} must be a boolean (true or false, without quotes)")
+    if not isinstance(scheduler.mode, str) or scheduler.mode not in SCHEDULER_MODES:
+        raise ConfigError(
+            "scheduler.mode must be one of: "
+            + ", ".join(SCHEDULER_MODES)
+            + "; scheduled automation never mutates state, so sync, restore and repair are not valid modes"
+        )
+    for field_name, value, minimum in (
+        ("scheduler.interval_seconds", scheduler.interval_seconds, MIN_SCHEDULER_INTERVAL_SECONDS),
+        ("scheduler.startup_delay_seconds", scheduler.startup_delay_seconds, 0),
+        ("scheduler.jitter_seconds", scheduler.jitter_seconds, 0),
+    ):
+        # bool is an int subclass; `interval_seconds = true` is not a number.
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(f"{field_name} must be an integer")
+        if value < minimum:
+            raise ConfigError(f"{field_name} must be >= {minimum}")
 
 
 def _validate_config(cfg: AppConfig) -> None:
@@ -264,11 +373,11 @@ def _validate_config(cfg: AppConfig) -> None:
     if cfg.sync.compare not in {"mtime", "mtime_hash_fallback"}:
         raise ConfigError("sync.compare must be one of: mtime, mtime_hash_fallback")
 
-    if cfg.sync.direction != "bidirectional":
-        raise ConfigError("Only bidirectional sync direction is supported")
+    if cfg.sync.direction not in {"bidirectional", "to_cloud", "to_local"}:
+        raise ConfigError("sync.direction must be one of: bidirectional, to_cloud, to_local")
 
-    if cfg.sync.delete_policy != "never":
-        raise ConfigError("Only delete_policy=never is supported in MVP")
+    if cfg.sync.delete_policy not in {"never", "propagate"}:
+        raise ConfigError("sync.delete_policy must be one of: never, propagate")
 
     if cfg.sync.time_tolerance_seconds < 0:
         raise ConfigError("sync.time_tolerance_seconds must be >= 0")
@@ -361,6 +470,7 @@ def _validate_config(cfg: AppConfig) -> None:
     ):
         if value <= 0:
             raise ConfigError(f"{field_name} must be > 0")
+    _validate_scheduler(cfg.scheduler)
     if cfg.semantic.max_jsonl_line_bytes < 1024 * 1024:
         raise ConfigError("semantic.max_jsonl_line_bytes must be at least 1 MiB")
     semantic_root = cfg.semantic.root_dir.resolve()

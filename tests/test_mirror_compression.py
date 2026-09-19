@@ -1,7 +1,8 @@
 """The cloud mirror stores a branch compressed; the history is unchanged.
 
 The mirror is codexSync's own directory, so the container is ours to choose,
-and on real data the choice is worth roughly a fifth of the upload. What must
+and on real data the choice is worth about two thirds of the upload (824 MiB
+of sessions mirror as 299 MiB). What must
 not change is what a branch *is*: these tests pin the one property everything
 else rests on — a compressed mirror copy compares `IDENTICAL` to the plain
 local branch instead of looking like a divergence — plus the proof that the

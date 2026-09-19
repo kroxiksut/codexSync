@@ -27,4 +27,9 @@ MISSING_QT_MESSAGE = (
     "The command line needs nothing installed and keeps working without it."
 )
 
-__all__ = ["MISSING_QT_MESSAGE"]
+#: The name the window shows. The package, the command and the CLI's own
+#: messages stay ``codexsync``/``codexSync``; this is the brand as drawn in the
+#: lockup, and it is not translated.
+BRAND_NAME = "CodexSync"
+
+__all__ = ["BRAND_NAME", "MISSING_QT_MESSAGE"]

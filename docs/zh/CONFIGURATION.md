@@ -1,0 +1,145 @@
+# 配置
+
+[English](../en/CONFIGURATION.md) · [Русский](../ru/CONFIGURATION.md) · **中文**
+
+[← 文档](README.md)
+
+codexSync 做的每一件事都由一个 `config.toml` 决定。可以用 `codexsync init-config`
+创建它，也可以在窗口的「首次运行」页面创建，然后手工编辑或者在「设置」页面编辑。
+每个键都带注释的完整模板是 [config.example.toml](../../config.example.toml)。
+
+每条会写入的命令还会检查配置有没有要求安全规则所禁止的事情；这样的配置会以退出码 `4`
+被拒绝。
+
+## 路径与工作目录
+
+```toml
+[identity]
+machine_id = "desktop"
+
+[paths]
+workspace_root_dir = "D:/Cloud/codexSync"
+local_state_dir = "C:/Users/me/.codex"
+cloud_root_dir = "${workspace_root}/sync"
+backup_dir = "${workspace_root}/backups"
+temp_dir = "${workspace_root}/.tmp"
+```
+
+- **`machine_id`** 唯一且长期不变。备份、快照、计划以及另一台机器上的映射规则都靠它
+  来指认；两台机器同名会把各自的数据混在一起。
+- **`workspace_root_dir`** 是由云客户端在机器之间同步的文件夹。其他任何路径里的
+  `${workspace_root}` 都代表它。
+- **`local_state_dir`** 是 Codex 自己的状态目录。它会被读取，只有在冷操作时才被写入，
+  而且永远不会被创建。
+- **`cloud_root_dir`** 是状态在云文件夹中的镜像。
+- **`backup_dir`** 存放在替换任何东西之前所做的备份。
+- **`temp_dir`** 是每份副本在碰到第一个目标之前暂存和校验的地方。
+
+相对路径按 `workspace_root_dir` 解析；没有工作目录时，则按 `config.toml` 所在的文件夹
+解析。
+
+## 各节
+
+| 节 | 控制什么 | 参见 |
+|---|---|---|
+| `[sync]` | 比较方式、方向、删除、默认试运行 | [同步](SYNC.md) |
+| `[targets]` | `include_roots`：`.codex` 下哪些内容参与 `sync` | [同步](SYNC.md#同步哪些内容) |
+| `[filters]` | `exclude_globs`：哪些内容永不复制 | [同步](SYNC.md#同步哪些内容) |
+| `[conflict]` | 两侧都被改过的文件适用的 `policy` | [同步](SYNC.md#冲突) |
+| `[backup]` | 备份的保留策略与格式 | [恢复](RECOVERY.md#备份) |
+| `[guardian]` | 快照存储、轮询、减少阈值、保留策略 | [守护](GUARDIAN.md#设置) |
+| `[semantic]` | 冲突包、镜像压缩 | [会话](SESSIONS.md#云端镜像) |
+| `[[path_mappings]]` | 一台机器上的路径如何对应到另一台 | [见下](#path_mappings) |
+| `[process_detection]` | 哪些进程意味着「Codex 在运行」 | [见下](#process_detection) |
+| `[scheduler]` | 计划执行的安全作业 | [见下](#自动化) |
+| `[logging]` | 级别、格式、轮转、保留 | [见下](#日志) |
+| `[safety]` | 固定不变：Codex 必须已停止，不确定就中止 | 不可编辑 |
+| `[state]` | 同步清单放在哪里 | — |
+
+## `[[path_mappings]]`
+
+换机通常会改变路径：一个项目在台式机上位于 `D:/Projects/atlas`，在笔记本上位于
+`C:/Work/atlas`。一条规则就是这么说的：
+
+```toml
+[[path_mappings]]
+rule_id = "desktop-projects-to-laptop"
+source_machine = "desktop"
+target_machine = "laptop"
+from = "D:/Projects"
+to = "C:/Work"
+# case_sensitive = false   # 可选
+```
+
+`rule_id` 必须唯一。这些规则由 `chats`、`repair-projects` 以及 `sessions` 的工作集使用；
+它们永远不会被写进 Codex 的文件，Codex 也不会读取它们。见[项目与对话](PROJECTS.md)。
+
+## `[process_detection]`
+
+```toml
+[process_detection]
+process_names = ["codex.exe", "codex", "codex-app-server"]
+grace_period_seconds = 2
+
+[process_detection.background_process_names]
+windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-windows-sandbox-service", "codex-command-runner"]
+macos = ["ChatGPT.app/Contents/MacOS/", "codex-app-server", "codex-execve-wrapper", "codex-code-mode-host"]
+linux = ["/usr/lib/chatgpt/", "codex-app-server", "codex-linux-sandbox", "codex-execve-wrapper", "codex-code-mode-host"]
+```
+
+名称按完整进程名匹配，绝不按子串匹配。含有 `/` 的条目是路径标记，用来与进程路径匹配：
+macOS 上的桌面版构建就叫 `ChatGPT`，而单写一个 `ChatGPT` 会把普通的 ChatGPT 应用也
+匹配进来。
+
+`allow_terminate_if_running` 以及其他 `terminate_*` 键是 0.1 遗留下来的。codexSync
+从不结束 Codex，`allow_terminate_if_running = true` 会被拒绝。
+
+## 自动化
+
+计划任务是 `[scheduler]` 的生效形式。请在这里设置，或者在窗口的「设置 → 自动化」标签页
+设置，而不要直接改操作系统的计划任务。
+
+```toml
+[scheduler]
+enabled = true
+mode = "guardian_snapshot"   # guardian_snapshot | preflight | sync_dry_run
+interval_seconds = 300       # 至少 60
+run_at_login = true
+startup_delay_seconds = 0
+jitter_seconds = 0
+```
+
+```powershell
+codexsync -c config.toml automation status   # 配置、确切的命令、系统任务状态；不改变任何东西
+codexsync -c config.toml automation apply    # 安装或更新任务；enabled = false 时删除它
+codexsync -c config.toml automation remove   # 删除任务；config.toml 原样不动
+codexsync -c config.toml automation run      # 立即执行一次配置好的作业
+```
+
+- 任务只能执行安全作业：`guardian_snapshot`、`preflight` 或 `sync_dry_run`。写入、修复、
+  传输、还原或回滚都无法排入计划，而且计划中的试运行在 Codex 开着时同样会被拒绝。
+- 它是用户级任务 —— Windows 上是任务计划程序，macOS 上是 LaunchAgent，Linux 上是
+  `systemd --user` —— 绝不是系统服务。
+- `automation run` 的退出码与该作业本身一致：成功、或者已有另一个守护在运行时为 `0`，
+  进入隔离区为 `2`，`sync_dry_run` 期间 Codex 在运行为 `3`，失败为 `5`。
+
+**已废弃：** `guardian scheduler` 和 `scripts/scheduler/{windows,macos}` 把计划任务的
+设置放在 `config.toml` 之外，将来会被移除。如果你曾用那些脚本装过任务，请先用它们卸载，
+以免两个任务同时运行。
+
+## 日志
+
+```toml
+[logging]
+level = "INFO"            # DEBUG | INFO | WARNING | ERROR
+file = "${workspace_root}/logs/codexsync.log"
+format = "text"           # text | json | logfmt
+retention_days = 7
+archive_mode = "zip"      # zip | text
+max_file_size_mb = 10
+```
+
+- 日志文件按天分开，并带上机器标识：`<名称>-<机器>-YYYY-MM-DD[.N].log`，UTF-8 编码。
+- 文件按天和按大小轮转；旧文件会归档成 `.zip`（`archive_mode = "zip"`）或保留为文本，
+  并在 `retention_days` 之后删除。
+- 每一个危险动作都会单独记入日志：创建备份、覆盖、跳过。

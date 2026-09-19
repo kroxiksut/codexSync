@@ -7,7 +7,8 @@ stored there in a compressed container.
 
 That is worth doing because the mirror is a cloud folder and its cost is
 measured in bytes. Measured on the state this was built against: 228 branches,
-778 MiB, median 640 KiB; the same content is roughly a fifth of that as xz. The
+778 MiB, median 640 KiB; the same content is about a third of that as xz (824
+MiB of mirrored sessions came to 299 MiB). The
 file count is unchanged, which is deliberate — one archive of everything would
 be re-uploaded whole after a single session grew by one line, and would have to
 be unpacked before the remote side could be classified at all.

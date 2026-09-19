@@ -141,6 +141,35 @@ class PreflightStateSchemaTests(unittest.TestCase):
         self.assertEqual(check.status, "PASS")
         self.assertIn("snap-1", check.details)
 
+    def test_a_shrink_quarantined_after_latest_good_says_guardian_is_stuck(self) -> None:
+        """Observed 2026-09-13: latest-good stopped moving and doctor still said PASS."""
+        self._state(ELECTRON_STATE)
+        snapshot = self.guardian / "snapshots" / "machine-a" / "snap-1"
+        snapshot.mkdir(parents=True)
+        (snapshot / "COMMITTED").write_text("{}", encoding="utf-8")
+        (snapshot / "manifest.json").write_text(
+            json.dumps({"created_at_utc": "2026-09-05T10:57:48.403582Z"}), encoding="utf-8"
+        )
+        pointer = self.guardian / "latest-good" / "machine-a.json"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(json.dumps({"snapshot_id": "snap-1"}), encoding="utf-8")
+        for name, when, codes in (
+            ("older", "2026-09-01T00:00:00.000000Z", ["BINDING_COUNT_DROP"]),
+            ("broken", "2026-09-13T03:49:08.863606Z", ["BROKEN_PROJECT_REFERENCE"]),
+            ("shrink", "2026-09-13T09:40:48.856560Z", ["PROJECT_NOT_IN_ORDER", "BINDING_COUNT_DROP"]),
+        ):
+            event = self.guardian / "quarantine" / "machine-a" / name
+            event.mkdir(parents=True)
+            (event / "manifest.json").write_text(
+                json.dumps({"created_at_utc": when, "reason_codes": codes}), encoding="utf-8"
+            )
+
+        check = self._check(self._run(), "guardian_latest_good")
+
+        self.assertEqual(check.status, "WARN")
+        self.assertIn("1 newer state", check.details)
+        self.assertIn("guardian accept", check.details)
+
 
 if __name__ == "__main__":
     unittest.main()

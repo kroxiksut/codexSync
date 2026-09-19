@@ -40,6 +40,7 @@ from enum import Enum
 import hashlib
 import json
 from pathlib import Path
+from typing import Iterable
 
 from .exceptions import FailSafeError
 from .jsonl_codec import JsonlCodec, codec_of, logical_name, with_codec
@@ -75,6 +76,10 @@ class TransferAction(str, Enum):
     BLOCKED_TARGET_COLLISION = "BLOCKED_TARGET_COLLISION"
     #: The runtime binding lives in a store codexSync will not write.
     BLOCKED_UNSUPPORTED_BACKEND = "BLOCKED_UNSUPPORTED_BACKEND"
+    #: Outside the working set: nothing is written into `.codex` for this
+    #: session, and it blocks nothing. The cloud mirror is written regardless,
+    #: so the backup stays complete whatever the working set says.
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"
 
     @property
     def is_blocked(self) -> bool:
@@ -99,7 +104,7 @@ class ResolutionChoice(str, Enum):
 #: Target layouts proven by a controlled run on disposable state, keyed by an
 #: id recorded together with the Codex version it was observed on.
 #:
-#: Deliberately empty: see docs/experiments/session-layout-adapter.md. While it
+#: Deliberately empty: see docs/dev/experiments/session-layout-adapter.md. While it
 #: is empty a plan can be built and read, and nothing can be written into a
 #: directory the Codex runtime reads. Writes towards the cloud mirror are a
 #: separate destination and are not gated on this dict.
@@ -224,6 +229,15 @@ class TransferPlan:
     #: ``layout_id`` because a plan writes towards two different destinations
     #: and each has its own layout; a later mirror layout is a new id here.
     mirror_layout_id: str = MIRROR_LAYOUT_ID
+    #: The working set: session hashes this plan may write into `.codex`,
+    #: sorted. Empty means "everything", which is what every plan built before
+    #: working sets existed meant -- and why an empty scope is left out of the
+    #: id material entirely, so those plans keep the id they had.
+    scope: tuple[str, ...] = ()
+
+    @property
+    def out_of_scope_items(self) -> tuple["TransferItem", ...]:
+        return tuple(item for item in self.items if item.action is TransferAction.OUT_OF_SCOPE)
 
     @property
     def writable_items(self) -> tuple[TransferItem, ...]:
@@ -255,6 +269,7 @@ def build_transfer_plan(
     mirror_codec: JsonlCodec = JsonlCodec.NONE,
     max_line_bytes: int = 64 * 1024 * 1024,
     volatile: bool = False,
+    scope: Iterable[str] | None = None,
 ) -> TransferPlan:
     """Classify every session present on either side and freeze the decisions.
 
@@ -263,6 +278,10 @@ def build_transfer_plan(
     ``placements`` is the runtime's own thread catalogue; without it a write
     into the Codex state directory is unconstrained, which is only correct when
     no such catalogue exists.
+
+    ``scope`` is the working set: session hashes that may be written into
+    `.codex`. ``None`` means everything, which is what every plan meant before
+    working sets existed. The mirror is written in full either way.
     """
     resolutions = resolutions or {}
     # A changed branch changes the conflict id, so an earlier choice would
@@ -321,14 +340,44 @@ def build_transfer_plan(
         items.append(item)
         codes.extend(item.codes)
 
+    if scope is not None:
+        items = [_apply_scope(item, set(scope)) for item in items]
+        codes.extend(
+            code for item in items if item.action is TransferAction.OUT_OF_SCOPE
+            for code in item.codes
+        )
     if any(item.action.is_blocked for item in items):
         codes.append("PLAN_HAS_BLOCKED_ITEMS")
     plan = TransferPlan(
         TRANSFER_PLAN_VERSION, "", _now(), source_machine, target_machine,
         layout_id, CANONICAL_DIGEST_VERSION, volatile,
         tuple(items), tuple(dict.fromkeys(codes)), mirror_layout_id(mirror_codec),
+        tuple(sorted(scope)) if scope else (),
     )
     return _with_plan_id(plan)
+
+
+def _apply_scope(item: TransferItem, scope: set[str]) -> TransferItem:
+    """Narrow one item to the working set.
+
+    Only writes *into `.codex`* are narrowed. A branch the mirror is missing is
+    still copied there, because the cloud copy is the backup and a partial
+    backup is the one thing a working set must not produce. A conflict outside
+    the set stops being a question anyone has to answer now, so it stops
+    blocking the apply -- the branch is still kept in full in the mirror.
+    """
+    if item.session_hash in scope:
+        return item
+    if item.action in {TransferAction.NOOP, TransferAction.FAST_FORWARD_REMOTE}:
+        return item
+    return TransferItem(
+        item.session_hash, item.relation, TransferAction.OUT_OF_SCOPE,
+        item.local_sha256, item.remote_sha256, item.local_records, item.remote_records,
+        item.target_relative_path, item.conflict_id,
+        # What it would have been is kept, so a summary can say what the
+        # working set is holding back rather than simply omitting it.
+        tuple(dict.fromkeys((*item.codes, f"WOULD_BE_{item.action.value}"))),
+    )
 
 
 def _decide(
@@ -558,7 +607,7 @@ def target_relative_path(layout_id: str, source: SessionDescriptor) -> str:
     if layout_id not in PROVEN_LAYOUTS:
         raise FailSafeError(
             f"Session layout {layout_id!r} is not proven, so a destination path cannot be chosen. "
-            "Run the controlled experiment in docs/experiments/session-layout-adapter.md."
+            "Run the controlled experiment in docs/dev/experiments/session-layout-adapter.md."
         )
     template = PROVEN_LAYOUTS[layout_id]
     if "{session_id}" in template and not source.session_id:
@@ -648,6 +697,7 @@ def load_transfer_plan(path: Path) -> TransferPlan:
             str(raw["canonical_version"]), bool(raw["volatile"]), items,
             tuple(str(code) for code in raw.get("codes", ())),
             str(raw["mirror_layout_id"]),
+            tuple(str(item) for item in raw.get("scope", ())),
         )
     except _PlanRejected:
         # A refusal that already knows why: the generic guard below would
@@ -674,6 +724,9 @@ def _serialise(plan: TransferPlan) -> dict:
         "canonical_version": plan.canonical_version,
         "volatile": plan.volatile,
         "codes": list(plan.codes),
+        # Left out entirely when empty: a plan without a working set has to
+        # hash to exactly what it hashed to before working sets existed.
+        **({"scope": list(plan.scope)} if plan.scope else {}),
         "items": [
             {
                 "session_hash": item.session_hash,
@@ -705,7 +758,7 @@ def _with_plan_id(plan: TransferPlan) -> TransferPlan:
     return TransferPlan(
         plan.version, digest, plan.created_at_utc, plan.source_machine, plan.target_machine,
         plan.layout_id, plan.canonical_version, plan.volatile, plan.items, plan.codes,
-        plan.mirror_layout_id,
+        plan.mirror_layout_id, plan.scope,
     )
 
 

@@ -9,12 +9,14 @@ semantic-owned state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import re
 import shutil
 import stat
 import uuid
@@ -49,6 +51,112 @@ class RestoreResult:
     snapshot_name: str
     target: str
     restored_files: int
+
+
+#: ``BackupManager`` names a snapshot ``<machine>-<yyyyMMddTHHmmssZ>-<12 hex>``.
+#: The machine part is a normalised id and may itself contain ``-``, which is
+#: why the timestamp and suffix are anchored at the end instead of splitting.
+_BACKUP_NAME_RE = re.compile(r"^(?P<machine>.+)-(?P<ts>\d{8}T\d{6}Z)-(?P<suffix>[0-9a-f]{12})$")
+_MANIFEST_SUFFIX = ".manifest.json"
+
+
+@dataclass(frozen=True, slots=True)
+class BackupSnapshotInfo:
+    """One entry of the backup directory, described without reading its payload."""
+
+    #: Directory or ``.zip`` name inside ``paths.backup_dir``; what ``restore --from`` takes.
+    name: str
+    compressed: bool
+    #: The manifest is ``codexsync-backup-v1``, ``committed`` and names this
+    #: snapshot. Restore still re-hashes the payload before trusting it.
+    committed: bool
+    #: No manifest at all: restorable only with ``--allow-legacy-snapshot``.
+    legacy: bool
+    entries: int | None
+    total_bytes: int | None
+    modified_utc: str
+    machine: str | None
+    created_utc: str | None
+    #: Why a manifest that exists is not accepted; ``None`` for committed and legacy.
+    problem: str | None
+
+
+def list_backup_snapshots(config_path: Path) -> list[BackupSnapshotInfo]:
+    """List backup snapshots, newest first, creating and hashing nothing.
+
+    A GUI shows this list on open, so it must be cheap and side-effect free:
+    it reads each snapshot's small manifest JSON but never the payload (a
+    snapshot can be hundreds of MiB, and ``restore --dry-run`` already proves
+    the hashes before anything is written). It deliberately does not call
+    ``initialize_runtime_paths``, which would create the backup directory.
+    """
+    cfg = load_config(config_path)
+    backup_root = cfg.paths.backup_dir
+    if not backup_root.is_dir():
+        return []
+    result: list[BackupSnapshotInfo] = []
+    for path in backup_root.iterdir():
+        if path.name.endswith((_MANIFEST_SUFFIX, ".tmp")) or not _is_supported_snapshot(path):
+            continue
+        try:
+            info = _describe_backup_snapshot(path)
+        except OSError:
+            # Pruned or replaced between iterdir and stat: it is no longer a
+            # snapshot anyone can restore, so it is not listed.
+            continue
+        result.append(info)
+    result.sort(key=lambda item: (item.created_utc or item.modified_utc, item.name), reverse=True)
+    return result
+
+
+def _describe_backup_snapshot(path: Path) -> BackupSnapshotInfo:
+    modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    compressed = path.is_file()
+    stem = path.name[: -len(".zip")] if compressed else path.name
+    machine: str | None = None
+    created: str | None = None
+    match = _BACKUP_NAME_RE.match(stem)
+    if match is not None:
+        try:
+            parsed = datetime.strptime(match.group("ts"), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            machine = match.group("machine")
+            created = _iso_utc(parsed)
+
+    committed = False
+    legacy = False
+    entries: int | None = None
+    total_bytes: int | None = None
+    problem: str | None = None
+    if not _backup_manifest_path(path).is_file():
+        legacy = True
+    else:
+        try:
+            parsed_entries = _read_backup_manifest_entries(path)
+        except ConfigError as exc:
+            problem = str(exc)
+        else:
+            committed = True
+            entries = len(parsed_entries)
+            total_bytes = sum(size for _sha, size in parsed_entries.values())
+    return BackupSnapshotInfo(
+        name=path.name,
+        compressed=compressed,
+        committed=committed,
+        legacy=legacy,
+        entries=entries,
+        total_bytes=total_bytes,
+        modified_utc=_iso_utc(modified),
+        machine=machine,
+        created_utc=created,
+        problem=problem,
+    )
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 def restore_from_backup(
     config_path: Path,
@@ -192,12 +300,28 @@ def _verify_backup_snapshot(snapshot: Path, *, allow_legacy_snapshot: bool) -> N
         if allow_legacy_snapshot:
             return
         raise ConfigError("Backup snapshot has no committed codexSync manifest")
+    entries = _read_backup_manifest_entries(snapshot)
+    actual = _snapshot_hash_inventory(snapshot)
+    if actual != entries:
+        raise ConfigError("Backup snapshot contents do not match its committed manifest")
+
+
+def _read_backup_manifest_entries(snapshot: Path) -> dict[str, tuple[str, int]]:
+    """Parse and structurally validate a snapshot's committed manifest.
+
+    Shared by restore verification and the read-only listing so that a
+    snapshot the listing calls ``committed`` is exactly one whose manifest
+    restore would accept; only the payload hash comparison is left to restore.
+    """
+    manifest_path = _backup_manifest_path(snapshot)
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ConfigError("Backup snapshot manifest is invalid") from exc
-    if not isinstance(raw, dict) or raw.get("format") != "codexsync-backup-v1" or raw.get("committed") is not True:
-        raise ConfigError("Backup snapshot manifest is unsupported or uncommitted")
+    if not isinstance(raw, dict) or raw.get("format") != "codexsync-backup-v1":
+        raise ConfigError("Backup snapshot manifest is unsupported")
+    if raw.get("committed") is not True:
+        raise ConfigError("Backup snapshot manifest is uncommitted")
     if raw.get("snapshot") != snapshot.name or not isinstance(raw.get("entries"), list):
         raise ConfigError("Backup snapshot manifest does not match the selected snapshot")
     entries: dict[str, tuple[str, int]] = {}
@@ -217,9 +341,7 @@ def _verify_backup_snapshot(snapshot: Path, *, allow_legacy_snapshot: bool) -> N
         ):
             raise ConfigError("Backup snapshot manifest entry is invalid")
         entries[rel] = (sha, size)
-    actual = _snapshot_hash_inventory(snapshot)
-    if actual != entries:
-        raise ConfigError("Backup snapshot contents do not match its committed manifest")
+    return entries
 
 def _snapshot_hash_inventory(snapshot: Path) -> dict[str, tuple[str, int]]:
     result: dict[str, tuple[str, int]] = {}

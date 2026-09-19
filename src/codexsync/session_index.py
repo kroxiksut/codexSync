@@ -12,7 +12,7 @@ when a clock went backwards, which is the case that matters between two
 machines.  Guessing would silently rewrite history, so both reductions are
 computed, disagreement is reported, and rendering a new index is refused until
 the real behaviour is recorded in ``PROVEN_CONTRACTS`` by the controlled
-experiment in ``docs/experiments/session-index-contract.md``.
+experiment in ``docs/dev/experiments/session-index-contract.md``.
 
 Parsing and auditing stay available meanwhile: reading is always safe, only
 writing is gated.
@@ -50,7 +50,7 @@ class Reduction(str, Enum):
 #: disposable state, together with the reduction that test observed.
 #:
 #: Deliberately empty. Until an entry is added here — by running the experiment
-#: in ``docs/experiments/session-index-contract.md`` and recording its result —
+#: in ``docs/dev/experiments/session-index-contract.md`` and recording its result —
 #: codexSync will parse and audit an index but refuse to render a new one.
 PROVEN_CONTRACTS: dict[IndexContract, Reduction] = {}
 
@@ -244,7 +244,7 @@ def render_session_index(result: IndexMergeResult) -> bytes:
         raise FailSafeError(
             f"Consumer contract {result.contract.value} is not proven, so a new session index "
             "cannot be rendered. Run the controlled experiment in "
-            "docs/experiments/session-index-contract.md and record its result in PROVEN_CONTRACTS."
+            "docs/dev/experiments/session-index-contract.md and record its result in PROVEN_CONTRACTS."
         )
     ordered = sorted(result.merged.values(), key=lambda item: (item.line_number, item.session_id))
     return b"".join(record.raw + b"\n" for record in ordered)

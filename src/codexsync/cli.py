@@ -7,7 +7,13 @@ import sys
 from pathlib import Path
 
 from .app import (
+    AutomationRun,
+    AutomationView,
+    apply_automation,
+    automation_status,
     build_context,
+    create_config,
+    apply_project_move_plan,
     apply_repair_projects,
     apply_session_transfer,
     audit_session_index,
@@ -20,10 +26,19 @@ from .app import (
     save_transfer_plan,
     scan_chats,
     scan_session_transfer,
+    build_working_set,
+    load_session_scope,
+    write_working_set,
     print_plan,
+    remove_automation,
     restore_from_backup,
+    restore_global_state,
+    accept_guardian_baseline,
+    run_automation_job,
     run_preflight,
     run_sync,
+    save_project_move_plan,
+    scan_project_move,
     scan_repair_projects,
     validate_config_only,
 )
@@ -32,6 +47,7 @@ from .chat_move import ChatMovePlan
 from .config import load_config
 from .exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .exit_codes import ExitCode
+from .guardian_inventory import read_guardian_inventory
 from .logging_setup import configure_logging
 from .models import AppConfig, LoggingConfig
 from .recovery import resume_operation, rollback_operation
@@ -240,6 +256,73 @@ def print_chat_tree(
                 safe_print(f"        |- {count} sub-thread(s)")
 
 
+def _yes_no(value: bool | None, unknown: str = "unknown") -> str:
+    if value is None:
+        return unknown
+    return "yes" if value else "no"
+
+
+def print_automation_status(view: AutomationView) -> None:
+    """`[scheduler]` as saved, then what the operating system actually has.
+
+    The two halves are printed separately on purpose: the config is the only
+    source of truth, and the OS task is merely its applied form, so a reader
+    must be able to see at a glance when the second no longer matches the first.
+    """
+    print("Automation ([scheduler] in config.toml)")
+    print(f"  enabled: {_yes_no(view.enabled)}")
+    print(f"  mode: {view.mode}")
+    print(f"  interval_seconds: {view.interval_seconds}")
+    print(f"  run_at_login: {_yes_no(view.run_at_login)}")
+    print(f"  startup_delay_seconds: {view.startup_delay_seconds}")
+    print(f"  jitter_seconds: {view.jitter_seconds}")
+    # A JSON list is the one rendering that is exact on every platform: no
+    # shell's quoting rules are needed to read back where an argument ends.
+    safe_print(f"  argv: {json.dumps(list(view.argv), ensure_ascii=False)}")
+    print(f"  ignored_settings: {', '.join(view.ignored) if view.ignored else '(none)'}")
+    print("Operating system task")
+    status = view.status
+    if status is None:
+        safe_print(f"  status_error: {view.status_error or 'the scheduler could not be asked'}")
+        return
+    print(f"  installed: {_yes_no(status.installed)}")
+    if status.installed:
+        print(f"  enabled: {_yes_no(status.enabled)}")
+        print(f"  definition_matches: {_yes_no(status.definition_matches)}")
+        if view.reports_run_times:
+            print(f"  last_run_utc: {status.last_run_utc or '(never)'}")
+            print(f"  next_run_utc: {status.next_run_utc or '(none scheduled)'}")
+        else:
+            print("  last_run_utc: (not reported by this platform)")
+            print("  next_run_utc: (not reported by this platform)")
+        print(f"  last_result: {'(none)' if status.last_result is None else status.last_result}")
+    if status.detail:
+        safe_print(f"  detail: {status.detail}")
+    if view.enabled != status.installed or (status.installed and status.definition_matches is False):
+        print("  The task does not match [scheduler]; run `codexsync automation apply` to fix that.")
+
+
+#: `automation run` statuses that are a success. BUSY means another Guardian
+#: already holds the lock, which `guardian snapshot` also treats as success.
+_AUTOMATION_OK = frozenset({"COMMITTED", "UNCHANGED", "PASSED", "DRY_RUN_FINISHED", "BUSY"})
+
+
+def print_automation_run(run: AutomationRun) -> int:
+    label = "SKIPPED_ACTIVE_GUARDIAN" if run.status == "BUSY" else run.status
+    print(f"Automation run: {label}")
+    print(f"  mode: {run.mode}")
+    if run.detail:
+        safe_print(f"  detail: {run.detail}")
+    if run.actions is not None:
+        print(f"  actions: {run.actions}")
+    if run.status in _AUTOMATION_OK:
+        return int(ExitCode.OK)
+    if run.status == "QUARANTINED":
+        return int(ExitCode.CONFLICT_DETECTED)
+    # FAILED, and any status this shell does not know: never report success.
+    return int(ExitCode.FAIL_SAFE)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="codexsync", description="codexSync CLI")
     parser.add_argument("-c", "--config", default="config.toml", help="Path to TOML config")
@@ -278,7 +361,15 @@ def build_parser() -> argparse.ArgumentParser:
             help="Operation profile to assess; no write probes are performed",
         )
     sub.add_parser("plan", help="Build and print sync plan")
-    init_cfg = sub.add_parser("init-config", help="Write example config.toml file")
+    init_cfg = sub.add_parser(
+        "init-config",
+        help="Write config.toml from the packaged template",
+        description=(
+            "Write config.toml from the packaged template. With --machine-id, "
+            "--local-state-dir and --workspace-root the values are filled in and "
+            "validated before anything is written; every template comment is kept."
+        ),
+    )
     init_cfg.add_argument(
         "--output",
         default="config.toml",
@@ -287,8 +378,12 @@ def build_parser() -> argparse.ArgumentParser:
     init_cfg.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite output file if it already exists",
+        help="Overwrite output file if it already exists (plain template only)",
     )
+    init_cfg.add_argument("--machine-id", default=None, help="[identity] machine_id for this machine")
+    init_cfg.add_argument("--local-state-dir", default=None, help="[paths] local_state_dir: the Codex state directory")
+    init_cfg.add_argument("--workspace-root", default=None, help="[paths] workspace_root_dir")
+    init_cfg.add_argument("--cloud-root", default=None, help="[paths] cloud_root_dir (optional)")
 
     sync = sub.add_parser("sync", help="Run synchronization")
     mode_group = sync.add_mutually_exclusive_group()
@@ -317,11 +412,84 @@ def build_parser() -> argparse.ArgumentParser:
     guardian_sub.add_parser("watch", help="Continuously observe .codex-global-state.json")
     guardian_snapshot = guardian_sub.add_parser("snapshot", help="Take one stable Guardian snapshot")
     guardian_snapshot.add_argument("--once", action="store_true", required=True, help="Run one bounded snapshot pipeline")
-    guardian_scheduler = guardian_sub.add_parser("scheduler", help="Render user-level fallback scheduler templates")
+    guardian_sub.add_parser("list", help="List this machine's snapshots and quarantine; writes nothing")
+    guardian_restore = guardian_sub.add_parser(
+        "restore", help="Put a verified snapshot back into .codex-global-state.json (preview without --confirm)"
+    )
+    guardian_restore.add_argument("--snapshot", required=True, help="Snapshot id from `guardian list`")
+    guardian_restore.add_argument(
+        "--confirm", default=None, dest="confirm_plan",
+        help="Plan id from the preview; without it nothing is written",
+    )
+    guardian_restore.add_argument(
+        "--dry-run", action="store_true", help="Run every check, including the process gate, and write nothing"
+    )
+    guardian_accept = guardian_sub.add_parser(
+        "accept",
+        help="Accept the current state as the new baseline after a suspicious shrink (preview without --confirm)",
+        description=(
+            "Guardian quarantines a state that lost many projects or bindings, and keeps "
+            "comparing later states with the baseline from before the drop. When the drop is "
+            "real -- Codex re-created its projects, say -- nothing ever becomes latest-good "
+            "again. This shows why the counts fell and, with --confirm, commits the current "
+            "state as latest-good. Only a shrink can be accepted, never a damaged state. "
+            "Allowed while Codex is open; writes only into the Guardian root."
+        ),
+    )
+    guardian_accept.add_argument(
+        "--confirm", default=None, dest="confirm_plan",
+        help="Plan id from the preview; without it nothing is written",
+    )
+    guardian_scheduler = guardian_sub.add_parser(
+        "scheduler",
+        help="DEPRECATED: render fallback scheduler templates; use `automation apply`",
+        description=(
+            "Deprecated. Renders task templates only and installs nothing. The "
+            "scheduled task is the applied form of [scheduler] in config.toml: "
+            "set it there and run `codexsync automation apply`."
+        ),
+    )
     guardian_scheduler.add_argument("--platform", choices=["windows", "macos", "linux"], required=True)
     guardian_scheduler.add_argument("--output-dir", required=True)
     guardian_scheduler.add_argument("--log-dir", required=True)
     guardian_scheduler.add_argument("--interval", type=int, default=60)
+
+    automation = sub.add_parser(
+        "automation",
+        help="Show, apply or run the scheduled task defined by [scheduler] in config.toml",
+    )
+    automation_sub = automation.add_subparsers(dest="automation_command", required=True)
+    automation_sub.add_parser(
+        "status", help="Print [scheduler] and the operating system task; changes nothing"
+    )
+    automation_sub.add_parser(
+        "apply", help="Install, update or remove the task so it matches [scheduler] as saved"
+    )
+    automation_sub.add_parser(
+        "remove", help="Remove the task; config.toml is left unchanged"
+    )
+    automation_sub.add_parser(
+        "run", help="Run the configured safe job once, now, in this process"
+    )
+
+    project_move = sub.add_parser(
+        "project-move", help="Copy a project to a new folder and point Codex at it; the old folder is kept"
+    )
+    project_move_sub = project_move.add_subparsers(dest="project_move_command", required=True)
+    project_move_scan = project_move_sub.add_parser(
+        "scan", help="Hash the project and plan the move; writes only the plan file"
+    )
+    project_move_scan.add_argument("--project", required=True, help="Project id, or a name that is unique")
+    project_move_scan.add_argument("--to", required=True, dest="new_root", help="New folder; must not exist yet")
+    project_move_scan.add_argument("--save-plan", default=None, help="Save the plan for a later apply")
+    project_move_apply = project_move_sub.add_parser(
+        "apply", help="Copy, verify, then remap the project root (Codex must be closed)"
+    )
+    project_move_apply.add_argument("--plan", required=True)
+    project_move_apply.add_argument("--confirm-plan", required=True)
+    project_move_apply.add_argument(
+        "--dry-run", action="store_true", help="Run every check and copy nothing"
+    )
 
     repair = sub.add_parser("repair-projects", help="Analyze or apply JSON-only project repairs")
     repair_sub = repair.add_subparsers(dest="repair_command", required=True)
@@ -348,6 +516,22 @@ def build_parser() -> argparse.ArgumentParser:
     sessions_scan.add_argument("--resolutions", default=None, help="Recorded conflict decisions to apply")
     sessions_scan.add_argument("--output", default=None, help="Optional redacted JSON report path")
     sessions_scan.add_argument("--save-plan", default=None, help="Save the frozen plan for a later apply")
+    sessions_scan.add_argument(
+        "--project", action="append", default=[],
+        help="Working set: bring this project's chats into .codex (repeatable, id or name)",
+    )
+    sessions_scan.add_argument(
+        "--chat", action="append", default=[],
+        help="Working set: bring this chat too (repeatable, session id or its start)",
+    )
+    sessions_scan.add_argument(
+        "--scope-file", default=None,
+        help="Working set stored earlier; combined with any --project/--chat given here",
+    )
+    sessions_scan.add_argument(
+        "--save-scope", action="store_true",
+        help="Remember this working set for this pair of machines",
+    )
     sessions_sub.add_parser(
         "index",
         help="Report what each side's session_index.jsonl contains; writes nothing",
@@ -471,9 +655,34 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "init-config":
             output_path = Path(args.output).expanduser()
+            if _init_config_has_values(args):
+                created = init_config_with_values(output_path, args)
+                print(f"Config written: {created}")
+                return int(ExitCode.OK)
             created = init_config_template(output_path=output_path, force=args.force)
             print(f"Config template written: {created}")
             return int(ExitCode.OK)
+
+        if args.command == "automation":
+            if args.automation_command == "status":
+                print_automation_status(automation_status(config_path))
+                return int(ExitCode.OK)
+            if args.automation_command == "apply":
+                view = apply_automation(config_path)
+                print("Scheduled task installed or updated." if view.enabled else
+                      "Scheduled task removed: [scheduler] enabled = false.")
+                print_automation_status(view)
+                return int(ExitCode.OK)
+            if args.automation_command == "remove":
+                existed = remove_automation(config_path)
+                print("Scheduled task removed." if existed else "No scheduled task was installed.")
+                print(
+                    "  config.toml was not changed: while [scheduler] says enabled = true, "
+                    "the next `codexsync automation apply` installs the task again."
+                )
+                return int(ExitCode.OK)
+            if args.automation_command == "run":
+                return print_automation_run(run_automation_job(config_path))
 
         if args.command in {"doctor", "preflight"}:
             operation = {
@@ -496,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
                 manual_terminate_confirmation_override=args.manual_terminate_confirmation_override,
                 enforce_safety=False,
             )
-            print_plan(ctx.plan, volatile=ctx.volatile)
+            print_plan(ctx.plan, volatile=ctx.volatile, direction=ctx.config.sync.direction)
             return int(ExitCode.OK)
 
         if args.command == "guardian" and args.guardian_command == "watch":
@@ -512,7 +721,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "guardian" and args.guardian_command == "snapshot":
             outcome = build_guardian_runner(config_path).once()
             if outcome.status in {"COMMITTED", "UNCHANGED", "BUSY"}:
-                label = "SKIPPED_ACTIVE_GUARDIAN" if outcome.status == "BUSY" else outcome.status
+                label = "SKIPPED_ACTIVE_GUARDIAN" if outcome.status == "BUSY" else outcome.status.value
                 print(f"Guardian snapshot: {label}")
                 return int(ExitCode.OK)
             if outcome.status == "QUARANTINED":
@@ -521,7 +730,130 @@ def main(argv: list[str] | None = None) -> int:
             LOG.error("Guardian snapshot failed: %s", outcome.detail)
             return int(ExitCode.FAIL_SAFE)
 
+        if args.command == "guardian" and args.guardian_command == "list":
+            inventory = read_guardian_inventory(config_path)
+            print(f"Guardian root: {inventory.root_dir}")
+            print(f"  machine: {inventory.machine_id}")
+            print(f"  latest-good: {inventory.latest_good_id or '(none)'}")
+            for snapshot in inventory.snapshots:
+                flags = "latest-good" if snapshot.latest_good else (
+                    "verified" if snapshot.committed and snapshot.verified else "UNVERIFIED"
+                )
+                print(
+                    f"  {snapshot.snapshot_id}  gen={snapshot.generation}  {snapshot.created_at_utc}  "
+                    f"projects={snapshot.project_count} bindings={snapshot.binding_count}  "
+                    f"{snapshot.validation_status}  {flags}"
+                )
+            for item in inventory.quarantine:
+                print(f"  quarantine {item.event_id}  {item.created_at_utc or '?'}  {','.join(item.reason_codes)}")
+            for problem in inventory.problems:
+                print(f"  problem: {problem}")
+            return int(ExitCode.OK)
+
+        if args.command == "guardian" and args.guardian_command == "restore":
+            plan, written = restore_global_state(
+                config_path,
+                snapshot_id=args.snapshot,
+                confirm_plan=args.confirm_plan,
+                dry_run=args.dry_run,
+            )
+            print(f"Guardian restore plan {plan.plan_id}")
+            print(f"  snapshot: {plan.snapshot_id} (generation {plan.generation}, {plan.snapshot_created_at_utc})")
+            print(f"  projects: now {plan.projects_now} -> snapshot {plan.projects_in_snapshot}")
+            print(f"  bindings: now {plan.bindings_now} -> snapshot {plan.bindings_in_snapshot}")
+            for code in plan.codes:
+                print(f"  code: {code}")
+            if plan.identical:
+                print("  The state already equals this snapshot; nothing to restore.")
+                return int(ExitCode.OK)
+            if args.confirm_plan is None:
+                if plan.codes:
+                    return int(ExitCode.CONFLICT_DETECTED)
+                print("  Nothing was written. Close Codex and repeat with:")
+                print(f"    --confirm {plan.plan_id}")
+                return int(ExitCode.OK)
+            label = "Guardian restore dry-run finished" if args.dry_run else "Guardian restore finished"
+            print(f"{label}. files={written}")
+            return int(ExitCode.OK)
+
+        if args.command == "guardian" and args.guardian_command == "accept":
+            plan, accepted = accept_guardian_baseline(config_path, confirm_plan=args.confirm_plan)
+            print(f"Guardian accept plan {plan.plan_id}")
+            if plan.baseline_snapshot_id:
+                print(
+                    f"  baseline: {plan.baseline_snapshot_id} "
+                    f"(generation {plan.baseline_generation}, {plan.baseline_created_at_utc})"
+                )
+            print(f"  projects: baseline {plan.projects_before} -> now {plan.projects_now}")
+            print(f"  bindings: baseline {plan.bindings_before} -> now {plan.bindings_now}")
+            if plan.state_codes:
+                print(f"  validation: {', '.join(plan.state_codes)}")
+            why = plan.explanation
+            if why is not None:
+                print(
+                    f"  projects: {why.projects_replaced} re-created under a new id, "
+                    f"{why.projects_removed} removed, {why.projects_added} new"
+                )
+                print(
+                    f"  lost bindings: {why.bindings_to_replaced_projects} to re-created projects, "
+                    f"{why.bindings_to_removed_projects} to removed projects, "
+                    f"{why.bindings_dropped} dropped from projects that still exist"
+                )
+            for code in plan.codes:
+                print(f"  code: {code}")
+            if accepted is not None:
+                print(f"Guardian baseline accepted: {accepted} is now latest-good")
+                return int(ExitCode.OK)
+            if plan.codes:
+                informational = set(plan.codes) <= {"NO_BASELINE", "NOTHING_TO_ACCEPT"}
+                if informational:
+                    print("  Nothing to accept: the next snapshot commits this state by itself.")
+                return int(ExitCode.OK if informational else ExitCode.CONFLICT_DETECTED)
+            print("  Nothing was written. To make this state the new baseline, repeat with:")
+            print(f"    --confirm {plan.plan_id}")
+            return int(ExitCode.OK)
+
+        if args.command == "project-move" and args.project_move_command == "scan":
+            plan = scan_project_move(config_path, project_id=args.project, new_root=Path(args.new_root).expanduser())
+            print(f"Project move plan {plan.plan_id}")
+            print(f"  project: {plan.project_name or plan.project_id} ({plan.project_id})")
+            print(f"  from: {plan.old_root}   (kept, never modified)")
+            print(f"  to:   {plan.new_root}")
+            print(f"  files: {plan.file_count}   bytes: {plan.total_bytes}   chats to pin: {len(plan.bindings)}")
+            if plan.copy_complete:
+                print("  A verified copy is already in place; apply will only update Codex.")
+            if plan.volatile:
+                print("  VOLATILE: Codex is running; close it and scan again before applying.")
+            for code in plan.codes:
+                print(f"  code: {code}")
+            for code, path in plan.blocked_paths:
+                print(f"    {code}: {path}")
+            if args.save_plan:
+                save_project_move_plan(plan, Path(args.save_plan).expanduser().resolve())
+            return int(ExitCode.CONFLICT_DETECTED if plan.codes else ExitCode.OK)
+
+        if args.command == "project-move" and args.project_move_command == "apply":
+            result = apply_project_move_plan(
+                config_path,
+                plan_path=Path(args.plan).expanduser().resolve(),
+                confirm_plan=args.confirm_plan,
+                dry_run=args.dry_run,
+            )
+            label = "Project move dry-run finished" if result.dry_run else "Project move finished"
+            print(
+                f"{label}. files={result.copied_files} bytes={result.copied_bytes} "
+                f"bindings={result.bindings_written}"
+            )
+            print(f"  new root: {result.new_root}")
+            print(f"  old folder kept: {result.old_root_kept} (delete it yourself once you have checked the copy)")
+            return int(ExitCode.OK)
+
         if args.command == "guardian" and args.guardian_command == "scheduler":
+            print(
+                "DEPRECATED: `guardian scheduler` only renders templates. Set [scheduler] in "
+                "config.toml and run `codexsync automation apply` instead.",
+                file=sys.stderr,
+            )
             templates = render_scheduler_templates(
                 args.platform,
                 executable=Path(sys.executable).resolve(),
@@ -573,11 +905,29 @@ def main(argv: list[str] | None = None) -> int:
             return int(ExitCode.OK)
 
         if args.command == "sessions" and args.sessions_command == "scan":
+            # The working set is read first: it decides what may be written
+            # into `.codex`, and it is part of the plan id.
+            stored = (
+                load_session_scope(Path(args.scope_file).expanduser().resolve())
+                if args.scope_file else None
+            )
+            projects = tuple(args.project) + (stored.projects if stored else ())
+            chats = tuple(args.chat) + (stored.chats if stored else ())
+            scope = (
+                build_working_set(config_path, projects=projects, chats=chats)
+                if projects or chats else None
+            )
+            if scope is not None and args.save_scope:
+                write_working_set(
+                    config_path, scope,
+                    source_machine=args.source_machine, target_machine=args.target_machine,
+                )
             plan = scan_session_transfer(
                 config_path,
                 source_machine=args.source_machine,
                 target_machine=args.target_machine,
                 resolutions_path=Path(args.resolutions).expanduser().resolve() if args.resolutions else None,
+                scope=scope,
             )
             counts: dict[str, int] = {}
             for item in plan.items:
@@ -590,6 +940,12 @@ def main(argv: list[str] | None = None) -> int:
                 "canonical_version": plan.canonical_version,
                 "sessions": len(plan.items),
                 "counts": counts,
+                # The set is reported by size, never by id: a working set names
+                # projects and chats, and those names stay out of the report.
+                "working_set": {
+                    "projects": len(scope.projects) if scope else 0,
+                    "chats": scope.chat_count if scope else 0,
+                } if scope else None,
                 "codes": list(plan.codes),
                 # Session ids, thread names and record payloads never appear:
                 # a conflict is addressed by its id alone.
@@ -780,6 +1136,49 @@ def init_config_template(output_path: Path, force: bool) -> Path:
     template = template_path.read_text(encoding="utf-8")
     output_path.write_text(template, encoding="utf-8")
     return output_path.resolve()
+
+
+def _init_config_has_values(args: argparse.Namespace) -> bool:
+    return any(
+        value is not None
+        for value in (args.machine_id, args.local_state_dir, args.workspace_root, args.cloud_root)
+    )
+
+
+def init_config_with_values(output_path: Path, args: argparse.Namespace) -> Path:
+    """Write a config with real values through the same validating writer the window uses.
+
+    `--force` is refused rather than honoured: regenerating over an existing
+    config would silently discard every edit made to it, and an existing config
+    is changed by editing it, not by writing a fresh one on top.
+    """
+    if args.force:
+        raise ConfigError(
+            "--force cannot be combined with --machine-id/--local-state-dir/--workspace-root/"
+            f"--cloud-root: an existing config is edited, not regenerated ({output_path})."
+        )
+    missing = [
+        flag
+        for flag, value in (
+            ("--machine-id", args.machine_id),
+            ("--local-state-dir", args.local_state_dir),
+            ("--workspace-root", args.workspace_root),
+        )
+        if value is None
+    ]
+    if missing:
+        raise ConfigError(
+            "init-config with values needs --machine-id, --local-state-dir and --workspace-root "
+            f"together; missing: {', '.join(missing)}"
+        )
+    saved = create_config(
+        output_path.resolve(),
+        machine_id=args.machine_id,
+        local_state_dir=args.local_state_dir,
+        workspace_root_dir=args.workspace_root,
+        cloud_root_dir=args.cloud_root,
+    )
+    return Path(saved.path)
 
 
 def _emit_verbose_process_snapshot(verbose: bool, cfg: AppConfig) -> None:

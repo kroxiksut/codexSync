@@ -1,5 +1,22 @@
 # macOS Scheduler Scripts
 
+> **Deprecated.** These scripts are kept for existing installs only and will be
+> removed in a later release. They keep their own settings in `launchd.config.sh`,
+> which makes it a second source of scheduler settings next to `config.toml` --
+> and they run `sync`, which is not one of the safe scheduled modes.
+>
+> Configure automation in the `[scheduler]` section of `config.toml` instead and
+> apply it with:
+>
+> ```
+> codexsync -c <path to config.toml> automation apply
+> codexsync -c <path to config.toml> automation status
+> ```
+>
+> The operating system task is then only the applied form of `[scheduler]`.
+> If you installed a task with `install-launchd.sh`, remove it with the matching
+> uninstall script before running `automation apply`, so two tasks do not run.
+
 This folder contains scripts that install and run a `codexSync` job via **launchd** (`LaunchAgent`).
 
 ## Files

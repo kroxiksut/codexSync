@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEPRECATED: launchd.config.sh is a second source of scheduler settings next to
+# config.toml. Kept working for existing installs; see docs/en/CONFIGURATION.md.
+echo "WARNING: DEPRECATED: install-launchd.sh and launchd.config.sh will be removed in a later release." >&2
+echo "WARNING: Set [scheduler] in config.toml and run 'codexsync -c <config.toml> automation apply' instead." >&2
+echo "WARNING: If you continue, remove this agent first (uninstall-launchd.sh) before using automation apply, so two jobs do not run." >&2
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_PATH="${1:-$SCRIPT_DIR/launchd.config.sh}"
 

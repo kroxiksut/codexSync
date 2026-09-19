@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build-windows-exe:
-    name: Build and publish Windows EXE
+    name: Build and publish Windows EXEs
     runs-on: windows-latest
     env:
       RELEASE_TAG: ${{ github.event.inputs.release_tag }}
@@ -36,6 +36,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
+          # The windowed CodexSync.exe bundles the GUI; codexsync.spec excludes
+          # PySide6 explicitly, so installing the extra does not grow the CLI exe.
+          pip install ".[gui]"
 
       - name: Build EXE
         shell: powershell
@@ -46,6 +49,21 @@ jobs:
           }
           pyinstaller --clean --noconfirm codexsync.spec
 
+      - name: Build windowed CodexSync.exe
+        shell: powershell
+        run: |
+          if (-not (Test-Path "codexsync-gui.spec")) {
+            Write-Error "codexsync-gui.spec is missing; the GUI exe build has no entry point"
+            exit 1
+          }
+          # Its own dist/work paths: Windows file names are case-insensitive, so
+          # dist/CodexSync.exe would silently overwrite the CLI's dist/codexsync.exe.
+          pyinstaller --clean --noconfirm --distpath dist/gui --workpath build/gui codexsync-gui.spec
+          if (-not (Test-Path "dist/gui/CodexSync.exe")) {
+            Write-Error "dist/gui/CodexSync.exe was not produced"
+            exit 1
+          }
+
       - name: Pack release assets
         shell: powershell
         run: |
@@ -54,6 +72,12 @@ jobs:
           Compress-Archive -Path "dist/codexsync.exe" -DestinationPath "dist/$zipName" -Force
           $hash = (Get-FileHash "dist/$zipName" -Algorithm SHA256).Hash.ToLower()
           "$hash  $zipName" | Out-File -FilePath "dist/$zipName.sha256" -Encoding ascii
+          # "CodexSync-gui-...": a name differing from the CLI zip only by case
+          # would be the same file on this runner.
+          $guiZipName = "CodexSync-gui-$version-windows-amd64.zip"
+          Compress-Archive -Path "dist/gui/CodexSync.exe" -DestinationPath "dist/$guiZipName" -Force
+          $guiHash = (Get-FileHash "dist/$guiZipName" -Algorithm SHA256).Hash.ToLower()
+          "$guiHash  $guiZipName" | Out-File -FilePath "dist/$guiZipName.sha256" -Encoding ascii
 
       - name: Upload run artifacts
         uses: actions/upload-artifact@v4
@@ -62,6 +86,8 @@ jobs:
           path: |
             dist/codexsync-${{ env.RELEASE_TAG }}-windows-amd64.zip
             dist/codexsync-${{ env.RELEASE_TAG }}-windows-amd64.zip.sha256
+            dist/CodexSync-gui-${{ env.RELEASE_TAG }}-windows-amd64.zip
+            dist/CodexSync-gui-${{ env.RELEASE_TAG }}-windows-amd64.zip.sha256
 
       - name: Attach assets to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -71,3 +97,5 @@ jobs:
           files: |
             dist/codexsync-${{ env.RELEASE_TAG }}-windows-amd64.zip
             dist/codexsync-${{ env.RELEASE_TAG }}-windows-amd64.zip.sha256
+            dist/CodexSync-gui-${{ env.RELEASE_TAG }}-windows-amd64.zip
+            dist/CodexSync-gui-${{ env.RELEASE_TAG }}-windows-amd64.zip.sha256

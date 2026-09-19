@@ -49,7 +49,7 @@ config.local.toml
 # Russian working documents (local planning notes, not part of the repository)
 *.ru.md
 CLAUDE.md
-# Exception: user-facing translations are tracked
+# Exception: user-facing translations are tracked (docs/ru/*.md never matches *.ru.md)
 !README.ru.md
 
 # Saved operation plans: local, machine-specific, and pinned to state bytes

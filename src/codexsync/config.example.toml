@@ -119,8 +119,10 @@ require_codex_stopped = true
 fail_on_unknown = true
 
 [process_detection]
-# Codex process names across operating systems
-process_names = ["codex.exe", "codex"]
+# Codex process names across operating systems. Matched as whole process
+# names, never as substrings. On Linux `ps` cuts a name to 15 characters and
+# the detector compares the truncation too.
+process_names = ["codex.exe", "codex", "codex-app-server"]
 # Small grace delay after process close before sync starts
 grace_period_seconds = 2
 # Allow automatic Codex process termination before sync (Windows only)
@@ -133,10 +135,30 @@ terminate_confirmation_mode = "gui"
 terminate_timeout_seconds = 20
 
 [process_detection.background_process_names]
-# Background processes treated as "Codex is still running"
-windows = ["codex-windows-sandbox"]
-macos = []
-linux = []
+# Background processes treated as "Codex is still running".
+# An entry containing "/" is a path marker matched against the process path
+# instead of its name: the macOS desktop build is called ChatGPT since
+# 2026-07-09 (bundle id com.openai.codex), and a bare "ChatGPT" would also
+# match the ordinary ChatGPT app, which has nothing to do with Codex.
+windows = [
+  "codex-windows-sandbox",
+  "codex-windows-sandbox-setup",
+  "codex-windows-sandbox-service",
+  "codex-command-runner",
+]
+macos = [
+  "ChatGPT.app/Contents/MacOS/",
+  "codex-app-server",
+  "codex-execve-wrapper",
+  "codex-code-mode-host",
+]
+linux = [
+  "/usr/lib/chatgpt/",
+  "codex-app-server",
+  "codex-linux-sandbox",
+  "codex-execve-wrapper",
+  "codex-code-mode-host",
+]
 
 [state]
 # Internal coordination files between machines
@@ -149,14 +171,21 @@ manifest_file = "${workspace_root}/state/manifest.json"
 data_version = 1
 
 [scheduler]
-# Enable scheduling (manual run is always available)
+# Periodic safe work, registered as a user-level task of the operating system
+# (Task Scheduler on Windows, launchd on macOS, systemd --user on Linux).
+# Manual runs are always available.
 enabled = false
-# Scheduler type: windows_task_scheduler|cron|launchd|systemd
-kind = "windows_task_scheduler"
-# Run interval in minutes
-interval_minutes = 10
-# Random startup jitter (seconds) to reduce simultaneous runs on two machines
-jitter_seconds = 30
+# Safe job only: guardian_snapshot|preflight|sync_dry_run.
+# Mutating operations are deliberately not valid scheduler modes.
+mode = "guardian_snapshot"
+# Repeat interval; must be at least 60 seconds.
+interval_seconds = 60
+# Run the user-level job after the user signs in / user session starts.
+run_at_login = true
+# Optional delay after sign-in or session start; avoids competing with startup.
+startup_delay_seconds = 0
+# Random delay before a regular run; 0 disables it.
+jitter_seconds = 0
 
 [logging]
 # Logging level: DEBUG|INFO|WARNING|ERROR

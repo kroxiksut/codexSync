@@ -11,7 +11,7 @@ which reduction it uses:
 This script only writes a fixture file to a path you choose. It never reads,
 writes or touches a real Codex state directory; moving the fixture into place
 is a manual step, on disposable state, documented in
-docs/experiments/session-index-contract.md.
+docs/dev/experiments/session-index-contract.md.
 
 Usage:
     python scripts/experiments/session_index_contract.py --output fixture.jsonl
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Fixture written: {output}")
     print(f"Session id: {session_id}")
     print()
-    print("Next: follow docs/experiments/session-index-contract.md.")
+    print("Next: follow docs/dev/experiments/session-index-contract.md.")
     print(f"  If Codex shows a name starting with {MARKER_LAST_LINE}-  -> reduction is last-line-wins")
     print(f"  If Codex shows a name starting with {MARKER_MAX_UPDATED}- -> reduction is max-updated-at")
     print("  If it shows neither, or both entries appear, record that verbatim: the")

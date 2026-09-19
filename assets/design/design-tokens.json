@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "branding": {
+    "mark": "../brand/brand-mark.png",
+    "lockup": "../brand/brand-lockup.png",
+    "applicationIcon": "../brand/codexsync.ico",
+    "placement": "Знак слева, название приложения справа от него в одной строке.",
+    "markOnDark": "../../src/codexsync/gui/resources/brand-mark-dark.png"
+  },
+  "colours": {
+    "accent": "#1D5FD0",
+    "accentSoft": "#E7F0FF",
+    "ok": "#137A4C",
+    "okSoft": "#E5F6ED",
+    "attention": "#985B00",
+    "attentionSoft": "#FFF4DE",
+    "danger": "#B3261E",
+    "lightBackground": "#F4F6FA",
+    "lightSurface": "#FFFFFF",
+    "lightText": "#1B2430",
+    "lightMutedText": "#667085",
+    "lightLine": "#DFE4EC",
+    "darkBackground": "#171A20",
+    "darkSurface": "#222730",
+    "darkText": "#EDF1F7",
+    "darkMutedText": "#AEB8C7",
+    "darkLine": "#3B4350",
+    "dangerSoft": "#FBE9E7",
+    "darkOk": "#4CC38A",
+    "darkAttention": "#E0A43A",
+    "darkDanger": "#F2837A",
+    "darkAccentText": "#8DB4FF",
+    "darkSelection": "#243B63"
+  },
+  "layout": {
+    "sidebarWidth": 220,
+    "windowCornerRadius": 14,
+    "surfaceCornerRadius": 9,
+    "controlCornerRadius": 7,
+    "contentPadding": 34,
+    "gridGap": 18
+  },
+  "typography": {
+    "family": "Inter, Segoe UI, system-ui, sans-serif",
+    "weights": [
+      400,
+      500
+    ]
+  }
+}

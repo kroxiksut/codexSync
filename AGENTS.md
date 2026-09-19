@@ -56,8 +56,9 @@ Not delivered and deliberately inert until a controlled experiment records the
 runtime's real behaviour: writing a transferred branch into `.codex`, and
 rewriting `session_index.jsonl`.
 
-A GUI exists only as groundwork behind the optional `codexsync[gui]` extra. 0.2
-is a command-line release.
+The window ships as the optional `codexsync[gui]` extra (and the windowed
+`CodexSync.exe`): a second shell over the same core, which keeps zero runtime
+dependencies.
 
 ## Safety rules
 
