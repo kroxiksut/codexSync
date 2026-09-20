@@ -24,11 +24,12 @@ from .manifest import load_manifest
 from .models import AppConfig
 from .runtime import _make_safety_gate
 from .safety_gate import OperationKind, ProcessState
-from .session_catalog import scan_sessions
+from .session_catalog import peek_record_formats, scan_sessions
 from .session_index import SESSION_INDEX_FILE, parse_session_index
 from .sqlite_audit import audit_sqlite
 from .project_registry import PROVEN_PROJECT_REGISTRY, registry_note
 from .state_locator import resolve_state_dirs
+from .sync_engine import STAGE_DIR_PREFIXES
 
 LOG = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
             ))
         except Exception as exc:
             checks.append(PreflightCheckResult("session_catalog", "WARN", f"Session audit unavailable: {exc}"))
+        checks.append(_check_session_format(local_dir, cloud_dir, cfg.semantic.max_jsonl_line_bytes))
         try:
             sqlite_reports = audit_sqlite(local_dir, cold=False)
             indeterminate = sum(1 for item in sqlite_reports if item.status != "PASS")
@@ -171,6 +173,46 @@ def _check_path_available(name: str, directory: Path) -> PreflightCheckResult:
         return PreflightCheckResult(name, "PASS", f"Path is readable: {directory}")
     except Exception as exc:
         return PreflightCheckResult(name, "FAIL", f"Cannot access {directory}: {exc}")
+
+def _check_session_format(local_dir: Path, cloud_dir: Path | None, max_line_bytes: int) -> PreflightCheckResult:
+    """Whether a record-format rewrite reached this machine and not the mirror, or the reverse.
+
+    The desktop build of September 2026 rewrote every session file into
+    numbered records. A copy on the other side still in the old format is then
+    a conflict for every session it holds, and `sessions apply` refuses until
+    it is decided; saying so here is what makes that a known step rather than
+    two hundred unexplained conflicts.
+    """
+    try:
+        local = peek_record_formats(local_dir, max_line_bytes=max_line_bytes)
+        cloud = (
+            peek_record_formats(cloud_dir, max_line_bytes=max_line_bytes)
+            if cloud_dir is not None and cloud_dir.is_dir() else {}
+        )
+    except Exception as exc:
+        return PreflightCheckResult("session_format", "WARN", f"Session format audit unavailable: {exc}")
+
+    def side(formats: dict[str, str]) -> str:
+        counts: dict[str, int] = {}
+        for value in formats.values():
+            counts[value] = counts.get(value, 0) + 1
+        return ",".join(f"{key}:{value}" for key, value in sorted(counts.items())) or "none"
+
+    # Per branch, not per side: a fresh session is written in the old format
+    # and rewritten later, so both sides can hold both formats and agree.
+    differing = sum(
+        1 for path, value in local.items()
+        if path in cloud and cloud[path] != value and "unreadable" not in {value, cloud[path]}
+    )
+    message = f"local={side(local)} cloud={side(cloud)} differing={differing}"
+    if differing:
+        return PreflightCheckResult(
+            "session_format", "WARN",
+            message + "; those sessions are in a different record format on each side, which a transfer "
+            "reports as FORMAT_MIGRATION conflicts: decide them with `sessions resolve --format-migrations`",
+        )
+    return PreflightCheckResult("session_format", "PASS", message)
+
 
 def _check_process_state(cfg: AppConfig, operation: OperationKind) -> PreflightCheckResult:
     decision = _make_safety_gate(cfg).check(operation)
@@ -312,11 +354,18 @@ def _shrinks_quarantined_since(root: Path, machine: str, snapshot: Path) -> int:
 def _check_orphan_temp_files(temp_dir: Path) -> PreflightCheckResult:
     if not temp_dir.exists():
         return PreflightCheckResult("orphan_temp_files", "PASS", "Temp directory does not exist yet")
-    orphan_files = [path for path in temp_dir.rglob("*.tmp") if path.is_file()]
-    if orphan_files:
+    orphans = [path for path in temp_dir.rglob("*.tmp") if path.is_file()]
+    # A staging *directory* is an orphan too, and a heavier one: `restore`
+    # extracts a whole snapshot into it. Counting only files reported "no
+    # orphans" over an empty one left there by a run in September 2026.
+    orphans.extend(
+        path for path in temp_dir.iterdir()
+        if path.is_dir() and path.name.startswith(STAGE_DIR_PREFIXES)
+    )
+    if orphans:
         return PreflightCheckResult(
             "orphan_temp_files",
             "WARN",
-            f"Found {len(orphan_files)} orphan temp file(s) in {temp_dir}",
+            f"Found {len(orphans)} orphan temp file(s) in {temp_dir}",
         )
     return PreflightCheckResult("orphan_temp_files", "PASS", "No orphan temp files found")

@@ -130,6 +130,15 @@ class SessionsScreen(Screen):
         self.resolution_hint = label("", "muted", wrap=True)
         inner.addLayout(row(label(self.t("sessions.choice.label")), self.choice, self.resolve_button))
         inner.addWidget(self.resolution_hint)
+        # Codex rewrote every session into a newer record format once; each old
+        # copy is then a conflict of its own, and deciding them one by one is
+        # hundreds of clicks for one decision. Shown only when there are some.
+        self.format_hint = label("", "muted", wrap=True)
+        self.format_button = button(self.t("sessions.format.resolve"))
+        self.format_button.clicked.connect(self.resolve_format_migrations)
+        format_line = row(self.format_hint, self.format_button, stretch_last=False)
+        format_line.setStretchFactor(self.format_hint, 1)
+        inner.addLayout(format_line)
         self.body.addWidget(frame, stretch=1)
 
         self.body.addWidget(self._build_working_set())
@@ -453,6 +462,34 @@ class SessionsScreen(Screen):
 
         self.run(go, apply)
 
+    def resolve_format_migrations(self) -> None:
+        model = self.model
+        scan = self._scan()
+        if scan is None or model.action_busy or not _format_migrations(scan.plan)[0]:
+            return
+        model.action_busy = True
+        model.action_kind = "resolve"
+        model.action_result = None
+        self.render()
+        controller = self.host.controller
+        source, target = model.source, model.target
+
+        def go() -> Outcome:
+            recorded = controller.resolve_format_migrations(scan)
+            if not recorded.ok:
+                return recorded
+            return controller.scan_sessions(source_machine=source, target_machine=target)
+
+        def apply(model: SessionsModel, outcome: Outcome) -> None:
+            model.action_busy = False
+            if outcome.ok:
+                model.scan = outcome
+                model.action_result = Outcome(value="resolved")
+            else:
+                model.action_result = outcome
+
+        self.run(go, apply)
+
     def apply(self, *, dry_run: bool) -> None:
         model = self.model
         scan = self._scan()
@@ -567,6 +604,14 @@ class SessionsScreen(Screen):
             self.resolution_hint.setText(self.t("sessions.resolve.hint", conflict_id=conflict[:16]))
         else:
             self.resolution_hint.setText(self.t("sessions.resolve.select"))
+        decidable, held = _format_migrations(scan.plan) if scan is not None else (0, 0)
+        self.format_button.setVisible(bool(decidable))
+        self.format_button.setEnabled(bool(decidable) and not self.model.action_busy)
+        self.format_hint.setVisible(bool(decidable or held))
+        self.format_hint.setText(self.join([
+            self.p("sessions.format.hint", decidable) if decidable else "",
+            self.p("sessions.format.held", held) if held else "",
+        ]))
 
     def _render_plan(self) -> None:
         model = self.model
@@ -587,6 +632,11 @@ class SessionsScreen(Screen):
             ]
             if scan.used_resolutions:
                 notes.append(self.t("sessions.plan.with_resolutions"))
+            # Counted, never listed: the folders are paths on this disk, and the
+            # rows already carry the code for whoever wants to see which.
+            absent = sum(1 for item in plan.items if "CWD_ABSENT_HERE" in item.codes)
+            if absent:
+                notes.append(self.p("sessions.plan.cwd_absent", absent))
             self.plan_note.setText(self.join(notes))
             ready = not plan.volatile and not decide and bool(plan.writable_items)
         busy = model.busy or model.action_busy
@@ -609,6 +659,16 @@ class SessionsScreen(Screen):
         self.status.setText(text)
         set_tone(self.status, tone, palette)
         self.status.setVisible(bool(text))
+
+
+def _format_migrations(plan) -> tuple[int, int]:
+    """Conflicts that are only a record-format rewrite: decidable in bulk, and held."""
+    rewrites = [
+        item for item in plan.items
+        if item.action.value == "BLOCKED_CONFLICT" and "FORMAT_MIGRATION" in item.codes
+    ]
+    held = sum(1 for item in rewrites if "OLDER_FORMAT_HAS_LATER_RECORDS" in item.codes)
+    return len(rewrites) - held, held
 
 
 def _size(size: int) -> str:

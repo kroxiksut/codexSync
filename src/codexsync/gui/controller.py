@@ -70,6 +70,7 @@ from ..app import (
     read_guardian_inventory,
     move_chats,
     record_branch_resolution,
+    record_format_migrations,
     resume_operation,
     rollback_operation,
     run_preflight,
@@ -518,6 +519,10 @@ class Controller:
         return run(lambda: record_branch_resolution(
             scan.plan_path, conflict_id=conflict_id, choice=choice, output_path=scan.resolutions_path
         ))
+
+    def resolve_format_migrations(self, scan: SessionScan) -> Outcome:
+        """Keep the newer record format for every conflict that is only a rewrite."""
+        return run(lambda: record_format_migrations(scan.plan_path, output_path=scan.resolutions_path))
 
     def scan_repair(
         self, *, source_machine: str, target_machine: str,

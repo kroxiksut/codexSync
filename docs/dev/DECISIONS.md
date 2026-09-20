@@ -152,3 +152,41 @@ ids disappeared; the store stayed on the 2026-09-05 snapshot.
 - Retention never prunes an accepted snapshot or the baseline it overrode.
 - It writes only into the Guardian root, so it is allowed while Codex is open.
   `doctor` warns when shrink quarantines are newer than `latest-good`.
+
+## D-015: A record-format rewrite by Codex is a conflict decided in bulk
+The session model assumed a history only grows: a branch changes at its end or
+not at all, which is what makes a prefix a fast-forward and anything else a
+divergence. The September 2026 desktop build broke that itself. It rewrote every
+existing session file into numbered records (`ordinal` on each record, messages
+moved into `item` payloads, `session_meta` carrying `session_id` and
+`history_mode`), kept each file's mtime, and dropped records on the way: turns
+the person had rolled back, repeated `session_meta` records, injected
+instructions and most of the guardian sub-agent reviews. Observed on 2026-09-19:
+all 277 local sessions rewritten, the mirror written on 2026-09-05 still holding
+242 of them in the old format, and every one of those a
+`DIVERGED_NO_COMMON_RECORDS` that refused `sessions apply` as a whole.
+
+What was decided:
+
+- It stays a conflict. The two copies are not the same history, and proving
+  "same history, re-encoded" would mean trusting a projection of one format onto
+  the other that the dropped records already contradict. The catalogue records
+  each branch's record format (`legacy`, `ordinal`, `mixed`) and the latest
+  record time; a conflict between two formats is labelled `FORMAT_MIGRATION`
+  with the newer side, and nothing else about it changes — not its conflict id,
+  not the fact that it blocks.
+- One explicit decision covers all of them. `sessions resolve
+  --format-migrations` writes an ordinary pinned resolution keeping the newer
+  side for each. It never decides a conflict whose older copy has a record later
+  than anything in the newer one (`OLDER_FORMAT_HAS_LATER_RECORDS`): that copy
+  may hold work done elsewhere before the upgrade.
+- The loser is kept, alone and compressed. A conflict bundle stores both raw
+  branches; here the winner is what the destination is about to hold, and both
+  copies of 242 sessions would have been about two gigabytes written into a
+  folder the config allows to be in the cloud. `superseded/<branch sha256>/`
+  holds the old branch in the mirror's container, verified by decompressing it
+  before the directory is committed. It is the only surviving copy of what the
+  rewrite dropped, and nothing prunes it.
+- `doctor` reports both sides' formats from each file's first record
+  (`session_format`), so a rewrite that reached one side is a known step rather
+  than two hundred unexplained conflicts.

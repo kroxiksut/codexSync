@@ -39,11 +39,13 @@ from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
+import os
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .exceptions import FailSafeError
 from .jsonl_codec import JsonlCodec, codec_of, logical_name, with_codec
+from .path_mapping import PathMappingError, PathMappingRule, apply_path_mapping, path_flavor
 from .semantic_merge import (
     CANONICAL_DIGEST_VERSION,
     BranchComparison,
@@ -51,7 +53,7 @@ from .semantic_merge import (
     BranchState,
     compare_session_branches,
 )
-from .session_catalog import SessionCatalog, SessionDescriptor, SessionState
+from .session_catalog import RECORD_FORMAT_RANK, SessionCatalog, SessionDescriptor, SessionState
 from .sqlite_audit import PlacementStatus, ThreadPlacements
 
 
@@ -171,6 +173,99 @@ def mirror_codec_for(layout_id: str) -> JsonlCodec:
     )
 
 
+#: A branch bound for `.codex` whose working folder does not exist here. The
+#: chat still reads without it, and the folder may be created later, so this
+#: blocks nothing; it says in the plan what a person would otherwise find out
+#: only by opening the chat. Projects kept outside the synced folder are the
+#: usual reason, and a working set is the usual answer.
+CWD_ABSENT_HERE = "CWD_ABSENT_HERE"
+#: Two `[[path_mappings]]` rules send the folder to different places, so where
+#: it would be here is not known -- which is not the same as absent.
+CWD_MAPPING_AMBIGUOUS = "CWD_MAPPING_AMBIGUOUS"
+_CWD_CODES = (CWD_ABSENT_HERE, CWD_MAPPING_AMBIGUOUS)
+
+#: Two copies of one session that disagree because the runtime rewrote one of
+#: them into a newer record format -- the September 2026 desktop build did that
+#: to every session file at once. It stays a conflict: the rewrite also dropped
+#: records (turns the person had rolled back, resumed `session_meta`, injected
+#: instructions), so the two are not the same history and nothing proves they
+#: are. The code only says what kind of conflict it is, so that one explicit
+#: decision can cover all of them (`format_migration_resolutions`).
+FORMAT_MIGRATION = "FORMAT_MIGRATION"
+#: Which side holds the newer format. The bulk decision keeps that side.
+NEWER_FORMAT_LOCAL = "NEWER_FORMAT_LOCAL"
+NEWER_FORMAT_REMOTE = "NEWER_FORMAT_REMOTE"
+#: The older-format copy has a record later than anything in the newer one, so
+#: it may carry work the rewrite never saw -- a turn taken on another machine
+#: before it was upgraded. The bulk decision leaves such a conflict to a person.
+OLDER_FORMAT_HAS_LATER_RECORDS = "OLDER_FORMAT_HAS_LATER_RECORDS"
+
+
+def _format_migration_codes(local: SessionDescriptor, remote: SessionDescriptor) -> tuple[str, ...]:
+    """What a conflict between two copies in different record formats is."""
+    local_rank = RECORD_FORMAT_RANK.get(local.record_format or "")
+    remote_rank = RECORD_FORMAT_RANK.get(remote.record_format or "")
+    if local_rank is None or remote_rank is None or local_rank == remote_rank:
+        return ()
+    newer, older = (local, remote) if local_rank > remote_rank else (remote, local)
+    codes = [FORMAT_MIGRATION, NEWER_FORMAT_LOCAL if newer is local else NEWER_FORMAT_REMOTE]
+    if older.last_record_at and (newer.last_record_at is None or older.last_record_at > newer.last_record_at):
+        codes.append(OLDER_FORMAT_HAS_LATER_RECORDS)
+    return tuple(codes)
+
+
+def local_folder_exists(path: str) -> bool:
+    """Whether ``path`` names a directory on this machine. Reads only.
+
+    A path of another platform's shape is absent rather than tried: on Windows
+    ``/Users/me/project`` would otherwise be looked up on the current drive,
+    which answers a question nobody asked.
+    """
+    native = ("windows", "unc") if os.name == "nt" else ("posix",)
+    if path_flavor(path) not in native:
+        return False
+    return os.path.isdir(path)
+
+
+def _working_folder_check(
+    rules: list[PathMappingRule],
+    source_machine: str,
+    target_machine: str,
+    folder_exists: Callable[[str], bool],
+) -> Callable[[SessionDescriptor], str | None]:
+    """What a branch recorded on ``source_machine`` has to say about its folder here.
+
+    The folder goes through the same `[[path_mappings]]` rules `chats` and
+    `repair-projects` use, in the same direction, so all three agree on where
+    a chat's folder is on this machine. Many chats share a folder, so each is
+    looked up once.
+    """
+    seen: dict[str, str | None] = {}
+
+    def check(descriptor: SessionDescriptor) -> str | None:
+        cwd = descriptor.cwd
+        if not cwd:
+            return None
+        if cwd not in seen:
+            seen[cwd] = _folder_code(cwd)
+        return seen[cwd]
+
+    def _folder_code(cwd: str) -> str | None:
+        here = cwd
+        if rules:
+            try:
+                here = apply_path_mapping(
+                    cwd, source_machine=source_machine, target_machine=target_machine, rules=rules
+                ).target_path
+            except PathMappingError as exc:
+                if str(exc) == "AMBIGUOUS_MAPPING":
+                    return CWD_MAPPING_AMBIGUOUS
+                # No rule for this folder: it is expected at the same path.
+        return None if folder_exists(here) else CWD_ABSENT_HERE
+
+    return check
+
+
 @dataclass(frozen=True, slots=True)
 class BranchResolution:
     """A user's versioned choice between two divergent branches.
@@ -254,6 +349,36 @@ def conflict_id_for(session_hash: str, local_sha256: str, remote_sha256: str) ->
     return hashlib.sha256(f"{session_hash}\0{material}".encode("utf-8")).hexdigest()
 
 
+def format_migration_resolutions(
+    plan: TransferPlan,
+) -> tuple[list[BranchResolution], list[TransferItem]]:
+    """One decision for every conflict that is only a record-format rewrite.
+
+    Each keeps the side in the newer format and is an ordinary resolution:
+    pinned to both branch hashes, so a branch that moves afterwards makes it
+    stale, and the losing branch is preserved when the plan is applied. A
+    conflict whose older copy has a later record is returned separately and
+    never decided here -- that copy may hold work the rewrite never saw.
+    """
+    decided: list[BranchResolution] = []
+    held: list[TransferItem] = []
+    for item in plan.items:
+        if item.action is not TransferAction.BLOCKED_CONFLICT or FORMAT_MIGRATION not in item.codes:
+            continue
+        if item.conflict_id is None:
+            continue
+        if OLDER_FORMAT_HAS_LATER_RECORDS in item.codes:
+            held.append(item)
+            continue
+        choice = (
+            ResolutionChoice.KEEP_LOCAL if NEWER_FORMAT_LOCAL in item.codes else ResolutionChoice.KEEP_REMOTE
+        )
+        decided.append(BranchResolution(
+            item.conflict_id, item.session_hash, item.local_sha256, item.remote_sha256, choice,
+        ))
+    return decided, held
+
+
 def build_transfer_plan(
     local_catalog: SessionCatalog,
     remote_catalog: SessionCatalog,
@@ -270,6 +395,8 @@ def build_transfer_plan(
     max_line_bytes: int = 64 * 1024 * 1024,
     volatile: bool = False,
     scope: Iterable[str] | None = None,
+    path_rules: list[PathMappingRule] | None = None,
+    folder_exists: Callable[[str], bool] | None = None,
 ) -> TransferPlan:
     """Classify every session present on either side and freeze the decisions.
 
@@ -282,7 +409,17 @@ def build_transfer_plan(
     ``scope`` is the working set: session hashes that may be written into
     `.codex`. ``None`` means everything, which is what every plan meant before
     working sets existed. The mirror is written in full either way.
+
+    ``folder_exists`` turns on the working-folder check: a branch bound for
+    `.codex` whose folder, mapped through ``path_rules``, is not a directory
+    here carries `CWD_ABSENT_HERE`. The codes are part of the plan id, so a
+    folder created between the scan and the apply asks for a rescan like any
+    other change. Without it no code is added and a plan hashes as before.
     """
+    cwd_code = (
+        _working_folder_check(path_rules or [], source_machine, target_machine, folder_exists)
+        if folder_exists is not None else None
+    )
     resolutions = resolutions or {}
     # A changed branch changes the conflict id, so an earlier choice would
     # simply not be found. Index by session too, to say "your decision is
@@ -316,6 +453,7 @@ def build_transfer_plan(
                     placements=placements, layout_id=layout_id,
                     mirror_codec=mirror_codec,
                     claimed_targets=claimed_targets,
+                    cwd_code=cwd_code,
                 )
             )
             continue
@@ -336,6 +474,7 @@ def build_transfer_plan(
             layout_id=layout_id,
             mirror_codec=mirror_codec,
             claimed_targets=claimed_targets,
+            cwd_code=cwd_code,
         )
         items.append(item)
         codes.extend(item.codes)
@@ -346,6 +485,9 @@ def build_transfer_plan(
             code for item in items if item.action is TransferAction.OUT_OF_SCOPE
             for code in item.codes
         )
+    # One-sided items do not feed the plan's codes, but a missing folder is
+    # worth saying at plan level whichever kind of item it was found on.
+    codes.extend(code for item in items for code in item.codes if code in _CWD_CODES)
     if any(item.action.is_blocked for item in items):
         codes.append("PLAN_HAS_BLOCKED_ITEMS")
     plan = TransferPlan(
@@ -393,6 +535,7 @@ def _decide(
     layout_id: str,
     mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
+    cwd_code: Callable[[SessionDescriptor], str | None] | None = None,
 ) -> TransferItem:
     def make(action: TransferAction, *, target: str | None = None, conflict: str | None = None,
              extra: tuple[str, ...] = ()) -> TransferItem:
@@ -408,6 +551,7 @@ def _decide(
 
     if comparison.is_conflict:
         conflict = conflict_id_for(session_hash, comparison.local_sha256, comparison.remote_sha256)
+        kind = _format_migration_codes(local, remote)
         resolution = resolutions.get(conflict)
         if resolution is None:
             previous = resolutions_by_session.get(session_hash)
@@ -415,13 +559,13 @@ def _decide(
                 # A decision exists for this session but was made about other
                 # bytes: report it as stale rather than as an unseen conflict.
                 return make(
-                    TransferAction.BLOCKED_CONFLICT, conflict=conflict, extra=("STALE_RESOLUTION",)
+                    TransferAction.BLOCKED_CONFLICT, conflict=conflict, extra=kind + ("STALE_RESOLUTION",)
                 )
-            return make(TransferAction.BLOCKED_CONFLICT, conflict=conflict)
+            return make(TransferAction.BLOCKED_CONFLICT, conflict=conflict, extra=kind)
         if not resolution.matches(comparison):
-            return make(TransferAction.BLOCKED_CONFLICT, conflict=conflict, extra=("STALE_RESOLUTION",))
+            return make(TransferAction.BLOCKED_CONFLICT, conflict=conflict, extra=kind + ("STALE_RESOLUTION",))
         if resolution.choice is ResolutionChoice.DEFER:
-            return make(TransferAction.BLOCKED_CONFLICT, conflict=conflict, extra=("DEFERRED",))
+            return make(TransferAction.BLOCKED_CONFLICT, conflict=conflict, extra=kind + ("DEFERRED",))
         resolved = (
             TransferAction.FAST_FORWARD_REMOTE if resolution.choice is ResolutionChoice.KEEP_LOCAL
             else TransferAction.FAST_FORWARD_LOCAL
@@ -429,8 +573,8 @@ def _decide(
         return _gate_write(
             make, resolved, session_id, local, remote,
             placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
-            claimed_targets=claimed_targets,
-            conflict=conflict, extra=("RESOLVED_BY_USER",),
+            claimed_targets=claimed_targets, cwd_code=cwd_code,
+            conflict=conflict, extra=kind + ("RESOLVED_BY_USER",),
         )
 
     action = {
@@ -441,7 +585,7 @@ def _decide(
     return _gate_write(
         make, action, session_id, local, remote,
         placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
-        claimed_targets=claimed_targets,
+        claimed_targets=claimed_targets, cwd_code=cwd_code,
     )
 
 
@@ -455,6 +599,7 @@ def _one_sided_item(
     layout_id: str,
     mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
+    cwd_code: Callable[[SessionDescriptor], str | None] | None = None,
 ) -> TransferItem:
     """Decide a session that exists on one side only.
 
@@ -482,7 +627,7 @@ def _one_sided_item(
     return _gate_write(
         make, action, session_id, local, remote,
         placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
-        claimed_targets=claimed_targets,
+        claimed_targets=claimed_targets, cwd_code=cwd_code,
         extra=("SESSION_ON_ONE_SIDE_ONLY",),
     )
 
@@ -498,12 +643,20 @@ def _gate_write(
     layout_id: str,
     mirror_codec: JsonlCodec,
     claimed_targets: dict[str, str],
+    cwd_code: Callable[[SessionDescriptor], str | None] | None = None,
     conflict: str | None = None,
     extra: tuple[str, ...] = (),
 ) -> TransferItem:
     source = remote if action is TransferAction.FAST_FORWARD_LOCAL else local
     if source is None:
         raise FailSafeError("A transfer decision has no source branch to copy")
+    if action is TransferAction.FAST_FORWARD_LOCAL and cwd_code is not None:
+        # Said before the gate decides, so a branch blocked on the layout or the
+        # catalogue -- or later held back by the working set -- still tells a
+        # person what it would have been like here.
+        folder = cwd_code(source)
+        if folder is not None:
+            extra = extra + (folder,)
     if action is TransferAction.FAST_FORWARD_REMOTE:
         # Destination is codexSync's own mirror, which no Codex reads, so the
         # layout is ours and the source path is the answer rather than a guess.

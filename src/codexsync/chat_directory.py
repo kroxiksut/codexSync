@@ -431,6 +431,15 @@ def _read_title(path: Path, max_line_bytes: int) -> str | None:
                     text = _clean(payload.get("message"))
                     if text:
                         return text
+                if record.get("type") == "event_msg" and payload.get("type") == "item_completed":
+                    # The same turn as the runtime's ordinal record format writes
+                    # it when it rewrites an old history: the message moved into
+                    # `item.content`, the event kind into `item.type`.
+                    item = payload.get("item")
+                    if isinstance(item, dict) and item.get("type") == "UserMessage":
+                        text = _clean(_first_text(item.get("content")))
+                        if text:
+                            return text
                 if (
                     fallback is None
                     and record.get("type") == "response_item"

@@ -35,8 +35,10 @@ temp_dir = "${workspace_root}/.tmp"
   during a cold operation, and never created.
 - **`cloud_root_dir`** is the mirror of the state in the cloud folder.
 - **`backup_dir`** holds the backups taken before anything is replaced.
-- **`temp_dir`** is where every copy is staged and verified before the first
-  destination is touched.
+- **`temp_dir`** holds the operation lock and the mutation journal, and is
+  where `restore` unpacks a snapshot. A copy itself is staged and verified in
+  the folder of its destination: an atomic replace only works within one volume,
+  and `.codex` is often on another drive than the cloud folder.
 
 A relative path is resolved against `workspace_root_dir`, or against the folder
 `config.toml` is in when there is no workspace.

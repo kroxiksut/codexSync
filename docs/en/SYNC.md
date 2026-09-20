@@ -31,7 +31,7 @@ A plan built while Codex is open is marked `volatile` and is only a preview:
 include_roots = ["sessions", "session_index.jsonl", "skills", "plugins"]
 
 [filters]
-exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log"]
+exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log", "skills/.system/**"]
 ```
 
 - `include_roots` are paths relative to `.codex` (and to the mirror). The
@@ -45,6 +45,10 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
   SQLite. Copying them by modification time can lose a history that grew on both
   machines, so they are handled by [`sessions`](SESSIONS.md), [Guardian](GUARDIAN.md)
   and [`repair-projects`](PROJECTS.md) instead.
+- `skills/.system/**` is excluded because the Codex runtime installs and
+  removes those skills itself. With `delete_policy = "never"` a file it deleted
+  would be restored from the mirror on the next run, and deleted again — the
+  tree is left to the runtime entirely.
 - The Settings screen never offers a credential file (`auth.json` and the like)
   for inclusion.
 - `sync.session_mode = "last_date_only"` is refused: it can discard branches.

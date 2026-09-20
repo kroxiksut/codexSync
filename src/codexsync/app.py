@@ -106,9 +106,12 @@ from .semantic_transfer import (
     ResolutionChoice,
     TransferAction,
     TransferPlan,
+    FORMAT_MIGRATION,
     build_transfer_plan,
     descriptors_by_session_hash,
+    format_migration_resolutions,
     load_transfer_plan,
+    local_folder_exists,
     mirror_codec_for,
     save_transfer_plan,
 )
@@ -200,6 +203,7 @@ __all__ = [
     "load_config",
     "print_preflight_report",
     "record_branch_resolution",
+    "record_format_migrations",
     "restore_from_backup",
     "commit_global_state",
     "move_chats",
@@ -762,6 +766,8 @@ def scan_session_transfer(
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=volatile,
         scope=scope.session_hashes if scope is not None and not scope.is_empty else None,
+        path_rules=cfg.path_mappings,
+        folder_exists=local_folder_exists,
     )
 
 
@@ -890,8 +896,35 @@ def record_branch_resolution(
         conflict_id, item.session_hash, item.local_sha256, item.remote_sha256,
         ResolutionChoice(choice),
     )
+    _write_branch_resolutions(output_path, [resolution])
+    return resolution
+
+
+def record_format_migrations(
+    plan_path: Path, *, output_path: Path
+) -> tuple[list[BranchResolution], list[str]]:
+    """Record one decision for every conflict that is only a format rewrite.
+
+    Each keeps the copy in the newer record format, and each is an ordinary
+    pinned resolution -- the person makes this decision once, for all of them,
+    by running it. A conflict whose older copy holds a later record is left for
+    a separate decision. Returns what was recorded and the conflict ids left,
+    which name no session and are what `--conflict` takes.
+    """
+    try:
+        plan = load_transfer_plan(plan_path)
+    except ValueError as exc:
+        raise ConfigError(f"Cannot read transfer plan {plan_path}: {exc}") from exc
+    decided, held = format_migration_resolutions(plan)
+    if decided:
+        _write_branch_resolutions(output_path, decided)
+    return decided, sorted(item.conflict_id for item in held if item.conflict_id)
+
+
+def _write_branch_resolutions(output_path: Path, resolutions: list[BranchResolution]) -> None:
     existing = load_branch_resolutions(output_path) if output_path.exists() else {}
-    existing[conflict_id] = resolution
+    for resolution in resolutions:
+        existing[resolution.conflict_id] = resolution
     payload = {
         "format": "codexsync-branch-resolutions-v1",
         "resolutions": [
@@ -912,7 +945,6 @@ def record_branch_resolution(
         encoding="utf-8",
         newline="\n",
     )
-    return resolution
 
 
 #: Blocked actions that stop an apply outright, because each one names a
@@ -1114,6 +1146,10 @@ def _rebuild_transfer_plan(
         # now: the id covers the scope, so a set edited after the scan applies
         # to the next scan, not to a confirmation already given.
         scope=plan.scope or None,
+        # The rules as they are now: the codes they produce are in the id, so a
+        # rule edited after the scan is a changed plan, not a silent one.
+        path_rules=cfg.path_mappings,
+        folder_exists=local_folder_exists,
     )
     return (
         fresh,
@@ -1182,7 +1218,12 @@ def _bundle_resolved_conflicts(
     local_by_hash: dict,
     remote_by_hash: dict,
 ) -> list[Path]:
-    """Preserve both raw branches of every conflict this apply resolves."""
+    """Preserve the branches of every conflict this apply resolves.
+
+    A divergence keeps both raw branches. A format rewrite keeps only the branch
+    being overwritten, compressed: the other one is what the destination is
+    about to hold, and copying all of them was a gigabyte into the cloud.
+    """
     resolved = [item for item in plan.items if "RESOLVED_BY_USER" in item.codes]
     if not resolved:
         return []
@@ -1193,6 +1234,25 @@ def _bundle_resolved_conflicts(
         remote = remote_by_hash.get(item.session_hash)
         if local is None or remote is None:
             raise FailSafeError("A resolved conflict is missing one of its branches")
+        if FORMAT_MIGRATION in item.codes:
+            if not item.action.writes:
+                # Held back by the layout gate or the working set: nothing is
+                # overwritten, so there is nothing to keep yet.
+                continue
+            losing = (
+                cloud_dir / Path(*remote.relative_path.split("/"))
+                if item.action is TransferAction.FAST_FORWARD_REMOTE
+                else local_dir / Path(*local.relative_path.split("/"))
+            )
+            kept = store.archive_superseded(
+                losing,
+                session_id=local.session_id or remote.session_id or "",
+                reason=FORMAT_MIGRATION,
+                codec=cfg.semantic.mirror_compression,
+            )
+            LOG.info("superseded branch archived for plan %s: %s", plan.plan_id, kept.name)
+            bundles.append(kept)
+            continue
         bundle = store.conflict_bundle(
             local_dir / Path(*local.relative_path.split("/")),
             cloud_dir / Path(*remote.relative_path.split("/")),

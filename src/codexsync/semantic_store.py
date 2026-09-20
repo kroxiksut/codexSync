@@ -16,6 +16,13 @@ that loses is about to be overwritten and its only other copy would be a backup
 that retention expires. That one really does need the raw bytes, so it keeps
 them, and retention never touches this store.
 
+**A superseded branch is half a bundle.** When the runtime rewrote a session
+into a newer record format, the conflict is resolved for the rewritten copy and
+the other one is kept alone and compressed: storing the winner too would copy a
+branch that is about to sit in the mirror anyway, and on the machine this was
+found on the losers were 242 sessions, a gigabyte uncompressed. It is keyed by
+the branch's own hash, so storing it twice stores it once.
+
 Both are committed the same way and for the same reason: staging, hash
 verification, then an atomic move. For a manifest entry that is a single
 self-verifying file replaced in one step, rather than a payload plus a separate
@@ -44,7 +51,7 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 
-from .jsonl_codec import open_jsonl
+from .jsonl_codec import JsonlCodec, codec_of, open_jsonl, transcode, with_codec
 
 from .exceptions import FailSafeError
 
@@ -242,6 +249,53 @@ class SemanticStore:
                 continue
             seen[peer.machine_id] = max(seen.get(peer.machine_id, 0), peer.generation)
         return seen
+
+    # --- superseded branches ---------------------------------------------
+
+    def archive_superseded(
+        self,
+        branch: Path,
+        *,
+        session_id: str,
+        reason: str,
+        codec: JsonlCodec = JsonlCodec.XZ,
+    ) -> Path:
+        """Keep one branch that a resolution is about to overwrite, compressed.
+
+        Staged, then read back and hashed through the container before the
+        directory is moved into place, so what is committed is proven to
+        decompress to exactly the branch that was superseded.
+        """
+        sha256, size, lines = _file_metrics(branch)
+        # One level, named by the branch itself, like `conflicts/`: two 64-character
+        # levels under a cloud folder come close to the 260-character Windows path
+        # limit, and the session it belongs to is in the manifest anyway.
+        destination = self.root / "superseded" / sha256
+        if (destination / "COMMITTED").is_file():
+            return destination
+        stage = self.root / ".staging" / "superseded" / uuid4().hex
+        _mkdir_private(stage)
+        body = stage / with_codec("branch.jsonl", codec)
+        transcode(branch, body, codec_of(branch.name) or JsonlCodec.NONE, codec)
+        if _file_metrics(body)[0] != sha256:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise FailSafeError("A superseded branch failed verification before it was archived")
+        _chmod_file(body)
+        _write_json(stage / "manifest.json", {
+            "format": "codexsync-superseded-v1",
+            "session_hash": session_hash_for(session_id),
+            "sha256": sha256, "size": size, "records": lines,
+            "container": codec.value, "reason": reason,
+            "archived_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        })
+        if destination.is_dir():
+            # A previous attempt stopped before its marker: it proves nothing,
+            # and this one has just been verified.
+            shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(stage, destination)
+        _write_json(destination / "COMMITTED", {"sha256": sha256})
+        return destination
 
     # --- conflict bundles --------------------------------------------------
 

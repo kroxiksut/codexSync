@@ -30,7 +30,7 @@ codexsync -c config.toml sync --apply      # 真正的同步
 include_roots = ["sessions", "session_index.jsonl", "skills", "plugins"]
 
 [filters]
-exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log"]
+exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log", "skills/.system/**"]
 ```
 
 - `include_roots` 是相对于 `.codex`（以及镜像）的路径。模板里列出了 `sessions` 和
@@ -41,6 +41,9 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
   `session_index.jsonl`、全局项目状态和 SQLite。按修改时间复制它们可能丢掉在两台机器
   上都增长过的历史，因此改由 [`sessions`](SESSIONS.md)、[守护](GUARDIAN.md) 和
   [`repair-projects`](PROJECTS.md) 来处理。
+- `skills/.system/**` 被排除：这些技能由 Codex 运行时自己安装和删除。在
+  `delete_policy = "never"` 下，它删掉的文件会在下一次运行时从镜像里恢复，然后再被
+  删掉——因此这棵子树完全交给运行时。
 - 「设置」页面永远不会把存放凭据的文件（`auth.json` 之类）列出来供你加入同步。
 - `sync.session_mode = "last_date_only"` 会被拒绝：它可能丢掉分支。
 

@@ -78,6 +78,14 @@ def mapping_digest(rules: list[PathMappingRule]) -> str:
     return digest.hexdigest()
 
 
+def path_flavor(value: str) -> str | None:
+    """``windows``, ``unc`` or ``posix`` for an absolute path, ``None`` otherwise."""
+    try:
+        return _parse(value)[0]
+    except PathMappingError:
+        return None
+
+
 def _parse(value: str) -> tuple[str, tuple[str, ...]]:
     raw = value.strip()
     if not raw:

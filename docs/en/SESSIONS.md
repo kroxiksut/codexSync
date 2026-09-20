@@ -53,6 +53,15 @@ A session held back is reported as `OUT_OF_SCOPE`. It blocks nothing, and it
 carries what it would have been (`WOULD_BE_…`), so the summary says what is held
 back instead of omitting it.
 
+A chat whose working folder does not exist on this machine — usually a project
+kept outside the synced folder — is marked `CWD_ABSENT_HERE`, and
+`sessions scan` counts such chats in `cwd_absent_here`. The folder is looked for
+where `[[path_mappings]]` puts it; when two rules disagree the chat is marked
+`CWD_MAPPING_AMBIGUOUS` instead of guessed about. The mark blocks nothing: it is
+there so you can leave those projects out of the working set rather than find
+out by opening the chat. A folder created after the scan changes the plan id, so
+the apply asks for a new scan.
+
 ## Divergences
 
 A divergence is never resolved automatically — no interleaving, no sorting by
@@ -70,6 +79,35 @@ refused as `STALE_RESOLUTION` rather than applied to a history you never saw.
 
 Record equality is decided by raw bytes. Canonical JSON is consulted only where it
 is provably unambiguous, so two different records can never collapse into one.
+
+### When Codex rewrote its sessions
+
+In September 2026 the Codex desktop build rewrote every existing session file
+into a new record format: each record is numbered (`ordinal`), messages moved
+into other fields, and some records were dropped on the way — turns you had
+rolled back, repeated `session_meta` records, injected instructions. Each file
+kept its old modification time. A cloud mirror written before that disagrees
+with every session it holds.
+
+Such a conflict is marked `FORMAT_MIGRATION`, with `NEWER_FORMAT_LOCAL` or
+`NEWER_FORMAT_REMOTE`, and `doctor` warns (`session_format`) while one side is
+still in the older format. It stays a conflict, because the two copies are not
+the same history, but one decision covers all of them:
+
+```powershell
+codexsync -c config.toml sessions resolve --plan sessions-plan.json --format-migrations --output resolutions.json
+```
+
+It keeps the copy in the newer format for each one, pinned like any other
+decision. It leaves alone a conflict marked `OLDER_FORMAT_HAS_LATER_RECORDS`:
+there the old copy has a record later than anything in the new one, which can be
+work done elsewhere before the upgrade, so it needs its own `--conflict …
+--choice …`. In the window this is the **Keep the new format for all** button.
+
+When the plan is applied, each old copy about to be overwritten is kept once,
+compressed, under `superseded/` in `semantic.root_dir` — the only place the
+dropped records still exist. Unlike a conflict bundle, the copy that wins is not
+stored a second time.
 
 ## Applying a plan
 

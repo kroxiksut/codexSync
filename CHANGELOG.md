@@ -10,6 +10,26 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **Codex rewriting its own sessions is recognised.** The September 2026
+  desktop build rewrote every session file into numbered records (keeping each
+  file's mtime and dropping rolled-back turns on the way), which made a mirror
+  written earlier conflict on every session and refused `sessions apply` as a
+  whole. The catalogue now records each branch's record format; such a conflict
+  is marked `FORMAT_MIGRATION` and stays a conflict, and
+  `sessions resolve --format-migrations` (or one button on the Sessions screen)
+  records the newer-format side for all of them at once, except where the old
+  copy has a later record (`OLDER_FORMAT_HAS_LATER_RECORDS`). Each overwritten
+  old copy is kept once, compressed, under `superseded/` in the semantic root
+  rather than as a two-branch uncompressed conflict bundle. `doctor` reports the
+  format of both sides (`session_format`), and chat titles are read from the
+  rewritten records too.
+- **A chat without its folder here is named in the session plan.** A branch
+  bound for `.codex` whose working folder, mapped through `[[path_mappings]]`,
+  is not a directory on this machine carries `CWD_ABSENT_HERE`
+  (`CWD_MAPPING_AMBIGUOUS` when two rules disagree); `sessions scan` counts
+  them in `cwd_absent_here` and the Sessions screen says how many. It blocks
+  nothing and is part of the plan id, so a folder created after the scan asks
+  for a rescan. Plans whose folders all exist keep their id.
 - **The window.** `codexsync[gui]` is now a working interface over the same
   core: eleven screens (overview, first run, synchronisation, chat bindings,
   sessions, projects, snapshot guardian, backups, recovery, settings, about),
@@ -254,6 +274,21 @@ metadata.
   termination flow it belonged to.
 
 ### Fixed
+- **A sync or restore could not write into `.codex` at all when `paths.temp_dir`
+  was on another drive.** Every payload was staged in the temp directory beside
+  the cloud folder and then moved into place with an atomic replace, which only
+  works within one filesystem — on the ordinary layout (cloud folder on one
+  drive, `.codex` on another) the first write failed with `WinError 17`, nothing
+  was written, and the run ended in `RECOVERY_REQUIRED`. A payload is now
+  prepared in the folder of its own destination, so staging and target always
+  share a volume; the destination itself is still untouched until every payload
+  is staged and verified. Files a killed run left behind are swept from the
+  folders the next run writes into, and `doctor` now also counts a staging
+  *directory* left in the temp directory, which the orphan check never saw.
+- `skills/.system/**` is excluded from sync by default. Those skills are
+  installed and removed by the Codex runtime itself, and with
+  `delete_policy = "never"` a file it deleted came back from the mirror on every
+  run.
 - The package metadata claimed `GPL-3.0-only` while the badge, both READMEs,
   `CONTRIBUTING.md` and the licence text say `GPL-3.0-or-later`; `pyproject.toml`
   now says what the project actually is.

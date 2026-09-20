@@ -84,6 +84,9 @@ include_roots = [
 
 [filters]
 # Global exclusions (temporary/cache/lock files, etc.)
+# "skills/.system/**": those skills are installed and removed by the Codex
+# runtime itself. With delete_policy = "never" a file it deleted there would
+# come back from the mirror on every run, so that tree is left to it entirely.
 exclude_globs = [
   "**/*.lock",
   "**/*.tmp",
@@ -93,6 +96,7 @@ exclude_globs = [
   "**/.cache/**",
   "**/__pycache__/**",
   "**/*.log",
+  "skills/.system/**",
 ]
 
 [conflict]

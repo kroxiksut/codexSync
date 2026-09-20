@@ -1,7 +1,7 @@
 """Streaming, read-only catalog of active and archived Codex sessions."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import json
@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Iterator
 
-from .jsonl_codec import JSONL_READ_ERRORS, is_branch_file, logical_name, open_jsonl
+from .jsonl_codec import JSONL_READ_ERRORS, is_branch_file, logical_name, logical_relative_path, open_jsonl
 from .progress import ProgressCallback, report
 
 
@@ -21,6 +21,20 @@ class SessionState(str, Enum):
     ARCHIVED = "ARCHIVED"
     INVALID = "INVALID"
     AMBIGUOUS = "AMBIGUOUS"
+
+
+#: Records without an `ordinal`: how every session was written until the
+#: desktop build of September 2026.
+RECORD_FORMAT_LEGACY = "legacy"
+#: Every record numbered by `ordinal`. That build rewrote every existing session
+#: file into it at once -- keeping each file's mtime -- which is the one
+#: observed case of the runtime changing a history anywhere but at its end.
+RECORD_FORMAT_ORDINAL = "ordinal"
+#: Some records numbered and some not: an old history the new build appended to
+#: without rewriting it.
+RECORD_FORMAT_MIXED = "mixed"
+#: Newer formats rank higher. Only a difference in rank means anything.
+RECORD_FORMAT_RANK = {RECORD_FORMAT_LEGACY: 0, RECORD_FORMAT_MIXED: 1, RECORD_FORMAT_ORDINAL: 2}
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +52,11 @@ class SessionDescriptor:
     codes: tuple[str, ...] = ()
     mtime_ns: int | None = None
     file_id: str | None = None
+    #: How the records are written: `RECORD_FORMAT_LEGACY`, `RECORD_FORMAT_ORDINAL`
+    #: or `RECORD_FORMAT_MIXED`; ``None`` when no record could be read.
+    record_format: str | None = None
+    #: The latest `timestamp` any record carries, as written (ISO 8601 UTC).
+    last_record_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +163,8 @@ def _scan_jsonl(
     session_id = cwd = timestamp = parent_id = None
     codes: list[str] = []
     complete_tail = True
+    numbered = unnumbered = 0
+    last_record_at: str | None = None
     try:
         # Every metric below is taken from the decompressed stream, so a branch
         # kept in a compressed container is the same branch as the plain one.
@@ -178,6 +199,14 @@ def _scan_jsonl(
                 if not isinstance(record, dict):
                     codes.append("RECORD_NOT_OBJECT")
                     continue
+                ordinal = record.get("ordinal")
+                if isinstance(ordinal, int) and not isinstance(ordinal, bool):
+                    numbered += 1
+                else:
+                    unnumbered += 1
+                stamp = record.get("timestamp")
+                if isinstance(stamp, str) and (last_record_at is None or stamp > last_record_at):
+                    last_record_at = stamp
                 if line_count == 1:
                     if record.get("type") != "session_meta" or not isinstance(record.get("payload"), dict):
                         codes.append("MISSING_INITIAL_SESSION_META")
@@ -239,7 +268,55 @@ def _scan_jsonl(
         codes=tuple(dict.fromkeys(codes)),
         mtime_ns=after.st_mtime_ns,
         file_id=_file_id(after),
+        record_format=_record_format(numbered, unnumbered),
+        last_record_at=last_record_at,
     )
+
+
+def peek_record_formats(state_root: Path, *, max_line_bytes: int = DEFAULT_MAX_JSONL_LINE_BYTES) -> dict[str, str]:
+    """The record format of each branch under ``state_root``, by its logical path.
+
+    Reads the first record of each file only, so a compressed mirror costs a
+    few kilobytes per branch instead of all of it. That cannot see a history
+    that became numbered half-way (`RECORD_FORMAT_MIXED`); it answers the
+    question a diagnostic asks, which is whether a rewrite reached one copy of
+    a branch and not the other. Keyed by logical path so a plain branch and its
+    compressed mirror copy are the same key.
+    """
+    root = state_root.resolve()
+    formats: dict[str, str] = {}
+    for directory_name in ("sessions", "archived_sessions"):
+        directory = root / directory_name
+        if not directory.is_dir():
+            continue
+        for path in _walk_jsonl(directory, root):
+            try:
+                with open_jsonl(path) as handle:
+                    first = handle.readline(max_line_bytes + 1)
+                record = json.loads(first.decode("utf-8")) if first.strip() else None
+            except (*JSONL_READ_ERRORS, UnicodeError, ValueError):
+                record = None
+            if not isinstance(record, dict):
+                key = "unreadable"
+            else:
+                ordinal = record.get("ordinal")
+                key = (
+                    RECORD_FORMAT_ORDINAL
+                    if isinstance(ordinal, int) and not isinstance(ordinal, bool)
+                    else RECORD_FORMAT_LEGACY
+                )
+            formats[logical_relative_path(path.relative_to(root).as_posix())] = key
+    return formats
+
+
+def _record_format(numbered: int, unnumbered: int) -> str | None:
+    if numbered and unnumbered:
+        return RECORD_FORMAT_MIXED
+    if numbered:
+        return RECORD_FORMAT_ORDINAL
+    if unnumbered:
+        return RECORD_FORMAT_LEGACY
+    return None
 
 
 def _parent_graph_codes(descriptors: list[SessionDescriptor]) -> set[str]:
@@ -265,10 +342,7 @@ def _parent_graph_codes(descriptors: list[SessionDescriptor]) -> set[str]:
 
 
 def _with_code(item: SessionDescriptor, state: SessionState, code: str) -> SessionDescriptor:
-    return SessionDescriptor(
-        item.session_id, state, item.relative_path, item.sha256, item.byte_count, item.line_count,
-        item.cwd, item.timestamp, item.parent_id, item.source_machine, item.codes + (code,), item.mtime_ns, item.file_id,
-    )
+    return replace(item, state=state, codes=item.codes + (code,))
 
 
 def _signature(value: os.stat_result) -> tuple[int, int, str | None]:

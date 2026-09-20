@@ -142,8 +142,49 @@ plan-only for 0.2, which is the outcome the plan already anticipates.
 Note the Codex version and OS: a layout is proven for the runtime family it was
 observed on, and a later Codex needs its own run.
 
+## Second question: does merely opening a chat write to it?
+
+Once branches can land in `.codex`, a chat will often be carried to a machine
+where its working folder does not exist — the plan marks those
+`CWD_ABSENT_HERE` — and only read there. What the return transfer then does
+depends on one fact nobody has observed yet:
+
+| What Codex does to the file on open | What the next scan reports |
+|---|---|
+| nothing | `NOOP` |
+| appends records (a resume writes a `session_meta` record) | `FAST_FORWARD` back to the other machine, harmless on its own; a conflict if that machine also continued the chat |
+| rewrites anything before the end | a divergence, which blocks until a decision is recorded |
+
+The answer decides whether "read it there, keep working here" is safe advice, so
+it is measured, not assumed. Run it in the same session as the layout steps
+above, on the transferred branch or on any chat on disposable state:
+
+1. With Codex closed, record the file's hash, record count and last record:
+
+   ```powershell
+   $f = "$env:USERPROFILE\.codex\sessions\<path>\rollout-<…>.jsonl"
+   (Get-FileHash $f -Algorithm SHA256).Hash; (Get-Content $f).Count; Get-Content $f -Tail 1
+   ```
+
+2. Start Codex, open that chat, scroll through it, send nothing, close Codex
+   completely (including the background process).
+
+3. Record the same three values again.
+
+4. Repeat with a chat whose `cwd` does not exist on this machine. Do not rename
+   or delete a real project folder to create that case: use a chat whose folder
+   is genuinely absent, or a folder made for the experiment.
+
+A changed hash is the finding, not a failure. Record which row of the table it
+matched, and if records were appended, their `type` values — never their
+contents.
+
 ## Result log
 
 | Date | Codex version | OS | Variant | Outcome | Recorded layout |
+|---|---|---|---|---|---|
+| _pending_ | | | | | |
+
+| Date | Codex version | OS | Chat folder present | Opened only: file changed? | Appended record types |
 |---|---|---|---|---|---|
 | _pending_ | | | | | |

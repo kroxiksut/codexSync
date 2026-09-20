@@ -115,6 +115,28 @@ class PreflightTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_preflight_warns_on_an_orphan_staging_directory(self) -> None:
+        """A directory `restore` extracted a snapshot into is an orphan too.
+
+        The check counted files only, so an empty staging directory from a
+        crashed run was reported as "no orphan temp files" indefinitely.
+        """
+        root = Path.cwd() / "test-sandbox" / f"preflight-stagedir-{uuid.uuid4().hex}"
+        root.mkdir(parents=True, exist_ok=False)
+        try:
+            config_path = _write_config(root)
+            (root / ".tmp" / ".codexsync-restore-19a99270").mkdir(parents=True, exist_ok=True)
+
+            with patch(
+                "codexsync.runtime.collect_process_snapshot",
+                return_value=ProcessSnapshot(main_processes=[], subprocesses=[], sandbox_detected=False),
+            ):
+                report = run_preflight(config_path)
+
+            self.assertTrue(any(item.name == "orphan_temp_files" and item.status == "WARN" for item in report.checks))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_doctor_reports_running_codex_without_mutating(self) -> None:
         root = Path.cwd() / "test-sandbox" / f"preflight-process-{uuid.uuid4().hex}"
         root.mkdir(parents=True, exist_ok=False)

@@ -23,6 +23,7 @@ from .app import (
     move_chats,
     print_preflight_report,
     record_branch_resolution,
+    record_format_migrations,
     save_transfer_plan,
     scan_chats,
     scan_session_transfer,
@@ -54,6 +55,7 @@ from .recovery import resume_operation, rollback_operation
 from .repair_plan import save_repair_plan
 from .safety_gate import OperationKind
 from .scheduler import render_scheduler_templates, write_scheduler_templates
+from .semantic_transfer import CWD_ABSENT_HERE, FORMAT_MIGRATION, OLDER_FORMAT_HAS_LATER_RECORDS
 
 LOG = logging.getLogger(__name__)
 
@@ -540,9 +542,13 @@ def build_parser() -> argparse.ArgumentParser:
         "resolve", help="Record one versioned choice between two divergent branches"
     )
     sessions_resolve.add_argument("--plan", required=True)
-    sessions_resolve.add_argument("--conflict", required=True)
+    sessions_resolve.add_argument("--conflict", default=None)
     sessions_resolve.add_argument(
-        "--choice", required=True, choices=["KEEP_LOCAL", "KEEP_REMOTE", "DEFER"]
+        "--choice", default=None, choices=["KEEP_LOCAL", "KEEP_REMOTE", "DEFER"]
+    )
+    sessions_resolve.add_argument(
+        "--format-migrations", action="store_true",
+        help="Keep the newer record format for every conflict that is only a format rewrite",
     )
     sessions_resolve.add_argument("--output", required=True, help="Resolutions file to create or extend")
     sessions_apply = sessions_sub.add_parser(
@@ -940,6 +946,22 @@ def main(argv: list[str] | None = None) -> int:
                 "canonical_version": plan.canonical_version,
                 "sessions": len(plan.items),
                 "counts": counts,
+                # Branches bound for `.codex` whose folder is not here, counted
+                # and never named: the folders are paths on someone's disk.
+                "cwd_absent_here": sum(
+                    1 for item in plan.items if CWD_ABSENT_HERE in item.codes
+                ),
+                # Conflicts that are only the runtime rewriting a history into a
+                # newer record format; `sessions resolve --format-migrations`
+                # decides the first number in one step and never the second.
+                "format_migrations": sum(
+                    1 for item in plan.items
+                    if item.action.value == "BLOCKED_CONFLICT" and FORMAT_MIGRATION in item.codes
+                ),
+                "format_migrations_for_you": sum(
+                    1 for item in plan.items
+                    if item.action.value == "BLOCKED_CONFLICT" and OLDER_FORMAT_HAS_LATER_RECORDS in item.codes
+                ),
                 # The set is reported by size, never by id: a working set names
                 # projects and chats, and those names stay out of the report.
                 "working_set": {
@@ -973,6 +995,25 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         if args.command == "sessions" and args.sessions_command == "resolve":
+            if args.format_migrations:
+                if args.conflict or args.choice:
+                    raise ConfigError("--format-migrations decides its own conflicts; drop --conflict/--choice")
+                decided, held = record_format_migrations(
+                    Path(args.plan).expanduser().resolve(),
+                    output_path=Path(args.output).expanduser().resolve(),
+                )
+                print(f"Recorded the newer record format for {len(decided)} conflict(s).")
+                if held:
+                    print(
+                        f"  {len(held)} left for you: the older copy has a record later than the newer one, "
+                        "so it may hold work the rewrite never saw. Resolve each with --conflict/--choice:"
+                    )
+                    for conflict_id in held:
+                        print(f"    {conflict_id}")
+                print("  Re-run `sessions scan --resolutions <file>` to rebuild the plan with them.")
+                return int(ExitCode.OK)
+            if not args.conflict or not args.choice:
+                raise ConfigError("sessions resolve needs --conflict and --choice, or --format-migrations")
             resolution = record_branch_resolution(
                 Path(args.plan).expanduser().resolve(),
                 conflict_id=args.conflict,

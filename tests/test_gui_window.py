@@ -173,6 +173,10 @@ class FakeController(Controller):
         self.calls.append(("resolve", conflict_id, choice))
         return Outcome(value=None)
 
+    def resolve_format_migrations(self, scan) -> Outcome:
+        self.calls.append(("resolve_format_migrations", scan.plan.plan_id))
+        return Outcome(value=([], 0))
+
     def apply_sessions(self, scan, *, confirm_plan, dry_run=False) -> Outcome:
         self.calls.append(("apply_sessions", confirm_plan, dry_run))
         return self._answer("apply_sessions", Outcome(value=1))
@@ -338,7 +342,7 @@ class _WindowTestCase(unittest.TestCase):
         self.workspace_search = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def pump(self, until=None, *, seconds: float = 3.0) -> None:
+    def pump(self, until=None, *, seconds: float = 20.0) -> None:
         """Run the event loop until ``until()`` holds, or the deadline passes.
 
         A save is confirmed through ``QTimer.singleShot(0, ...)`` -- the screen
@@ -347,6 +351,12 @@ class _WindowTestCase(unittest.TestCase):
         calls is a race: it usually wins and occasionally does not, which is
         how this produced an intermittent failure in the full suite while
         passing on its own.
+
+        The deadline is generous because it costs nothing when the save works:
+        the condition is polled, so a run that succeeds returns immediately.
+        Three seconds was still short enough to expire under the full suite
+        while a cloud client held the file, which is what made one save test or
+        another fail in a full run and pass on its own.
         """
         from PySide6.QtCore import QCoreApplication
 
@@ -784,6 +794,70 @@ class SessionsTests(_WindowTestCase):
         screen = window.screen("sessions")
         screen.scan()
         self.assertFalse(screen.apply_button.isEnabled())
+
+    def test_chats_without_a_folder_here_are_counted_in_the_plan_note(self) -> None:
+        plan = _transfer_plan(conflict=False)
+        homeless = tuple(
+            TransferItem(
+                marker * 64, BranchRelation.FAST_FORWARD_LOCAL, TransferAction.BLOCKED_UNPROVEN_LAYOUT,
+                "a" * 64, "b" * 64, 1, 2, codes=("SESSION_ON_ONE_SIDE_ONLY", "CWD_ABSENT_HERE"),
+            )
+            for marker in "mn"
+        )
+        plan = TransferPlan(
+            plan.version, plan.plan_id, plan.created_at_utc, plan.source_machine, plan.target_machine,
+            plan.layout_id, plan.canonical_version, plan.volatile, plan.items + homeless,
+        )
+        controller = FakeController()
+        controller.outcomes["scan_sessions"] = Outcome(value=SessionScan(plan, Path("C:/p/s.json"), Path("C:/p/r.json"), False))
+        window, _ = self.make(controller=controller)
+        screen = window.screen("sessions")
+        screen.scan()
+        self.assertIn(window.catalog.plural("sessions.plan.cwd_absent", 2), screen.plan_note.text())
+
+    def _rewritten_plan(self) -> TransferPlan:
+        plan = _transfer_plan(conflict=False)
+        rewrites = tuple(
+            TransferItem(
+                marker * 64, BranchRelation.DIVERGED_NO_COMMON_RECORDS, TransferAction.BLOCKED_CONFLICT,
+                "a" * 64, "b" * 64, 5, 7, conflict_id=marker * 64,
+                codes=("FORMAT_MIGRATION", "NEWER_FORMAT_LOCAL") + (("OLDER_FORMAT_HAS_LATER_RECORDS",) if held else ()),
+            )
+            for marker, held in (("p", False), ("q", False), ("r", True))
+        )
+        return TransferPlan(
+            plan.version, "plan-rewrites", plan.created_at_utc, plan.source_machine, plan.target_machine,
+            plan.layout_id, plan.canonical_version, plan.volatile, plan.items + rewrites,
+        )
+
+    def test_rewritten_chats_are_decided_with_one_button(self) -> None:
+        controller = FakeController()
+        controller.outcomes["scan_sessions"] = Outcome(value=SessionScan(self._rewritten_plan(), Path("C:/p/s.json"), Path("C:/p/r.json"), False))
+        window, _ = self.make(controller=controller)
+        screen = window.screen("sessions")
+        screen.scan()
+        self.assertFalse(screen.format_button.isHidden())
+        self.assertIn(window.catalog.plural("sessions.format.hint", 2), screen.format_hint.text())
+        self.assertIn(window.catalog.plural("sessions.format.held", 1), screen.format_hint.text())
+        screen.resolve_format_migrations()
+        self.assertIn(("resolve_format_migrations", "plan-rewrites"), controller.calls)
+        # The decision changes the plan, so the plan is read again.
+        self.assertEqual(sum(1 for call in controller.calls if call[0] == "scan_sessions"), 2)
+
+    def test_the_button_is_absent_when_nothing_was_rewritten(self) -> None:
+        window, controller = self.make()
+        screen = window.screen("sessions")
+        screen.scan()
+        self.assertTrue(screen.format_button.isHidden())
+        screen.resolve_format_migrations()
+        self.assertNotIn("resolve_format_migrations", [call[0] for call in controller.calls])
+
+    def test_a_plan_whose_folders_all_exist_says_nothing_about_them(self) -> None:
+        window, _ = self.make()
+        screen = window.screen("sessions")
+        screen.scan()
+        self.assertNotIn(window.catalog.plural("sessions.plan.cwd_absent", 1), screen.plan_note.text())
+        self.assertNotIn(window.catalog.plural("sessions.plan.cwd_absent", 2), screen.plan_note.text())
 
     def test_a_clean_plan_applies_with_its_exact_id_after_confirmation(self) -> None:
         window, controller = self.make()

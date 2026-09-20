@@ -31,7 +31,7 @@ codexsync -c config.toml sync --apply      # настоящая синхрони
 include_roots = ["sessions", "session_index.jsonl", "skills", "plugins"]
 
 [filters]
-exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log"]
+exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**", "**/.cache/**", "**/__pycache__/**", "**/*.log", "skills/.system/**"]
 ```
 
 - `include_roots` — пути относительно `.codex` (и зеркала). `sessions` и
@@ -46,6 +46,10 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
   историю, выросшую на обеих машинах, поэтому ими занимаются
   [`sessions`](SESSIONS.md), [хранитель снимков](GUARDIAN.md) и
   [`repair-projects`](PROJECTS.md).
+- `skills/.system/**` исключён, потому что этими навыками Codex распоряжается
+  сам: ставит и удаляет. При `delete_policy = "never"` удалённый им файл
+  возвращался бы из зеркала на следующем прогоне — и так по кругу, поэтому эта
+  ветка целиком оставлена ему.
 - Экран «Настройки» никогда не предлагает включить файл с учётными данными
   (`auth.json` и подобные).
 - `sync.session_mode = "last_date_only"` отклоняется: этот режим может

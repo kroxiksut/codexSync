@@ -46,6 +46,13 @@ codexsync -c config.toml sessions scan --source-machine desktop --target-machine
 被留下的会话会报告为 `OUT_OF_SCOPE`。它不阻止任何事，并且带着「本来会是什么」
 （`WOULD_BE_…`），所以汇总会说明什么被留下了，而不是把它略去。
 
+工作文件夹在本机不存在的对话——通常是放在同步文件夹之外的项目——会被标记为
+`CWD_ABSENT_HERE`，`sessions scan` 会在 `cwd_absent_here` 中统计这类对话的数量。
+文件夹按 `[[path_mappings]]` 映射后的位置查找；两条规则结论不一致时，对话会被标记为
+`CWD_MAPPING_AMBIGUOUS`，而不是去猜。这个标记不阻止任何事：它的用处是让你把这些项目
+留在工作集之外，而不是等打开对话才发现。扫描之后才创建的文件夹会改变计划标识，
+所以执行时会要求重新扫描。
+
 ## 分叉
 
 分叉永远不会被自动解决 —— 不交错、不按时间戳排序、也没有「新的赢」。两个分支都原样保留，
@@ -62,6 +69,29 @@ codexsync -c config.toml sessions scan --source-machine desktop --target-machine
 
 记录是否相同由原始字节决定。只有在可以证明毫无歧义的地方才会参考规范化 JSON，因此两条
 不同的记录永远不可能被合并成一条。
+
+### 当 Codex 改写了自己的会话
+
+2026 年 9 月，Codex 桌面版把所有已有的会话文件改写成了新的记录格式：每条记录都有编号
+（`ordinal`），消息被移到了其他字段，部分记录在改写中丢失——你撤销过的轮次、重复的
+`session_meta` 记录、注入的指令。各文件的修改时间保持为旧值。在此之前写入的云端镜像
+与其中的每个会话都不一致。
+
+这类冲突会被标记为 `FORMAT_MIGRATION`，并附带 `NEWER_FORMAT_LOCAL` 或
+`NEWER_FORMAT_REMOTE`；只要有一侧仍是旧格式，`doctor` 就会给出警告（`session_format`）。
+它仍然是冲突——两份副本并不是同一段历史——但一个决定即可覆盖全部：
+
+```powershell
+codexsync -c config.toml sessions resolve --plan sessions-plan.json --format-migrations --output resolutions.json
+```
+
+它为每个冲突保留新格式的副本，并像其他决定一样钉在字节上。带有
+`OLDER_FORMAT_HAS_LATER_RECORDS` 标记的冲突不会被处理：那里的旧副本中有比新副本更晚的
+记录，可能是升级前在别处完成的工作，因此需要单独的 `--conflict … --choice …`。在窗口中，
+这是 **全部保留新格式** 按钮。
+
+执行计划时，每份即将被覆盖的旧副本都会被压缩保存一次，放在 `semantic.root_dir` 下的
+`superseded/` 中——那是丢失的记录唯一还存在的地方。与冲突包不同，胜出的副本不会再存一份。
 
 ## 执行计划
 

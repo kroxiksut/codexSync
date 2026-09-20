@@ -22,6 +22,32 @@ _REPLACE_BACKOFF_SECONDS = 0.1
 # Windows: ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
 _TRANSIENT_WINERRORS = frozenset({5, 32, 33})
 _TRANSIENT_ERRNOS = frozenset({errno.EACCES, errno.EBUSY, errno.ETXTBSY})
+#: Marks a payload staged beside its destination. Greppable on purpose: this is
+#: what a user finds in `.codex` after a run that was killed mid-staging.
+STAGE_SUFFIX = ".codexsync.tmp"
+#: Staging directories `restore` (and older versions of this module) create.
+STAGE_DIR_PREFIXES = (".codexsync-stage-", ".codexsync-restore-")
+_ORPHAN_STAGE_AGE_SECONDS = 3600.0
+
+
+def _stage_path(dst: Path, token: str) -> Path:
+    """Where the payload for ``dst`` is prepared: beside it, never over it."""
+    return dst.with_name(f".{dst.name}.{token}{STAGE_SUFFIX}")
+
+
+def _older_than(path: Path, seconds: float, now: float) -> bool:
+    """How long ago this item appeared, never how old its content is.
+
+    A staged payload carries the *source's* mtime — `shutil.copy2` copies it —
+    so an hour-old file staged a second ago would read as an hour old and a
+    concurrent run could delete it mid-flight. `st_ctime` is the creation time
+    on Windows and the last metadata change elsewhere; both are the copy.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return (now - max(stat.st_ctime, stat.st_mtime)) > seconds
 
 
 def _is_transient_lock(exc: OSError) -> bool:
@@ -43,6 +69,7 @@ class SyncEngine:
         before_replace_check: Callable[[], None] | None = None,
         after_backup: Callable[[], None] | None = None,
         after_success: Callable[[], None] | None = None,
+        now: Callable[[], float] = time.time,
     ) -> None:
         self._backup_manager = backup_manager
         self._temp_dir = temp_dir
@@ -52,6 +79,7 @@ class SyncEngine:
         self._before_replace_check = before_replace_check
         self._after_backup = after_backup
         self._after_success = after_success
+        self._now = now
 
     def execute(self, plan: SyncPlan, dry_run: bool = True) -> None:
         actions = [*plan.to_local, *plan.to_cloud]
@@ -68,14 +96,28 @@ class SyncEngine:
             raise FailSafeError("backup_before_overwrite=false is not permitted for apply")
 
         self._cleanup_orphaned_temp_files()
-        stage_root = self._temp_dir / f".codexsync-stage-{uuid.uuid4().hex}"
+        token = uuid.uuid4().hex[:8]
+        swept: set[Path] = set()
         staged: list[tuple[CopyAction, Path]] = []
+        # Every path this run may have created, including the one a failure
+        # interrupted: that half-written payload is this module's to remove too.
+        stage_paths: list[Path] = []
         try:
-            # Stage and verify *every* payload outside destination state before
-            # backing up or replacing the first destination.
-            stage_root.mkdir(parents=True, exist_ok=False)
-            for index, action in enumerate(actions):
-                staged_path = stage_root / f"{index:08d}.payload"
+            # Stage and verify *every* payload before backing up or replacing
+            # the first destination, each one in the folder its destination
+            # lives in. `os.replace` is atomic only within one filesystem, and
+            # a staging directory is not on it: `paths.temp_dir` sits beside the
+            # cloud copy, and `.codex` is routinely on another drive, which made
+            # every write into it fail with `WinError 17` (CS-253). A sibling is
+            # on the destination's volume by construction, and it is never the
+            # destination itself — nothing is overwritten until the whole set is
+            # staged and proven. `app.commit_global_state` and `project_move`
+            # already stage this way.
+            for action in actions:
+                self._ensure_parent(action.dst)
+                self._sweep_stale_stage_files(action.dst.parent, swept)
+                staged_path = _stage_path(action.dst, token)
+                stage_paths.append(staged_path)
                 self._stage_verified(action.src, staged_path, action.codec)
                 staged.append((action, staged_path))
 
@@ -113,7 +155,9 @@ class SyncEngine:
             if self._after_success is not None:
                 self._after_success()
         finally:
-            shutil.rmtree(stage_root, ignore_errors=True)
+            for staged_path in stage_paths:
+                # Already gone for every action that was replaced into place.
+                staged_path.unlink(missing_ok=True)
 
     def _remove_backed_up(self, deletion: DeleteAction) -> None:
         """Remove one file whose backup is already committed and verified.
@@ -229,8 +273,40 @@ class SyncEngine:
                 continue
             path.unlink(missing_ok=True)
             removed += 1
+        for path in self._temp_dir.iterdir():
+            # A staging *directory* an interrupted run left behind — restore
+            # extracts a snapshot into one. Only files were swept before, so
+            # such a directory stayed for good (one from 2026-09-05 was still
+            # there). Age-limited because `sync` and `restore` take different
+            # operation locks and can be in flight at the same time.
+            if not path.is_dir() or not path.name.startswith(STAGE_DIR_PREFIXES):
+                continue
+            if not _older_than(path, _ORPHAN_STAGE_AGE_SECONDS, self._now()):
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
         if removed:
-            LOG.info("removed %d orphaned temporary file(s) in %s", removed, self._temp_dir)
+            LOG.info("removed %d orphaned temporary item(s) in %s", removed, self._temp_dir)
+
+    def _sweep_stale_stage_files(self, directory: Path, swept: set[Path]) -> None:
+        """Remove staging siblings a killed run left in a destination folder.
+
+        Only folders this run is about to write into are looked at, and only
+        names this module writes, so nothing else can be hit. Age-limited for
+        the same reason as above: two machines may be writing into one cloud
+        mirror, and one of those files may be in flight over there.
+        """
+        if directory in swept:
+            return
+        swept.add(directory)
+        try:
+            candidates = list(directory.glob(f"*{STAGE_SUFFIX}"))
+        except OSError:
+            return
+        for path in candidates:
+            if path.is_file() and _older_than(path, _ORPHAN_STAGE_AGE_SECONDS, self._now()):
+                LOG.info("removed orphaned staging file %s", path)
+                path.unlink(missing_ok=True)
 
 
 def _sha256_file(path: Path) -> str:
