@@ -1,19 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# Windowed CodexSync.exe: the Qt window, and -- when given a command -- the
+# Windowed codexsync-gui.exe: the Qt window, and -- when given a command -- the
 # same CLI as codexsync.exe. The scheduled task runs this file directly
 # (system_scheduler.job_command() returns sys.executable when frozen), which is
 # why it is built without a console: a task that starts every minute must not
 # flash a window. codexsync.spec stays the console CLI without Qt.
 #
-# Build it into its own output directory when both exes are built:
-#   pyinstaller --clean --noconfirm --distpath dist/gui --workpath build/gui codexsync-gui.spec
-# Windows file names are case-insensitive, so dist/CodexSync.exe and the CLI's
-# dist/codexsync.exe are one file and the second build would replace the first.
+# Build it beside the CLI:
+#   pyinstaller --clean --noconfirm codexsync-gui.spec
+# The name differs from the CLI's by more than case on purpose: Windows file
+# names are case-insensitive, so a windowed exe called CodexSync.exe and the
+# console codexsync.exe would be one file, each build replacing the other.
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 
 project_root = Path(SPECPATH).resolve()
@@ -21,7 +22,13 @@ package = project_root / "src" / "codexsync"
 entrypoint = project_root / "scripts" / "pyinstaller_gui_entrypoint.py"
 icon = package / "gui" / "resources" / "codexsync.ico"
 
-datas = [(str(package / "config.example.toml"), "codexsync")]
+# The version is read from installed package metadata (`version.py`), so the
+# `dist-info` has to travel with the build. Without it `importlib.metadata`
+# raises `PackageNotFoundError`, the exe reports `0.0.0+unknown`, and that
+# string is what `PRODUCER_VERSION` stamps into every Guardian snapshot
+# manifest -- a snapshot that cannot say which build wrote it.
+datas = copy_metadata("codexsync")
+datas += [(str(package / "config.example.toml"), "codexsync")]
 datas += [(str(path), "codexsync/gui/locale") for path in sorted((package / "gui" / "locale").glob("*.json"))]
 datas += [
     (str(path), "codexsync/gui/resources")
@@ -54,7 +61,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="CodexSync",
+    name="codexsync-gui",
     icon=str(icon),
     debug=False,
     bootloader_ignore_signals=False,

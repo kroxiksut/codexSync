@@ -8,6 +8,7 @@ from .exceptions import ConfigError
 from .guardian_models import GuardianConfig, require_guardian_machine_id
 from .jsonl_codec import parse_codec
 from .path_mapping import PathMappingRule
+from .process_knowledge import default_background_process_names, default_process_names
 from .models import (
     MIN_SCHEDULER_INTERVAL_SECONDS,
     SCHEDULER_MODES,
@@ -244,7 +245,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
 
     background_process_names = _parse_background_process_names(proc_raw)
     process_detection = ProcessDetectionConfig(
-        process_names=_parse_process_names(proc_raw.get("process_names", ["codex.exe", "codex"])),
+        process_names=_parse_process_names(proc_raw.get("process_names", default_process_names())),
         grace_period_seconds=int(proc_raw.get("grace_period_seconds", 2)),
         allow_terminate_if_running=bool(proc_raw.get("allow_terminate_if_running", False)),
         manual_terminate_confirmation=bool(proc_raw.get("manual_terminate_confirmation", True)),
@@ -549,11 +550,7 @@ def _paths_overlap(first: Path, second: Path) -> bool:
 
 
 def _parse_background_process_names(proc_raw: dict[str, Any]) -> dict[str, list[str]]:
-    default_mapping: dict[str, list[str]] = {
-        "windows": ["codex-windows-sandbox"],
-        "macos": [],
-        "linux": [],
-    }
+    default_mapping = default_background_process_names()
     raw_mapping = proc_raw.get("background_process_names")
     if isinstance(raw_mapping, dict):
         parsed: dict[str, list[str]] = {}

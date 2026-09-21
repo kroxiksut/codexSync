@@ -19,11 +19,13 @@ import uuid
 from codexsync.config import load_config
 from codexsync.config_edit import (
     ConfigHistoryEntry,
+    append_array_items,
     config_diff,
     config_history_dir,
     create_config,
     list_config_history,
     read_config_document,
+    remove_array_items,
     remove_key,
     render_toml_value,
     replace_array_of_tables,
@@ -691,6 +693,91 @@ class CreateConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             self._create(path)
         self.assertEqual(list(self.root.iterdir()), [])
+
+
+
+class ArrayItemTests(unittest.TestCase):
+    """Growing and shrinking an array without re-rendering it.
+
+    `set_value` writes an array back from the parsed list, which loses whatever
+    was written between its elements -- and a real config keeps notes there: the
+    Russian fixture above has a commented-out entry inside `include_roots`, and
+    so does one of the observed user files. A migration that added one exclusion
+    and silently deleted that line would be exactly the kind of "help" this
+    project refuses to give, so these two editors work from offsets instead.
+    """
+
+    MULTILINE = "\n".join([
+        "[targets]",
+        "include_roots = [",
+        '  "sessions",',
+        '  # ".codex-global-state.json",',
+        '  "skills",',
+        "]",
+        "",
+    ])
+    INLINE = '[filters]\nexclude_globs = ["**/*.lock", "**/*.tmp"]\n'
+
+    def test_appending_keeps_a_comment_written_inside_the_array(self) -> None:
+        result = append_array_items(self.MULTILINE, "targets", "include_roots", ["plugins"])
+        self.assertIn('  # ".codex-global-state.json",', result)
+        self.assertEqual(
+            tomllib.loads(result)["targets"]["include_roots"],
+            ["sessions", "skills", "plugins"],
+        )
+
+    def test_removing_keeps_a_comment_written_inside_the_array(self) -> None:
+        result = remove_array_items(self.MULTILINE, "targets", "include_roots", ["sessions"])
+        self.assertIn('  # ".codex-global-state.json",', result)
+        self.assertEqual(tomllib.loads(result)["targets"]["include_roots"], ["skills"])
+
+    def test_an_array_without_a_trailing_comma_still_grows(self) -> None:
+        text = self.MULTILINE.replace('  "skills",', '  "skills"')
+        result = append_array_items(text, "targets", "include_roots", ["plugins"])
+        self.assertEqual(
+            tomllib.loads(result)["targets"]["include_roots"], ["sessions", "skills", "plugins"]
+        )
+
+    def test_an_inline_array_stays_on_its_line(self) -> None:
+        result = append_array_items(self.INLINE, "filters", "exclude_globs", ["**/*.log"])
+        self.assertIn('["**/*.lock", "**/*.tmp", "**/*.log"]', result)
+
+    def test_removing_the_last_inline_item_takes_its_comma(self) -> None:
+        result = remove_array_items(self.INLINE, "filters", "exclude_globs", ["**/*.tmp"])
+        self.assertEqual(tomllib.loads(result)["filters"]["exclude_globs"], ["**/*.lock"])
+        self.assertIn('["**/*.lock"]', result)
+
+    def test_appending_what_is_already_there_changes_nothing(self) -> None:
+        self.assertEqual(
+            append_array_items(self.INLINE, "filters", "exclude_globs", ["**/*.tmp"]), self.INLINE
+        )
+
+    def test_removing_what_is_not_there_changes_nothing(self) -> None:
+        self.assertEqual(
+            remove_array_items(self.INLINE, "filters", "exclude_globs", ["nothing"]), self.INLINE
+        )
+
+    def test_a_missing_key_is_created_with_just_those_items(self) -> None:
+        result = append_array_items("[filters]\n", "filters", "exclude_globs", ["a", "b"])
+        self.assertEqual(tomllib.loads(result)["filters"]["exclude_globs"], ["a", "b"])
+
+    def test_an_empty_array_grows(self) -> None:
+        result = append_array_items(
+            "[filters]\nexclude_globs = []\n", "filters", "exclude_globs", ["a"]
+        )
+        self.assertEqual(tomllib.loads(result)["filters"]["exclude_globs"], ["a"])
+
+    def test_a_crlf_file_keeps_its_line_endings(self) -> None:
+        result = append_array_items(RUSSIAN_CRLF, "targets", "include_roots", ["plugins"])
+        # Every newline is still a CRLF: a lone LF would show up as a line
+        # ending this file does not use, right where the editor touched it.
+        self.assertEqual(result.count("\r\n"), result.count("\n"))
+        self.assertIn("plugins", tomllib.loads(result)["targets"]["include_roots"])
+        self.assertIn("# сессии", result)
+
+    def test_a_value_that_is_not_an_array_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            append_array_items('[identity]\nmachine_id = "a"\n', "identity", "machine_id", ["b"])
 
 
 if __name__ == "__main__":

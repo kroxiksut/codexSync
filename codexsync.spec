@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import copy_metadata
+
 
 project_root = Path(SPECPATH).resolve()
 entrypoint = project_root / "scripts" / "pyinstaller_entrypoint.py"
@@ -12,7 +14,10 @@ a = Analysis(
     [str(entrypoint)],
     pathex=[str(project_root / "src")],
     binaries=[],
-    datas=[(str(template), "codexsync")],
+    # `copy_metadata` carries the `dist-info` that `version.py` reads; without
+    # it the exe reports `0.0.0+unknown` and stamps that into snapshot
+    # manifests. Hardcoding the version instead is forbidden by design.
+    datas=copy_metadata("codexsync") + [(str(template), "codexsync")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

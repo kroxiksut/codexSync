@@ -79,18 +79,27 @@ class SafetyGate:
     incomplete/unavailable.  A mutation always fails closed on ``UNKNOWN``.
     ``monotonic`` and ``sleep`` are injected to make the timing contract
     deterministic in tests.
+
+    ``describe`` is optional and names what the last sample actually found. A
+    reason that only says "Codex or known background process detected" cannot
+    be argued with: it took a live machine to discover that the process being
+    found was an always-running Windows service and not Codex at all (CS-264).
+    Naming the process turns that from an investigation into a sentence on
+    screen. It never influences the decision -- it only reports it.
     """
 
     def __init__(
         self,
         sample: Callable[[], ProcessState],
         *,
+        describe: Callable[[], str] | None = None,
         stable_window_seconds: float = 2.0,
         sample_interval_seconds: float = 0.25,
         monotonic: Callable[[], float],
         sleep: Callable[[float], None],
     ) -> None:
         self._sample = sample
+        self._describe = describe
         self._stable_window_seconds = max(0.0, stable_window_seconds)
         self._sample_interval_seconds = max(0.01, sample_interval_seconds)
         self._monotonic = monotonic
@@ -132,5 +141,19 @@ class SafetyGate:
         if state is ProcessState.STOPPED:
             return state, "no Codex or known background process detected"
         if state is ProcessState.RUNNING:
-            return state, "Codex or known background process detected"
+            return state, f"Codex or known background process detected{self._detail()}"
         return ProcessState.UNKNOWN, "process detector returned an unknown state"
+
+    def _detail(self) -> str:
+        """``: name (pid N), …`` for what was found, or nothing.
+
+        A describer that fails must not turn a decided state into an error, so
+        anything it raises is dropped: the decision was already made without it.
+        """
+        if self._describe is None:
+            return ""
+        try:
+            detail = self._describe()
+        except Exception:
+            return ""
+        return f": {detail}" if detail else ""

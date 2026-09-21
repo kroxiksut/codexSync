@@ -77,7 +77,7 @@ codexsync-gui            # 或者：codexsync -c config.toml doctor
 
 ## 状态
 
-0.2 —— 第一个在命令行之外带上窗口（`codexsync[gui]` 或 `CodexSync.exe`）的版本。
+0.2 —— 第一个在命令行之外带上窗口（`codexsync[gui]` 或 `codexsync-gui.exe`）的版本。
 有几项运行时行为被刻意暂不使用，直到受控实验把它们记录下来 —— 见
 [还没有被验证的部分](docs/zh/README.md#还没有被验证的部分)。
 

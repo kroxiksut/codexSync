@@ -174,9 +174,19 @@ class OverviewScreen(Screen):
         else:
             # One sentence for two situations, because they permit the same
             # thing: nothing. An undetermined process is never read as a
-            # stopped one.
+            # stopped one. What differs is *why*, and the check's own text says
+            # it -- including which process was found, which is the difference
+            # between "Codex is open" and "an unrelated service is running"
+            # (CS-260). Without it, an empty tray makes the banner look broken.
+            detail = self.t("banner.running.detail")
+            found = next(
+                (check.details for check in view.checks if check.name == "codex_process"), ""
+            )
+            if found:
+                named = self.t("banner.running.processes", processes=found)
+                detail = f"{detail}\n{named}"
             self.banner.show_message(
-                "attention", self.t("banner.running.title"), self.t("banner.running.detail"), palette
+                "attention", self.t("banner.running.title"), detail, palette
             )
         rows = []
         for check in view.checks:

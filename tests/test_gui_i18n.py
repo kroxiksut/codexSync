@@ -91,9 +91,15 @@ def _settings_fields() -> list[tuple[str, str, str, tuple[str, ...]]]:
     fields = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Field":
-            args = [ast.literal_eval(arg) for arg in node.args]
-            choices = args[4] if len(args) > 4 else ()
-            fields.append((args[0], args[1], args[2], tuple(choices)))
+            # Only the parts that produce translation keys are read. The
+            # default value (argument 3) may be a call -- the process lists
+            # come from `process_knowledge` since CS-256 -- and nothing here
+            # needs its value.
+            section, key, kind = (ast.literal_eval(arg) for arg in node.args[:3])
+            choices: tuple[str, ...] = ()
+            if len(node.args) > 4:
+                choices = tuple(ast.literal_eval(node.args[4]))
+            fields.append((section, key, kind, choices))
     return fields
 
 

@@ -7,12 +7,13 @@
 ```powershell
 codexsync -c config.toml <command>            # installed
 python -m codexsync -c config.toml <command>  # from a source checkout, without installing
-CodexSync.exe -c config.toml <command>        # the Windows windowed build, without a console
+codexsync-gui.exe -c config.toml <command>    # the Windows windowed build, without a console
 ```
 
 Global options: `-c/--config` — the path to `config.toml`; `-v/--verbose` —
-verbose logging, including which Codex processes were seen. `-h` on any command
-or subcommand prints its options.
+verbose logging, including which Codex processes were seen; `-V/--version` —
+print the version and exit, which is how you ask a downloaded exe what it is.
+`-h` on any command or subcommand prints its options.
 
 ## All commands
 
@@ -23,6 +24,8 @@ only reads (or writes outside `.codex`) and may run at any time.
 |---|---|---|---|
 | `init-config` | — | Write a `config.toml` from the bundled template | [below](#getting-started) |
 | `validate` | no | Load and check the configuration, nothing else | [below](#getting-started) |
+| `config check` | no | Report what this version would change in `config.toml` | [Configuration](CONFIGURATION.md#upgrading-a-config-from-an-earlier-version) |
+| `config upgrade` | no | Apply that, in one confirmed write | [Configuration](CONFIGURATION.md#upgrading-a-config-from-an-earlier-version) |
 | `doctor` / `preflight` | no | Environment diagnostics; identical and side-effect free | [below](#getting-started) |
 | `plan` | no | Show what a sync would copy (marked `volatile` if Codex is open) | [Sync](SYNC.md) |
 | `sync` | **yes** | Copy state both ways, backup first | [Sync](SYNC.md) |
@@ -71,6 +74,21 @@ is never overwritten in this mode:
 ```powershell
 codexsync init-config --output config.toml --machine-id laptop-1 --local-state-dir C:/Users/me/.codex --workspace-root D:/Cloud/codexSync
 ```
+
+### Which config is opened
+
+`-c` names the file, and naming one that does not exist yet is a request to
+create it there. Without `-c` the search is the same one the window does:
+`config.toml` in the current folder, then beside the executable, then the
+per-user location — `%APPDATA%\CodexSync\config.toml` on Windows,
+`~/Library/Application Support/CodexSync/` on macOS,
+`$XDG_CONFIG_HOME/codexsync/` on Linux. A file found anywhere but the current
+folder is announced, so a command never works quietly on a file you are not
+looking at.
+
+The window remembers the config it last opened and starts with it; the command
+line does not remember anything, which is why `-c` stays the way to be precise
+in a script or a scheduled task.
 
 Check the configuration, then the environment:
 

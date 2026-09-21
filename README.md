@@ -79,7 +79,7 @@ Every page in one place: [docs/](docs/README.md). For contributors:
 
 ## Status
 
-0.2 — the first release with the window (`codexsync[gui]` or `CodexSync.exe`)
+0.2 — the first release with the window (`codexsync[gui]` or `codexsync-gui.exe`)
 next to the command line. A few runtime behaviours are deliberately left unused
 until a controlled experiment records them — see
 [what is not proven yet](docs/en/README.md#what-is-not-proven-yet).

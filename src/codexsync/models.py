@@ -6,6 +6,7 @@ from pathlib import Path
 from .guardian_models import GuardianConfig
 from .jsonl_codec import JsonlCodec
 from .path_mapping import PathMappingRule
+from .process_knowledge import default_background_process_names, default_process_names
 
 
 @dataclass(slots=True)
@@ -42,7 +43,7 @@ class SafetyConfig:
 
 @dataclass(slots=True)
 class ProcessDetectionConfig:
-    process_names: list[str] = field(default_factory=lambda: ["codex.exe", "codex"])
+    process_names: list[str] = field(default_factory=default_process_names)
     grace_period_seconds: int = 2
     # Kept only to produce a clear migration error for old configuration files.
     # codexSync 0.2 never terminates Codex.
@@ -51,11 +52,7 @@ class ProcessDetectionConfig:
     terminate_confirmation_mode: str = "gui"
     terminate_timeout_seconds: int = 20
     background_process_names: dict[str, list[str]] = field(
-        default_factory=lambda: {
-            "windows": ["codex-windows-sandbox"],
-            "macos": [],
-            "linux": [],
-        }
+        default_factory=default_background_process_names
     )
 
 

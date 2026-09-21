@@ -127,15 +127,16 @@ the executable an order of magnitude larger; a healthy build is under about
 
 ```powershell
 pip install .[gui]
-pyinstaller --clean --noconfirm --distpath dist/gui codexsync-gui.spec
-dist\gui\CodexSync.exe -c config.toml validate
+pyinstaller --clean --noconfirm codexsync-gui.spec
+dist\codexsync-gui.exe -c config.toml validate
 ```
 
-`--distpath dist/gui` is not optional: Windows treats `codexsync.exe` and
-`CodexSync.exe` as one file name, so both builds cannot share an output
-directory. The windowed executable is also the command line — given a
-subcommand it runs `cli.main` — which is what a frozen install's scheduled task
-invokes. A healthy build is around 50 MiB, since it carries Qt.
+The name `codexsync-gui` differs from the console `codexsync` by more than
+case on purpose: Windows file names are case-insensitive, so a windowed
+`CodexSync.exe` and the console `codexsync.exe` would be one file and the
+second build would replace the first. The windowed executable is also the
+command line — given a subcommand it runs `cli.main` — which is what a frozen
+install's scheduled task invokes. A healthy build is around 50 MiB, since it carries Qt.
 
 Both executables are published by the same manual workflow.
 

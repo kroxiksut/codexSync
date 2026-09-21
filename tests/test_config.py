@@ -7,6 +7,7 @@ import textwrap
 import unittest
 import uuid
 
+from codexsync.process_knowledge import BACKGROUND_PROCESS_NAMES
 from codexsync.config import load_config
 from codexsync.exceptions import ConfigError
 
@@ -121,7 +122,13 @@ class ConfigTests(unittest.TestCase):
                 cfg.process_detection.background_process_names["macos"],
                 ["codex-macos-helper"],
             )
-            self.assertEqual(cfg.process_detection.background_process_names["linux"], [])
+            # An OS the table does not mention falls back to what this version
+            # knows, not to nothing: before CS-256 it fell back to an empty list
+            # and such a config detected no background process there at all.
+            self.assertEqual(
+                cfg.process_detection.background_process_names["linux"],
+                list(BACKGROUND_PROCESS_NAMES["linux"]),
+            )
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

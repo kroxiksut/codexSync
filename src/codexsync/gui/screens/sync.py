@@ -145,8 +145,13 @@ class SyncScreen(Screen):
             self.root.blockSignals(blocked)
 
     def activated(self) -> None:
-        if self.model.preview is None and not self.model.preview_busy:
-            self.check_plan()
+        """The screen was just shown.
+
+        Nothing that reads `.codex` or raises the safety gate starts by itself:
+        a screen that scans on arrival looks like it began working without
+        being asked, and on a windowed build every process sample used to flash
+        console windows with it (CS-262, CS-259). The button is the request.
+        """
 
     def check_plan(self) -> None:
         if self.model.preview_busy:

@@ -155,8 +155,13 @@ class ChatsScreen(Screen):
         self.body.addWidget(move)
 
     def activated(self) -> None:
-        if self.model.directory is None and not self.model.busy:
-            self.refresh()
+        """The screen was just shown.
+
+        Nothing that reads `.codex` or raises the safety gate starts by itself:
+        a screen that scans on arrival looks like it began working without
+        being asked, and on a windowed build every process sample used to flash
+        console windows with it (CS-262, CS-259). The button is the request.
+        """
 
     # --- loading -----------------------------------------------------------------
 

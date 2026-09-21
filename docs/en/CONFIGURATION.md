@@ -88,10 +88,17 @@ process_names = ["codex.exe", "codex", "codex-app-server"]
 grace_period_seconds = 2
 
 [process_detection.background_process_names]
-windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-windows-sandbox-service", "codex-command-runner"]
+windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-command-runner"]
 macos = ["ChatGPT.app/Contents/MacOS/", "codex-app-server", "codex-execve-wrapper", "codex-code-mode-host"]
 linux = ["/usr/lib/chatgpt/", "codex-app-server", "codex-linux-sandbox", "codex-execve-wrapper", "codex-code-mode-host"]
 ```
+
+A name belongs in `background_process_names` only if it disappears when Codex
+is closed. A process that is always running reports the same thing in both
+states, so it does not make detection stricter -- it makes the safety gate say
+"running" forever and closes every mutating command permanently. This is why
+`codex-windows-sandbox-service` is not listed: on Windows it is the service
+`CodexSandboxService.OpenAI.Codex`, started automatically at boot.
 
 Names are matched as whole process names, never as substrings. An entry
 containing `/` is a path marker matched against the process path: the macOS
@@ -101,6 +108,50 @@ ordinary ChatGPT app.
 The keys `allow_terminate_if_running` and the other `terminate_*` keys are left
 from 0.1. codexSync never terminates Codex, and `allow_terminate_if_running =
 true` is refused.
+
+## Upgrading a config from an earlier version
+
+The template 0.1 shipped set `allow_terminate_if_running = true` and
+`session_mode = "last_date_only"`, and this version refuses both for every
+command that writes. So a `config.toml` written by 0.1 makes `sync`, `restore`,
+`repair-projects apply` and `recover` exit 4 until it is brought up to date —
+and the Settings screen cannot do it by hand, because it has no field for the
+first key and refuses to save any text that still carries it.
+
+```powershell
+codexsync -c config.toml config check     # what this version would change; writes nothing
+codexsync -c config.toml config upgrade --confirm-plan <id>
+```
+
+`config check` prints every finding with its code, the exact edits and a diff,
+then the plan id. `config upgrade` needs that id, and the id covers the file's
+bytes, so a config edited in between stops the upgrade instead of being written
+over. In the window the same thing appears on *Settings* as **Config from an
+earlier version**, with the same list, the same diff and the same id.
+
+Your file stays yours. Comments are kept, arrays grow and shrink line by line
+rather than being rewritten, values the plan does not name are not touched, and
+the replaced version is copied into `config-history/` next to your workspace.
+Everything is written in one step: a config with only the first blocker fixed is
+still refused, so there is no half-migrated state to be left in.
+
+| Code | Level | What it means |
+|---|---|---|
+| `TERMINATE_FLAG_SET` | blocks writes | `allow_terminate_if_running = true`; codexSync never stops Codex |
+| `SESSION_MODE_LAST_DATE` | blocks writes | `session_mode = "last_date_only"` can drop branches |
+| `BACKUP_DISABLED` | blocks writes | `backup_before_overwrite = false` |
+| `DETECTION_LIST_OUTDATED` | safety | Codex processes this version knows are missing from your lists |
+| `MISSING_EXCLUDE_SKILLS_SYSTEM` | correctness | `skills/.system/**` is not excluded |
+| `OBSOLETE_INCLUDE_ROOT` | correctness | include roots that are never copied anyway |
+| `SCHEDULER_INTERVAL_MIGRATED` | correctness | `interval_minutes` carried over to `interval_seconds` |
+| `LEGACY_SCHEDULER_KEYS` | correctness | scheduler keys this version ignores |
+
+A blocker has to be settled; everything else may be declined — `--skip CODE` on
+the command line, or the tick next to it in the window. `DETECTION_LIST_OUTDATED`
+is the one worth reading before declining: names are matched whole, so a Codex
+process your config does not list is never seen at all, and "the window is
+closed but its background processes are still running" is exactly the state the
+safety check exists for. `doctor` reports all of this as `config_compat`.
 
 ## Automation
 
@@ -137,6 +188,16 @@ codexsync -c config.toml automation run      # run the configured job once, now
 scheduler settings outside `config.toml` and will be removed. If you installed a
 task with those scripts, uninstall it with them first so that two tasks do not
 run.
+
+**One task per account, and an executable that moved.** The Windows task is
+registered as `CodexSync Job (<user>)` in the `\CodexSync\` folder: before
+0.2 every account shared one name, so enabling automation as one user replaced
+another user's task and disabling it deleted theirs. A task belonging to another
+account is now shown and never changed or removed. `automation status` also
+names what the installed task actually runs, so a renamed or moved executable —
+what an upgraded frozen install leaves behind — is reported as
+`EXECUTABLE_MISSING` or `EXECUTABLE_MOVED` instead of a vague "does not match";
+`automation apply` re-registers it for this installation.
 
 ## Logging
 

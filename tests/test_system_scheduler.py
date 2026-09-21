@@ -13,6 +13,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import re
 import plistlib
 import shutil
 import subprocess
@@ -39,7 +40,10 @@ from codexsync.system_scheduler import (
 
 
 SANDBOX_ROOT = Path(__file__).resolve().parent.parent / "test-sandbox"
-TASK_NAME = "\\CodexSync\\CodexSync Job"
+USER_ID = "DESKTOP" + chr(92) + "krox"
+#: One task per account since CS-257; the shared name is only ever read.
+TASK_NAME = ss.task_name_for(USER_ID)
+LEGACY_TASK_NAME = ss.LEGACY_TASK_NAME
 
 
 @dataclass
@@ -433,6 +437,10 @@ class WindowsAdapterTests(WindowsRenderTests):
         seen: dict[str, bytes] = {}
 
         def responder(argv):
+            # Only the registration carries a file; the queries around it name
+            # a task, and "/XML" is their last word.
+            if "/Create" not in argv:
+                return FakeResult()
             path = Path(argv[argv.index("/XML") + 1])
             seen["path"] = str(path)
             seen["payload"] = path.read_bytes()
@@ -441,7 +449,13 @@ class WindowsAdapterTests(WindowsRenderTests):
         run = FakeRun(responder)
         job = ScheduledJob("guardian_snapshot", 60, True, 30, 0)
         self.adapter(run).install(job, command=self.command, config_path=self.config, log_dir=self.logs)
-        self.assertEqual(run.calls, [["schtasks.exe", "/Create", "/XML", seen["path"], "/TN", TASK_NAME, "/F"]])
+        self.assertEqual(run.calls, [
+            # Look before overwriting, then write under this account's own name,
+            # then retire the task the shared name may still hold.
+            ["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"],
+            ["schtasks.exe", "/Create", "/XML", seen["path"], "/TN", TASK_NAME, "/F"],
+            ["schtasks.exe", "/Query", "/TN", LEGACY_TASK_NAME, "/XML"],
+        ])
         path = Path(seen["path"])
         self.assertEqual(path.parent, self.root)
         self.assertFalse(path.exists(), "temporary task XML must be removed")
@@ -452,7 +466,8 @@ class WindowsAdapterTests(WindowsRenderTests):
         paths: list[Path] = []
 
         def responder(argv):
-            paths.append(Path(argv[argv.index("/XML") + 1]))
+            if "/Create" in argv:
+                paths.append(Path(argv[argv.index("/XML") + 1]))
             return FakeResult(1, "", "ОШИБКА: отказано в доступе.")
 
         with self.assertRaises(SchedulerError):
@@ -475,15 +490,17 @@ class WindowsAdapterTests(WindowsRenderTests):
         run = FakeRun(lambda argv: FakeResult(0))
         adapter = self.adapter(run)
         self.assertTrue(adapter.remove())
-        self.assertEqual(run.calls[0], ["schtasks.exe", "/Delete", "/TN", TASK_NAME, "/F"])
+        self.assertEqual(run.calls[0], ["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"])
+        self.assertEqual(run.calls[1], ["schtasks.exe", "/Delete", "/TN", TASK_NAME, "/F"])
+        self.assertEqual(run.calls[2], ["schtasks.exe", "/Query", "/TN", LEGACY_TASK_NAME, "/XML"])
         # Then the folder install created, and only if nothing else lives in it.
-        self.assertEqual(run.calls[1], adapter._remove_empty_folder_argv())
-        self.assertIn("-eq 0", run.calls[1][-1])
-        self.assertEqual(len(run.calls), 2)
+        self.assertEqual(run.calls[3], adapter._remove_empty_folder_argv())
+        self.assertIn("-eq 0", run.calls[3][-1])
+        self.assertEqual(len(run.calls), 4)
 
         run = FakeRun(lambda argv: FakeResult(1, "", "ОШИБКА: Не удается найти указанный файл."))
         self.assertFalse(self.adapter(run).remove())
-        self.assertEqual(run.calls[1], ["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"])
+        self.assertIn(["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"], run.calls)
 
         def still_there(argv):
             return FakeResult(1, "", "denied") if "/Delete" in argv else FakeResult(0, "<Task/>")
@@ -496,7 +513,15 @@ class WindowsAdapterTests(WindowsRenderTests):
         status = self.adapter(run).status(self.definition(ScheduledJob("preflight", 60, True)))
         self.assertFalse(status.installed)
         self.assertIsNone(status.definition_matches)
-        self.assertEqual(len(run.calls), 1)
+        # Both names are asked for -- a task installed before the rename still
+        # runs -- but the run times are never asked for when there is no task.
+        self.assertEqual(
+            run.calls,
+            [
+                ["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"],
+                ["schtasks.exe", "/Query", "/TN", LEGACY_TASK_NAME, "/XML"],
+            ],
+        )
 
     def installed_responder(self, xml_text: str, info: FakeResult):
         def responder(argv):
@@ -521,11 +546,24 @@ class WindowsAdapterTests(WindowsRenderTests):
         self.assertEqual(status.next_run_utc, "2025-09-13T08:02:00Z")
         self.assertEqual(status.last_result, 0)
         self.assertEqual(run.calls[0], ["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"])
-        self.assertEqual(run.calls[1], [
-            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-            "Get-ScheduledTaskInfo -TaskPath '\\CodexSync\\' -TaskName 'CodexSync Job'"
-            " | Select-Object LastRunTime,NextRunTime,LastTaskResult | ConvertTo-Json -Compress",
-        ])
+        # Windows stores the principal as a SID, so ownership is decided by
+        # looking up this account's SID -- which is why that call is here.
+        self.assertIn(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+            ],
+            run.calls,
+        )
+        self.assertIn(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                f"Get-ScheduledTaskInfo -TaskPath '{ss.TASK_FOLDER}' "
+                f"-TaskName '{ss.task_leaf_name(USER_ID)}'"
+                " | Select-Object LastRunTime,NextRunTime,LastTaskResult | ConvertTo-Json -Compress",
+            ],
+            run.calls,
+        )
 
         self.assertIsNone(adapter.status().definition_matches)
         for other in (
@@ -832,6 +870,182 @@ class SystemdTests(SandboxCase):
         self.assertIsNone(idle.last_run_utc)
         self.assertIsNone(idle.next_run_utc)
         self.assertIsNone(idle.last_result)
+
+
+
+class TaskOwnershipTests(SandboxCase):
+    """One machine, two accounts, and an executable that moved (CS-257).
+
+    Before this, the Windows task name was shared by every account: an install
+    overwrote whatever was there, a remove deleted it, and a status compared
+    someone else's task with this account's configuration and called it "out of
+    date". The rename to a per-account name fixes the collision; these tests
+    pin the three behaviours that fix would be worthless without.
+    """
+
+    NOW = datetime(2026, 9, 20, 12, 0, 0)
+    MINE = "S-1-5-21-111-222-333-1001"
+    THEIRS = "S-1-5-21-111-222-333-1002"
+
+    def setUp(self) -> None:
+        super().setUp()
+        # `classify_task` asks the file system whether the program is still
+        # there, so the baseline for these tests is a program that exists.
+        self.program.parent.mkdir(parents=True, exist_ok=True)
+        self.program.write_bytes(b"")
+        self.config.parent.mkdir(parents=True, exist_ok=True)
+        self.config.write_text("", encoding="utf-8")
+
+    def adapter(self, run) -> WindowsTaskScheduler:
+        return WindowsTaskScheduler(
+            run=run, user_id=USER_ID, now=lambda: self.NOW, temp_dir=self.root,
+            protected_roots=[self.root / ".codex"], schtasks="schtasks.exe",
+            powershell="powershell.exe",
+        )
+
+    def responder(self, *, owner: str, command: str | None = None, present=("current",)):
+        """Answer schtasks with a task owned by `owner`, and PowerShell with our SID."""
+        definition = self.definition(ScheduledJob("guardian_snapshot", 60, False))
+        xml_text = ss.render_task_xml(definition, user_id=owner, now=self.NOW)
+        if command is not None:
+            # A lambda, not a replacement string: a Windows path is full of
+            # backslashes and `re.sub` would read them as group escapes.
+            xml_text = re.sub(
+                r"<Command>[^<]*</Command>", lambda _m: f"<Command>{command}</Command>", xml_text
+            )
+
+        def answer(argv):
+            if argv[0] == "powershell.exe" and "WindowsIdentity" in argv[-1]:
+                return FakeResult(0, self.MINE + "\r\n")
+            if argv[0] != "schtasks.exe":
+                return FakeResult(1, "", "no run times in this test")
+            name = argv[argv.index("/TN") + 1]
+            wanted = ss.LEGACY_TASK_NAME if "legacy" in present else ss.task_name_for(USER_ID)
+            if "/Query" in argv:
+                return FakeResult(0, xml_text) if name == wanted else FakeResult(1, "", "not found")
+            return FakeResult(0)
+
+        return answer
+
+    def test_a_task_owned_by_another_account_is_reported_and_never_touched(self) -> None:
+        run = FakeRun(self.responder(owner=self.THEIRS))
+        adapter = self.adapter(run)
+        status = adapter.status(self.definition(ScheduledJob("guardian_snapshot", 60, False)))
+        self.assertFalse(status.owned_by_me)
+        self.assertEqual(status.codes, (ss.FOREIGN_TASK,))
+
+        for call in (
+            lambda: adapter.install(ScheduledJob("guardian_snapshot", 60, False),
+                                    command=self.command, config_path=self.config, log_dir=self.logs),
+            adapter.remove,
+        ):
+            run.calls.clear()
+            with self.assertRaises(SchedulerError):
+                call()
+            self.assertEqual(
+                [argv for argv in run.calls if "/Create" in argv or "/Delete" in argv], [],
+                "a task belonging to another account must not be written or deleted",
+            )
+
+    def test_our_own_task_is_ours_to_rewrite(self) -> None:
+        run = FakeRun(self.responder(owner=self.MINE))
+        adapter = self.adapter(run)
+        status = adapter.status(self.definition(ScheduledJob("guardian_snapshot", 60, False)))
+        self.assertTrue(status.owned_by_me)
+        self.assertEqual(status.codes, ())
+        adapter.install(ScheduledJob("guardian_snapshot", 60, False), command=self.command,
+                        config_path=self.config, log_dir=self.logs)
+        self.assertTrue([argv for argv in run.calls if "/Create" in argv])
+
+    def test_an_executable_that_no_longer_exists_is_named_as_such(self) -> None:
+        """The state an upgraded frozen install leaves behind."""
+        gone = str(self.root / "gone" / "CodexSync.exe")
+        run = FakeRun(self.responder(owner=self.MINE, command=gone))
+        status = self.adapter(run).status(self.definition(ScheduledJob("guardian_snapshot", 60, False)))
+        self.assertIn(ss.EXECUTABLE_MISSING, status.codes)
+        self.assertEqual(status.installed_command[0], gone)
+
+    def test_an_executable_that_moved_is_told_apart_from_a_stale_setting(self) -> None:
+        other = self.root / "elsewhere.exe"
+        other.write_bytes(b"")
+        run = FakeRun(self.responder(owner=self.MINE, command=str(other)))
+        status = self.adapter(run).status(self.definition(ScheduledJob("guardian_snapshot", 60, False)))
+        self.assertIn(ss.EXECUTABLE_MOVED, status.codes)
+        self.assertNotIn(ss.SETTINGS_DIFFER, status.codes)
+
+    def test_a_task_under_the_old_shared_name_is_found_and_reported(self) -> None:
+        run = FakeRun(self.responder(owner=self.MINE, present=("legacy",)))
+        status = self.adapter(run).status(self.definition(ScheduledJob("guardian_snapshot", 60, False)))
+        self.assertTrue(status.installed)
+        self.assertEqual(status.task_name, ss.LEGACY_TASK_NAME)
+        self.assertIn(ss.LEGACY_TASK, status.codes)
+
+    def test_installing_retires_our_own_old_task_and_only_ours(self) -> None:
+        for owner, expect_delete in ((self.MINE, True), (self.THEIRS, False)):
+            with self.subTest(owner=owner):
+                run = FakeRun(self.responder(owner=owner, present=("legacy",)))
+                self.adapter(run).install(
+                    ScheduledJob("guardian_snapshot", 60, False), command=self.command,
+                    config_path=self.config, log_dir=self.logs,
+                )
+                deleted = [argv for argv in run.calls if "/Delete" in argv]
+                self.assertEqual(
+                    bool(deleted), expect_delete,
+                    "the shared name is only cleared when the task there is ours",
+                )
+                if expect_delete:
+                    self.assertEqual(deleted[0][argv_index(deleted[0])], ss.LEGACY_TASK_NAME)
+                    created = [argv for argv in run.calls if "/Create" in argv]
+                    self.assertLess(
+                        run.calls.index(created[0]), run.calls.index(deleted[0]),
+                        "the new task exists before the old one is removed",
+                    )
+
+    def test_the_name_is_per_account_and_file_safe(self) -> None:
+        self.assertNotEqual(ss.task_name_for("a"), ss.task_name_for("b"))
+        self.assertNotIn("\\", ss.task_leaf_name("DOMAIN" + chr(92) + "user"))
+        self.assertTrue(ss.task_name_for("x").startswith(ss.TASK_FOLDER))
+
+
+def argv_index(argv: list[str]) -> int:
+    return argv.index("/TN") + 1
+
+
+class ClassifyTaskTests(unittest.TestCase):
+    """The reasoning, without a scheduler: it is the same on every platform."""
+
+    def definition_for(self, program: Path) -> JobDefinition:
+        return JobDefinition(
+            ScheduledJob("preflight", 60, False), (str(program), "-c", "x", "preflight"),
+            Path("C:/w/config.toml"), Path("C:/w/logs"),
+        )
+
+    def test_nothing_is_said_about_a_task_that_is_not_installed(self) -> None:
+        self.assertEqual(ss.classify_task(ss.SchedulerStatus(installed=False), None), ())
+
+    def test_a_foreign_task_is_not_compared_at_all(self) -> None:
+        status = ss.SchedulerStatus(
+            installed=True, owned_by_me=False, definition_matches=False,
+            installed_command=("C:/gone.exe",),
+        )
+        self.assertEqual(ss.classify_task(status, None), (ss.FOREIGN_TASK,))
+
+    def test_a_changed_setting_is_its_own_code(self) -> None:
+        program = Path(sys.executable)
+        here = Path(__file__)
+        status = ss.SchedulerStatus(
+            installed=True, owned_by_me=True, definition_matches=False,
+            installed_command=(str(program), "-c", str(here), "preflight"),
+        )
+        self.assertEqual(ss.classify_task(status, self.definition_for(program)), (ss.SETTINGS_DIFFER,))
+
+    def test_a_missing_config_is_reported_from_the_arguments(self) -> None:
+        program = Path(sys.executable)
+        status = ss.SchedulerStatus(
+            installed=True, owned_by_me=True, definition_matches=True,
+            installed_command=(str(program), "-c", "C:/nowhere/config.toml", "preflight"),
+        )
+        self.assertIn(ss.CONFIG_PATH_MISSING, ss.classify_task(status, self.definition_for(program)))
 
 
 if __name__ == "__main__":

@@ -11,7 +11,14 @@ from .guardian_models import SourceObservation
 
 
 class SourceMissingError(FileNotFoundError):
-    pass
+    """The state file is not where this config says it is.
+
+    The message carries the whole path, never just the file name. A bare
+    ``.codex-global-state.json`` cannot distinguish "Codex is not installed"
+    from "the window opened a different config" -- and it was exactly that
+    ambiguity that hid a stale remembered config path for a full session
+    (CS-261, CS-266).
+    """
 
 
 class SourceUnstableError(RuntimeError):
@@ -55,7 +62,7 @@ class StableReader:
     def read_once(self) -> ReadSample:
         before = self.signature()
         if not before.exists:
-            raise SourceMissingError(self.path.name)
+            raise SourceMissingError(str(self.path))
         if before.size is not None and before.size > self.max_bytes:
             raise SourceTooLargeError("Guardian source exceeds configured size limit")
         try:
@@ -63,7 +70,7 @@ class StableReader:
             with self.path.open("rb") as handle:
                 payload = handle.read(self.max_bytes + 1)
         except FileNotFoundError as exc:
-            raise SourceMissingError(self.path.name) from exc
+            raise SourceMissingError(str(self.path)) from exc
         except OSError as exc:
             raise SourceUnstableError("Cannot read Guardian source") from exc
         if len(payload) > self.max_bytes:

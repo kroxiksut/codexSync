@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import logging
 import json
 import sys
@@ -42,10 +43,14 @@ from .app import (
     scan_project_move,
     scan_repair_projects,
     validate_config_only,
+    apply_config_migration,
+    check_config_migration,
+    preview_config_migration,
 )
 from .chat_directory import Association, ChatDirectory, ChatEntry, search_chats
 from .chat_move import ChatMovePlan
 from .config import load_config
+from .config_locations import ConfigChoice, choose_config_path, frozen_executable_dir
 from .exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .exit_codes import ExitCode
 from .guardian_inventory import read_guardian_inventory
@@ -56,6 +61,8 @@ from .repair_plan import save_repair_plan
 from .safety_gate import OperationKind
 from .scheduler import render_scheduler_templates, write_scheduler_templates
 from .semantic_transfer import CWD_ABSENT_HERE, FORMAT_MIGRATION, OLDER_FORMAT_HAS_LATER_RECORDS
+from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK
+from .version import __version__
 
 LOG = logging.getLogger(__name__)
 
@@ -298,8 +305,48 @@ def print_automation_status(view: AutomationView) -> None:
             print("  last_run_utc: (not reported by this platform)")
             print("  next_run_utc: (not reported by this platform)")
         print(f"  last_result: {'(none)' if status.last_result is None else status.last_result}")
+    if status.installed and status.task_name:
+        safe_print(f"  task_name: {status.task_name}")
+    if status.owner:
+        safe_print(f"  owner: {status.owner}{'' if status.owned_by_me else ' (not this account)'}")
+    if status.installed_command:
+        safe_print(f"  runs: {json.dumps(list(status.installed_command), ensure_ascii=False)}")
+    if status.codes:
+        print(f"  codes: {', '.join(status.codes)}")
     if status.detail:
         safe_print(f"  detail: {status.detail}")
+    print_task_advice(view)
+
+
+def print_task_advice(view: AutomationView) -> None:
+    """One line saying what to do, when the installed task is not what it should be.
+
+    A task whose executable moved -- which is what an upgraded frozen install
+    leaves behind -- fails every run while looking installed, so the advice
+    names that case separately from a task that is merely out of date.
+    """
+    status = view.status
+    if status is None:
+        return
+    if FOREIGN_TASK in status.codes:
+        print(
+            "  This task belongs to another account. codexSync will not change or remove it; "
+            "its own task is installed under a separate name."
+        )
+        return
+    broken = [code for code in status.codes if code in BROKEN_TASK_CODES]
+    if broken:
+        print(
+            f"  The installed task cannot run as registered ({', '.join(broken)}); "
+            "run `codexsync automation apply` to point it at this installation."
+        )
+        return
+    if LEGACY_TASK in status.codes:
+        print(
+            "  This task was installed under the shared name used before per-account tasks; "
+            "run `codexsync automation apply` to re-register it under this account's own name."
+        )
+        return
     if view.enabled != status.installed or (status.installed and status.definition_matches is False):
         print("  The task does not match [scheduler]; run `codexsync automation apply` to fix that.")
 
@@ -327,12 +374,29 @@ def print_automation_run(run: AutomationRun) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="codexsync", description="codexSync CLI")
-    parser.add_argument("-c", "--config", default="config.toml", help="Path to TOML config")
+    parser.add_argument(
+        "-c", "--config", default=None,
+        help=(
+            "Path to TOML config. Without it: config.toml here, then beside the "
+            "executable, then the per-user location"
+        ),
+    )
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Verbose logging (includes redacted process snapshot metadata)",
+    )
+    # `-V`, because `-v` has meant `--verbose` since 0.1. A build that cannot
+    # be asked what it is, is a build whose version nobody checks: both exes
+    # reported `0.0.0+unknown` for a full release cycle because the only place
+    # the version appeared was the window's About screen (CS-265).
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"codexsync {__version__}",
+        help="Print the version and exit",
     )
     terminate_mode = parser.add_mutually_exclusive_group()
     terminate_mode.add_argument(
@@ -363,6 +427,41 @@ def build_parser() -> argparse.ArgumentParser:
             help="Operation profile to assess; no write probes are performed",
         )
     sub.add_parser("plan", help="Build and print sync plan")
+
+    config_cmd = sub.add_parser(
+        "config",
+        help="Inspect and upgrade config.toml itself",
+        description=(
+            "Report what this version would write differently in config.toml, and apply "
+            "those changes in one confirmed write. Comments and every value not named by "
+            "the plan are kept, and the replaced file is copied into config-history/."
+        ),
+    )
+    config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
+    config_check = config_sub.add_parser(
+        "check", help="Report what this version would change (read-only)"
+    )
+    config_upgrade = config_sub.add_parser(
+        "upgrade", help="Apply a confirmed plan to config.toml"
+    )
+    for sub_parser in (config_check, config_upgrade):
+        sub_parser.add_argument(
+            "--include-defaults",
+            action="store_true",
+            help="Also report sections a newer version introduced whose absence changes nothing",
+        )
+        sub_parser.add_argument(
+            "--skip",
+            action="append",
+            default=[],
+            metavar="CODE",
+            help="Leave this finding alone (repeatable); a blocker cannot be skipped",
+        )
+    config_upgrade.add_argument(
+        "--confirm-plan",
+        required=True,
+        help="Plan id printed by `config check`; refused if the file changed since",
+    )
     init_cfg = sub.add_parser(
         "init-config",
         help="Write config.toml from the packaged template",
@@ -628,11 +727,122 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+
+def _run_config_command(args: argparse.Namespace, config_path: Path) -> int:
+    """`config check` and `config upgrade`: the config's own migration.
+
+    `check` never writes and always exits 0 -- it is a report, like `plan`.
+    `upgrade` needs the id `check` printed, and that id covers the file's
+    bytes, so a config edited in between stops the write instead of being
+    overwritten by a plan built for a different file.
+    """
+    plan, diff = preview_config_migration(
+        config_path, include_defaults=args.include_defaults, skip=tuple(args.skip)
+    )
+    if args.config_command == "check":
+        _print_config_plan(plan, diff, config_path)
+        return int(ExitCode.OK)
+
+    outcome = apply_config_migration(
+        config_path,
+        confirm_plan_id=args.confirm_plan,
+        skip=tuple(args.skip),
+        include_defaults=args.include_defaults,
+    )
+    print(f"Config upgraded: {outcome.saved.path}")
+    print(f"Applied: {', '.join(outcome.applied) or 'nothing'}")
+    if outcome.skipped:
+        print(f"Skipped: {', '.join(outcome.skipped)}")
+    if outcome.saved.history_entry is not None:
+        print(f"Previous version kept: {outcome.saved.history_entry}")
+    return int(ExitCode.OK)
+
+
+def _print_config_plan(plan, diff: str, config_path: Path) -> None:
+    if plan.is_current:
+        print(f"Config matches this version: {config_path}")
+        return
+    print(f"Config written for an earlier version: {config_path}")
+    print(f"Plan id: {plan.plan_id}")
+    for finding in plan.findings:
+        mark = "optional" if finding.optional else "required"
+        print(f"  [{finding.level}/{mark}] {finding.code}")
+        print(f"      {finding.detail}")
+        for edit in finding.edits:
+            print(f"      -> {edit.describe()}")
+        if not finding.edits:
+            print("      -> reported only; nothing is changed automatically")
+    if diff:
+        print()
+        print(diff)
+    if plan.fixable:
+        print()
+        print(f"Apply with: codexsync -c {config_path} config upgrade --confirm-plan {plan.plan_id}")
+
+
+def _warn_about_outdated_config(config_path: Path, command: str) -> None:
+    """One line, before the command runs, when the config is from an older version.
+
+    A mutating command refuses such a config anyway; a read-only one works but
+    may be reading fewer Codex processes than this version knows about. Either
+    way the user is told once, here, and nothing is changed for them.
+    """
+    if command in {"config", "init-config", "validate"}:
+        return
+    try:
+        plan = check_config_migration(config_path)
+    except Exception:  # the command itself reports an unreadable config
+        return
+    if plan.is_current:
+        return
+    if plan.blockers:
+        LOG.warning(
+            "Config is from an earlier version and every mutating command will refuse it (%s). "
+            "Run `config check` to see the fix.",
+            ", ".join(finding.code for finding in plan.blockers),
+        )
+        return
+    LOG.warning(
+        "Config is from an earlier version (%s). Run `config check` to see what would change.",
+        ", ".join(plan.codes()),
+    )
+
+
+
+def _resolve_config_path(explicit: str | None) -> ConfigChoice:
+    """Which config this run works on, and where it was found.
+
+    Without `-c` the search is the window's: this directory, then the folder of
+    a frozen executable, then the per-user location. Before that the default
+    was the literal `config.toml`, so a machine set up through the window --
+    whose config sits in the per-user location -- answered every command run
+    from another directory with "Config file not found", while the window on
+    the same machine opened it happily.
+
+    The choice is returned rather than announced here: this runs before logging
+    is configured, and a notice written to an unconfigured logger is a notice
+    nobody reads.
+    """
+    choice = choose_config_path(explicit, executable_dir=frozen_executable_dir())
+    return replace(choice, path=choice.path.expanduser())
+
+
+def _announce_config_choice(choice: ConfigChoice) -> None:
+    """Name a config that was found somewhere other than the current folder.
+
+    A command that quietly works on a file the user is not looking at is worse
+    than one that says it cannot find anything.
+    """
+    if choice.source not in ("explicit", "cwd") and choice.exists:
+        LOG.info("Using config %s (found in the %s location)", choice.path, choice.source)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    config_path = Path(args.config).expanduser()
+    config_choice = _resolve_config_path(args.config)
+    config_path = config_choice.path
     try:
         if args.manual_terminate_confirmation_override is not None:
             raise ConfigError(
@@ -640,6 +850,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         # Logging is configured with defaults first, then with file settings from config when context is built.
         configure_logging(LoggingConfig(level="INFO", file=None), verbose=args.verbose)
+        _announce_config_choice(config_choice)
+        _warn_about_outdated_config(config_path, args.command)
         cfg_for_verbose = None
         if args.command in {"plan", "sync", "restore"}:
             try:
@@ -653,6 +865,9 @@ def main(argv: list[str] | None = None) -> int:
                 LOG.warning("Verbose process snapshot setup failed, continue with default logger: %s", exc)
                 if cfg_for_verbose is not None:
                     _emit_verbose_process_snapshot(args.verbose, cfg_for_verbose)
+
+        if args.command == "config":
+            return _run_config_command(args, config_path)
 
         if args.command == "validate":
             validate_config_only(config_path)

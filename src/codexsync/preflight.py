@@ -22,6 +22,7 @@ from .guardian_models import (
 from .guardian_schema import validate_global_state_references
 from .manifest import load_manifest
 from .models import AppConfig
+from .config_migrate import BLOCKER, inspect_config, read_config_source
 from .runtime import _make_safety_gate
 from .safety_gate import OperationKind, ProcessState
 from .session_catalog import peek_record_formats, scan_sessions
@@ -78,6 +79,7 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
     except Exception as exc:
         checks.append(PreflightCheckResult("state_dirs", "FAIL", f"State directories are not ready: {exc}"))
 
+    checks.append(_check_config_compat(config_path))
     checks.append(_check_sync_rules(cfg))
     checks.append(_check_project_registry())
     if local_dir is not None:
@@ -131,6 +133,40 @@ def print_preflight_report(report: PreflightReport) -> None:
         "Summary: "
         f"pass={len(report.passed)} warn={len(report.warnings)} fail={len(report.failures)}"
     )
+
+
+def _check_config_compat(config_path: Path) -> PreflightCheckResult:
+    """Say whether this config is one every mutating command will refuse.
+
+    Without it `doctor` reports `config: PASS` for a file written by 0.1 and
+    the user only learns otherwise when `sync` exits 4 -- with a message about
+    closing Codex, which is not the problem. A blocker is a FAIL here because
+    it is a FAIL in practice: nothing can be written until it is settled.
+    """
+    try:
+        text, source_sha256 = read_config_source(config_path)
+        plan = inspect_config(text, source_sha256=source_sha256)
+    except Exception as exc:  # unreadable config: `config` already said so
+        return PreflightCheckResult("config_compat", "WARN", f"Cannot inspect config: {exc}")
+    if plan.is_current:
+        return PreflightCheckResult("config_compat", "PASS", "Config matches this version")
+    blockers = [finding.code for finding in plan.blockers]
+    if blockers:
+        return PreflightCheckResult(
+            "config_compat", "FAIL",
+            "Every mutating command refuses this config: "
+            + ", ".join(blockers)
+            + "; the Settings screen offers the upgrade, or run `config check` "
+            + f"(plan {plan.plan_id[:12]})",
+        )
+    return PreflightCheckResult(
+        "config_compat", "WARN",
+        "This version would write some values differently: "
+        + ", ".join(plan.codes())
+        + "; the Settings screen lists them, or run `config check` "
+        + f"(plan {plan.plan_id[:12]})",
+    )
+
 
 def _check_sync_rules(cfg: AppConfig) -> PreflightCheckResult:
     """Say what this config lets a sync do, before it does it.

@@ -40,7 +40,7 @@ from . import BRAND_NAME
 from . import theme
 from .controller import ConfigInfo, Controller, Failure, Outcome
 from .i18n import Catalog, available_languages, load, pick_language
-from .locations import choose_config_path, frozen_executable_dir
+from .locations import ConfigChoice, choose_config_path, frozen_executable_dir
 from .screens.about import AboutModel, AboutScreen
 from .screens.backups import BackupsModel, BackupsScreen
 from .screens.base import Model, Screen
@@ -125,10 +125,15 @@ class MainWindow(QMainWindow):
         settings: QSettings | None = None,
         language: str | None = None,
         runner: Any = None,
+        choice: ConfigChoice | None = None,
     ) -> None:
         super().__init__()
         self._controller = controller
         self._settings = settings
+        #: How the opened config was found. Shown, never decided from: a window
+        #: that does not say which file it is running against cannot be argued
+        #: with when it turns out to be the wrong one (CS-263).
+        self._config_choice = choice
         #: Anything with ``start(call, done)``; tests pass one that runs inline.
         self._jobs = runner if runner is not None else JobRunner(self)
         self._models: dict[str, Model] = {page: SCREENS[page][1]() for page in PAGES}
@@ -506,6 +511,27 @@ class MainWindow(QMainWindow):
             return self._catalog.text("sidebar.no_config")
         return self._catalog.text("sidebar.machine", machine=self._config_info.machine_id)
 
+    def _config_line(self) -> str:
+        """``Config: <path> (found in the current folder)``.
+
+        The reason is half the sentence. A path alone still leaves "why this
+        one" unanswered, and that question cost a whole session once.
+        """
+        path = self._controller.config_path
+        choice = self._config_choice
+        if choice is None or Path(choice.path) != Path(path):
+            return self._catalog.text("statusbar.config", path=path)
+        return self._catalog.text(
+            "statusbar.config_from",
+            path=path,
+            source=self._catalog.text(f"config.source.{choice.source}"),
+        )
+
+    def rejected_remembered(self) -> Path | None:
+        """A remembered config that was deliberately not opened, if there was one."""
+        choice = self._config_choice
+        return None if choice is None else choice.rejected_remembered
+
     def _show_page(self, index: int) -> None:
         if 0 <= index < len(PAGES):
             self._stack.setCurrentIndex(index)
@@ -514,7 +540,7 @@ class MainWindow(QMainWindow):
 
     def _update_status_bar(self) -> None:
         bar = self.statusBar()
-        bar.showMessage(self._catalog.text("statusbar.config", path=self._controller.config_path))
+        bar.showMessage(self._config_line())
         for name in ("_activity_bar", "_activity_label", "_activity_cancel"):
             old = getattr(self, name, None)
             if old is not None:
@@ -596,7 +622,7 @@ def launch(config: str | Path | Controller | None = None) -> int:
             config, settings.value(SETTING_CONFIG), executable_dir=frozen_executable_dir(),
         )
         controller = Controller(choice.path)
-    window = MainWindow(controller, settings=settings)
+    window = MainWindow(controller, settings=settings, choice=choice)
     window.show()
     window.place_within_screen()
     return int(app.exec())

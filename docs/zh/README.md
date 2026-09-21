@@ -52,7 +52,7 @@ pip install ".[gui]"     # 命令行加窗口（PySide6）
 
 在 Windows 上也可以直接从
 [Releases](https://github.com/kroxiksut/codexSync/releases) 下载构建好的版本，
-它们都不需要安装 Python：`CodexSync-gui-<tag>-windows-amd64.zip`（窗口，同时也是
+它们都不需要安装 Python：`codexsync-gui-<tag>-windows-amd64.zip`（窗口，同时也是
 命令行）或 `codexsync-<tag>-windows-amd64.zip`（只有命令行，不含 Qt）。
 
 ## 首次运行

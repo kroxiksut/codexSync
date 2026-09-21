@@ -207,6 +207,13 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 `<workspace>/config-history/` 下。保存之后已打开的计划都会被丢弃。被规则禁止的设置会
 连同原因一起显示。
 
+**来自旧版本的配置**会在这个界面顶部被点名出来：0.1 的模板设置了两个本版本
+对任何写入都会拒绝的值，因此这样的文件会挡住 `sync`、`restore` 和一切修复，直到它被
+升级为止。这张卡片会列出将要改什么、为什么改，显示确切差异，并以一次确认过的写入
+全部应用，同时保留你的注释，并把被替换的文件复制到 `config-history/`。可选的发现
+可以用旁边的勾选框保持原样。参见
+[配置 → 升级来自旧版本的配置](CONFIGURATION.md#升级来自旧版本的配置)。
+
 语言切换在页面顶部。窗口本身只记住它的大小、最后打开的页面、语言，以及上次打开的是哪个
 配置 —— 永远不记 `config.toml` 的内容。
 
@@ -228,8 +235,8 @@ codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.
 
 ## Windows exe
 
-`CodexSync.exe` 既是窗口，也是命令行：给它一条命令
-（`CodexSync.exe -c config.toml validate`），它就会在不弹出控制台的情况下执行那条命令，
+`codexsync-gui.exe` 既是窗口，也是命令行：给它一条命令
+（`codexsync-gui.exe -c config.toml validate`），它就会在不弹出控制台的情况下执行那条命令，
 已安装版本的计划任务跑的正是这个。只带控制台、不含 Qt 的 `codexsync.exe` 另行发布。
 
 两者如何构建，写在[发布清单](../dev/PUBLISHING.md#c-windows-exe)里（英文）。

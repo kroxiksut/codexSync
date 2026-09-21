@@ -18,11 +18,14 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from typing import Sequence
+
 from .config import PATH_SUBSTITUTIONS, load_config, preview_path
 from .progress import PHASES, ProgressCallback
 from .mapping_hints import MappingHints, build_mapping_hints
 from .sync_candidates import SyncCandidate, list_sync_candidates
 from .automation import AutomationView, apply_automation, automation_status, remove_automation
+from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK
 from .config_edit import (
     ConfigDocument,
     ConfigHistoryEntry,
@@ -36,6 +39,15 @@ from .config_edit import (
     save_config_text,
     set_value,
     validate_config_text,
+)
+from .config_migrate import (
+    ConfigFinding,
+    ConfigMigrationPlan,
+    MigrationOutcome,
+    apply_migration,
+    inspect_config,
+    read_config_source,
+    render_migrated_text,
 )
 from .config import require_guardian_identity
 from .exceptions import ConfigError, ConflictError, FailSafeError
@@ -59,6 +71,7 @@ from .guardian_schema import (
 )
 from .guardian_models import ValidationStatus
 from .planner import build_sync_plan
+from .process_knowledge import default_background_process_names, default_process_names
 from .preflight import (
     PreflightCheckResult,
     PreflightReport,
@@ -125,7 +138,7 @@ from .session_index import (
     IndexParseResult,
     parse_session_index,
 )
-from .stable_reader import StableReader
+from .stable_reader import SourceMissingError, StableReader
 from .state_locator import detect_local_state_dir, resolve_state_dirs
 from .sync_engine import SyncEngine
 from .version import PRODUCER_VERSION, __version__
@@ -134,6 +147,15 @@ LOG = logging.getLogger(__name__)
 
 __all__ = [
     "__version__",
+    "BROKEN_TASK_CODES",
+    "FOREIGN_TASK",
+    "LEGACY_TASK",
+    "ConfigFinding",
+    "ConfigMigrationPlan",
+    "MigrationOutcome",
+    "apply_config_migration",
+    "check_config_migration",
+    "preview_config_migration",
     "PRODUCER_VERSION",
     "SessionScope",
     "load_session_scope",
@@ -230,6 +252,55 @@ class AppContext:
     volatile: bool = False
 
 
+
+def check_config_migration(
+    config_path: Path, *, include_defaults: bool = False
+) -> ConfigMigrationPlan:
+    """What this version would change in `config_path`. Reads, never writes."""
+    text, source_sha256 = read_config_source(config_path)
+    return inspect_config(
+        text, include_defaults=include_defaults, source_sha256=source_sha256
+    )
+
+
+def preview_config_migration(
+    config_path: Path,
+    *,
+    include_defaults: bool = False,
+    skip: Sequence[str] = (),
+) -> tuple[ConfigMigrationPlan, str]:
+    """The plan and the diff its accepted findings would produce.
+
+    Rendering here rather than in the caller is what lets the window and the
+    command line show the same text before anything is written, and it fails
+    the same way for both if an edit cannot be expressed.
+    """
+    text, source_sha256 = read_config_source(config_path)
+    plan = inspect_config(
+        text, include_defaults=include_defaults, source_sha256=source_sha256
+    )
+    if not plan.fixable:
+        return plan, ""
+    migrated = render_migrated_text(text, plan, skip=skip)
+    return plan, config_diff(text, migrated, path_label=str(config_path))
+
+
+def apply_config_migration(
+    config_path: Path,
+    *,
+    confirm_plan_id: str,
+    skip: Sequence[str] = (),
+    include_defaults: bool = False,
+) -> MigrationOutcome:
+    """Apply a confirmed plan in one write. The id must still match the file."""
+    return apply_migration(
+        config_path,
+        confirm_plan_id=confirm_plan_id,
+        skip=skip,
+        include_defaults=include_defaults,
+    )
+
+
 def build_context(
     config_path: Path,
     manual_terminate_confirmation_override: bool | None = None,
@@ -305,10 +376,7 @@ def scan_repair_projects(
     local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
     decision = _make_safety_gate(cfg).check(OperationKind.REPAIR_SCAN)
     volatile = decision.process_state is not ProcessState.STOPPED
-    observation = StableReader(
-        local_dir / ".codex-global-state.json",
-        max_bytes=cfg.guardian.max_state_bytes,
-    ).read_once().observation
+    observation = _observe_global_state(cfg, config_path, local_dir)
     catalog = scan_sessions(
         local_dir,
         volatile=volatile,
@@ -596,10 +664,7 @@ def scan_chats(
     cfg = load_config(config_path)
     local_dir = detect_local_state_dir(cfg.paths.local_state_dir)
     decision = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN)
-    observation = StableReader(
-        local_dir / ".codex-global-state.json",
-        max_bytes=cfg.guardian.max_state_bytes,
-    ).read_once().observation
+    observation = _observe_global_state(cfg, config_path, local_dir)
     return build_chat_directory(
         local_dir,
         observation.payload,
@@ -1521,6 +1586,25 @@ def accept_guardian_baseline(
         return runner.preview_accept(), None
     plan, snapshot = runner.accept(confirm_plan=confirm_plan)
     return plan, snapshot.snapshot_id
+
+
+def _observe_global_state(cfg: AppConfig, config_path: Path, local_dir: Path):
+    """The live global state for a read-only scan, or a message worth reading.
+
+    `StableReader` can only say "this path holds no file". Which config named
+    that path is the other half of the sentence, and without it a scan that
+    opened the wrong config is indistinguishable from a machine where Codex was
+    never installed -- the two need opposite fixes (CS-261).
+    """
+    source = local_dir / ".codex-global-state.json"
+    try:
+        return StableReader(source, max_bytes=cfg.guardian.max_state_bytes).read_once().observation
+    except SourceMissingError as exc:
+        raise ConfigError(
+            f"No Codex global state at {source}. "
+            f"paths.local_state_dir in {config_path} points at {local_dir}. "
+            "Either Codex is not installed for this user, or this is not the config you meant."
+        ) from exc
 
 
 def _read_state_for_preview(cfg: AppConfig, source: Path) -> bytes | None:

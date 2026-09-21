@@ -130,6 +130,17 @@ def _render_name(parts: tuple[str, ...]) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class _ArrayShape:
+    """Offsets of one array's brackets and elements, for edits that keep text."""
+
+    open_offset: int
+    close_offset: int
+    items: tuple[tuple[int, int], ...]
+    trailing_comma: bool
+    multiline: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _Statement:
     """One logical line of TOML, by absolute offsets into the text.
 
@@ -211,6 +222,41 @@ class _Scanner:
             else:
                 break
         return pos
+
+    def array_shape(self, pos: int) -> "_ArrayShape":
+        """Where the elements of the array starting at `pos` are.
+
+        `set_value` re-renders an array from the parsed value, which loses the
+        comments written between its elements -- and a real config has them:
+        one observed file keeps a commented-out include root inside the array
+        as a reminder. Adding one entry must not delete that, so the editors
+        that grow or shrink an array work from these offsets instead.
+        """
+        if self.text[pos] != "[":
+            raise ValueError(f"expected an array at offset {pos}")
+        items: list[tuple[int, int]] = []
+        trailing_comma = False
+        cursor = pos + 1
+        while True:
+            cursor = self._skip_trivia(cursor)
+            if cursor >= self.size:
+                raise ValueError(f"unterminated array at offset {pos}")
+            if self.text[cursor] == "]":
+                return _ArrayShape(
+                    pos, cursor, tuple(items), trailing_comma,
+                    "\n" in self.text[pos:cursor],
+                )
+            start = cursor
+            end, _ = self._scan_value(cursor)
+            items.append((start, end))
+            cursor = self._skip_trivia(end)
+            if cursor < self.size and self.text[cursor] == ",":
+                trailing_comma = True
+                cursor += 1
+                continue
+            trailing_comma = False
+            if self.text[self._skip_trivia(cursor)] != "]":
+                raise ValueError(f"malformed array at offset {pos}")
 
     def _line_end(self, pos: int) -> int:
         index = self.text.find("\n", pos)
@@ -446,6 +492,176 @@ def remove_key(text: str, section: str, key: str) -> str:
     del table[key]
     _verify(result, expected, f"removing {section}.{key}")
     return result
+
+
+def append_array_items(text: str, section: str, key: str, items: list[Any]) -> str:
+    """Add `items` to the end of the array at `[section] key`, keeping the rest.
+
+    Every existing byte of the array survives, comments between its elements
+    included -- which `set_value` cannot promise, because it re-renders the
+    value from the parsed list. An item already present is skipped, so this is
+    idempotent. A missing key or section is created with just these items.
+
+    A multi-line array grows by one line per item, indented like its last
+    element; a single-line array stays on its line.
+    """
+    document = _load(text)
+    parts = _split_name(section)
+    _require_key(key)
+    table = _table_at(document, parts, create=False)
+    current = table.get(key) if isinstance(table, dict) else None
+    if current is None:
+        return set_value(text, section, key, list(items))
+    if not isinstance(current, list):
+        raise ValueError(f"{section}.{key} is not an array")
+    missing = [item for item in items if item not in current]
+    if not missing:
+        return text
+
+    statements = _Scanner(text).statements()
+    bounds = _table_bounds(statements, parts)
+    index = None if bounds is None else _find_key(statements, bounds[0] + 1, bounds[1], key)
+    if index is None:
+        raise ValueError(f"{section}.{key} is defined in a form this editor cannot extend")
+    statement = statements[index]
+    scanner = _Scanner(text)
+    shape = scanner.array_shape(statement.value_start)
+    newline = _newline(text)
+
+    prefix = "" if shape.trailing_comma or not shape.items else ","
+    if shape.multiline:
+        indent = _array_item_indent(text, shape, newline)
+        addition = prefix + newline + newline.join(
+            f"{indent}{render_toml_value(item)}," for item in missing
+        )
+        # The closing bracket keeps its own line, so the last item ends with a
+        # newline and the text before `]` is whatever indented that bracket.
+        insert_at = _line_start_of(text, shape.close_offset)
+        addition += newline + text[insert_at : shape.close_offset]
+        result = text[: _trim_trailing_spaces(text, shape, insert_at)] + addition + text[shape.close_offset :]
+    else:
+        joined = ", ".join(render_toml_value(item) for item in missing)
+        addition = f"{prefix} {joined}" if shape.items else joined
+        result = text[: shape.close_offset] + addition + text[shape.close_offset :]
+
+    expected = copy.deepcopy(document)
+    _table_at(expected, parts, create=True)[key] = list(current) + copy.deepcopy(missing)
+    _verify(result, expected, f"appending to {section}.{key}")
+    return result
+
+
+def remove_array_items(text: str, section: str, key: str, items: list[Any]) -> str:
+    """Drop `items` from the array at `[section] key`, leaving every other byte.
+
+    An item on a line of its own takes that line with it (and the comment that
+    trails it, which describes the item being removed). An item sharing a line
+    with others loses only its own text and the comma that separated it. An
+    item that is not there is not an error -- the caller asks for an absence,
+    and it is already so.
+    """
+    document = _load(text)
+    parts = _split_name(section)
+    _require_key(key)
+    table = _table_at(document, parts, create=False)
+    current = table.get(key) if isinstance(table, dict) else None
+    if current is None:
+        return text
+    if not isinstance(current, list):
+        raise ValueError(f"{section}.{key} is not an array")
+    doomed = [item for item in items if item in current]
+    if not doomed:
+        return text
+
+    statements = _Scanner(text).statements()
+    bounds = _table_bounds(statements, parts)
+    index = None if bounds is None else _find_key(statements, bounds[0] + 1, bounds[1], key)
+    if index is None:
+        raise ValueError(f"{section}.{key} is defined in a form this editor cannot edit")
+    statement = statements[index]
+    shape = _Scanner(text).array_shape(statement.value_start)
+
+    cuts: list[tuple[int, int]] = []
+    for start, end in shape.items:
+        if _array_item_value(text[start:end]) not in doomed:
+            continue
+        cuts.append(_item_cut(text, shape, start, end))
+    if not cuts:
+        raise ValueError(f"{section}.{key} holds those items in a form this editor cannot edit")
+
+    result = text
+    for start, end in sorted(cuts, reverse=True):
+        result = result[:start] + result[end:]
+
+    expected = copy.deepcopy(document)
+    _table_at(expected, parts, create=True)[key] = [
+        item for item in current if item not in doomed
+    ]
+    _verify(result, expected, f"removing from {section}.{key}")
+    return result
+
+
+def _array_item_value(rendered: str) -> Any:
+    """The value of one array element, parsed the way TOML would parse it."""
+    try:
+        return tomllib.loads(f"x = {rendered}")["x"]
+    except tomllib.TOMLDecodeError as exc:  # pragma: no cover - scanner keeps spans valid
+        raise ValueError(f"cannot read array item {rendered!r}: {exc}") from exc
+
+
+def _item_cut(text: str, shape: "_ArrayShape", start: int, end: int) -> tuple[int, int]:
+    """The span to delete so that removing this element leaves valid TOML."""
+    line_start = _line_start_of(text, start)
+    line_end = text.find("\n", end)
+    line_end = len(text) if line_end < 0 else line_end + 1
+    alone = not text[line_start:start].strip() and _only_separator(text[end:line_end])
+    if alone and shape.multiline:
+        return line_start, min(line_end, shape.close_offset)
+    cursor = end
+    while cursor < shape.close_offset and text[cursor] in " \t":
+        cursor += 1
+    if cursor < shape.close_offset and text[cursor] == ",":
+        cursor += 1
+        while cursor < shape.close_offset and text[cursor] in " \t":
+            cursor += 1
+        return start, cursor
+    # The last element of a single-line array: take the comma before it.
+    cursor = start
+    while cursor > shape.open_offset + 1 and text[cursor - 1] in " \t":
+        cursor -= 1
+    if cursor > shape.open_offset + 1 and text[cursor - 1] == ",":
+        cursor -= 1
+    return cursor, end
+
+
+def _only_separator(tail: str) -> bool:
+    """True when what follows an element on its line is just `,` and a comment."""
+    rest = tail.lstrip(" \t")
+    if rest.startswith(","):
+        rest = rest[1:].lstrip(" \t")
+    return not rest.strip() or rest.lstrip().startswith("#")
+
+
+def _line_start_of(text: str, offset: int) -> int:
+    index = text.rfind("\n", 0, offset)
+    return 0 if index < 0 else index + 1
+
+
+def _array_item_indent(text: str, shape: "_ArrayShape", newline: str) -> str:
+    """Indent new lines like the array's existing elements, or one step in."""
+    for start, _ in shape.items:
+        line_start = _line_start_of(text, start)
+        if not text[line_start:start].strip():
+            return text[line_start:start]
+    bracket_line = _line_start_of(text, shape.open_offset)
+    return text[bracket_line : shape.open_offset].replace("\t", "  ") and "  " or "  "
+
+
+def _trim_trailing_spaces(text: str, shape: "_ArrayShape", insert_at: int) -> int:
+    """Where to cut the text so a new line does not inherit stray whitespace."""
+    cursor = insert_at
+    while cursor > shape.open_offset and text[cursor - 1] in " \t\r\n":
+        cursor -= 1
+    return max(cursor, shape.open_offset + 1)
 
 
 def replace_array_of_tables(text: str, name: str, entries: list[dict[str, Any]]) -> str:

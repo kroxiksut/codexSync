@@ -56,8 +56,9 @@ FORBIDDEN = frozenset({
     "guardian_store",
     "guardian_runner",
     "semantic_store",
-    # Both write files; the window reaches them only through app.py.
+    # These write files; the window reaches them only through app.py.
     "config_edit",
+    "config_migrate",
     "system_scheduler",
 })
 

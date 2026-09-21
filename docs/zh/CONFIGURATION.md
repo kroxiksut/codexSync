@@ -84,10 +84,16 @@ process_names = ["codex.exe", "codex", "codex-app-server"]
 grace_period_seconds = 2
 
 [process_detection.background_process_names]
-windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-windows-sandbox-service", "codex-command-runner"]
+windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-command-runner"]
 macos = ["ChatGPT.app/Contents/MacOS/", "codex-app-server", "codex-execve-wrapper", "codex-code-mode-host"]
 linux = ["/usr/lib/chatgpt/", "codex-app-server", "codex-linux-sandbox", "codex-execve-wrapper", "codex-code-mode-host"]
 ```
+
+只有在 Codex 关闭后会消失的进程名才应写入 `background_process_names`。始终运行的
+进程在两种状态下给出相同的结果：它不会让检测更严格，而是让安全闸门永远报告
+"正在运行"，从而永久阻止所有写入命令。因此 `codex-windows-sandbox-service`
+不在列表中：在 Windows 上它是开机自动启动的服务
+`CodexSandboxService.OpenAI.Codex`。
 
 名称按完整进程名匹配，绝不按子串匹配。含有 `/` 的条目是路径标记，用来与进程路径匹配：
 macOS 上的桌面版构建就叫 `ChatGPT`，而单写一个 `ChatGPT` 会把普通的 ChatGPT 应用也
@@ -95,6 +101,44 @@ macOS 上的桌面版构建就叫 `ChatGPT`，而单写一个 `ChatGPT` 会把�
 
 `allow_terminate_if_running` 以及其他 `terminate_*` 键是 0.1 遗留下来的。codexSync
 从不结束 Codex，`allow_terminate_if_running = true` 会被拒绝。
+
+## 升级来自旧版本的配置
+
+0.1 随附的模板里写着 `allow_terminate_if_running = true` 和
+`session_mode = "last_date_only"`，而本版本对任何会写入的命令都拒绝这两个值。
+于是由 0.1 写出的 `config.toml` 会让 `sync`、`restore`、`repair-projects apply`
+和 `recover` 以退出码 4 结束，直到它被升级为止 —— 而且光靠设置界面也改不了：
+那里没有第一个键的字段，并且只要文本里还留着它，保存就会被拒绝。
+
+```powershell
+codexsync -c config.toml config check     # 本版本会改什么；不写入任何内容
+codexsync -c config.toml config upgrade --confirm-plan <id>
+```
+
+`config check` 会打印每一条发现、它的代码、确切改动和差异，然后是计划 id。
+`config upgrade` 需要那个 id，而 id 覆盖文件的字节，所以在这期间被编辑过的配置
+会让升级停下来，而不是被覆盖。在窗口里，同样的内容出现在「设置」中的
+**来自旧版本的配置**：同样的列表、同样的差异、同样的 id。
+
+你的文件仍然是你的。注释会保留，数组按行增删而不是整体重写，计划没有点名的值
+不会被碰，被替换的版本会复制到工作目录旁边的 `config-history/`。所有改动一次
+写入：只修好第一个阻塞项的配置仍然会被拒绝，因此不存在「迁移了一半」的状态。
+
+| 代码 | 级别 | 含义 |
+|---|---|---|
+| `TERMINATE_FLAG_SET` | 阻止写入 | `allow_terminate_if_running = true`；codexSync 从不结束 Codex |
+| `SESSION_MODE_LAST_DATE` | 阻止写入 | `session_mode = "last_date_only"` 可能丢掉分支 |
+| `BACKUP_DISABLED` | 阻止写入 | `backup_before_overwrite = false` |
+| `DETECTION_LIST_OUTDATED` | 安全 | 你的列表里缺少本版本已知的 Codex 进程 |
+| `MISSING_EXCLUDE_SKILLS_SYSTEM` | 正确性 | 没有排除 `skills/.system/**` |
+| `OBSOLETE_INCLUDE_ROOT` | 正确性 | 那些本来也不会被复制的包含路径 |
+| `SCHEDULER_INTERVAL_MIGRATED` | 正确性 | `interval_minutes` 已换算进 `interval_seconds` |
+| `LEGACY_SCHEDULER_KEYS` | 正确性 | 本版本忽略的调度键 |
+
+阻塞项必须解决；其余都可以拒绝 —— 命令行上用 `--skip CODE`，窗口里用旁边的勾选框。
+`DETECTION_LIST_OUTDATED` 值得在拒绝之前读一读：进程名是整体比对的，所以配置里
+没写的 Codex 进程根本不会被看见，而「窗口已关、后台进程还活着」正是那项安全检查
+存在的理由。`doctor` 把这一切报告为 `config_compat`。
 
 ## 自动化
 
@@ -128,6 +172,14 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
 **已废弃：** `guardian scheduler` 和 `scripts/scheduler/{windows,macos}` 把计划任务的
 设置放在 `config.toml` 之外，将来会被移除。如果你曾用那些脚本装过任务，请先用它们卸载，
 以免两个任务同时运行。
+
+**每个账户一个任务，以及搬了家的可执行文件。** Windows 任务注册在 `\CodexSync\`
+文件夹下，名字是 `CodexSync Job (<用户>)`：在 0.2 之前所有账户共用一个名字，于是
+一个用户启用自动化就会替换掉另一个用户的任务，关闭时又会把对方的删掉。属于其他
+账户的任务现在只会被显示，永远不会被修改或删除。`automation status` 还会说明
+已安装的任务实际运行什么，因此被改名或移动过的可执行文件 —— 升级打包版之后留下的
+正是这种情况 —— 会报成 `EXECUTABLE_MISSING` 或 `EXECUTABLE_MOVED`，而不是含糊的
+「与配置不符」；`automation apply` 会把它按这次安装重新注册。
 
 ## 日志
 

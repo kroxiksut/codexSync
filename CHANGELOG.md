@@ -10,6 +10,54 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **`codexsync --version` (`-V`).** Until now the version appeared only on the
+  window's About screen, so a downloaded exe could not be asked what it was —
+  which is how both builds reported `0.0.0+unknown` without anyone noticing.
+  `-v` still means `--verbose`.
+- **Both shells now look for `config.toml` in the same places.** `-c` still
+  names the file (including one to be created), but without it the command line
+  used to mean the literal `config.toml` in the current directory, so a machine
+  set up through the window — whose config sits in the per-user location, or
+  beside a downloaded exe — answered every terminal command with "Config file
+  not found". The search order (current directory, beside the executable,
+  per-user location) lives in `config_locations.py`, which both shells use, and
+  a config found outside the current directory is named in the log.
+- **A config written by 0.1 can be upgraded from either shell.** The template
+  0.1 shipped set `allow_terminate_if_running = true` and
+  `session_mode = "last_date_only"`, both of which this version refuses for
+  every mutating command — so an upgraded install answered `sync`, `restore`,
+  `repair-projects apply` and `recover` with exit 4, and the Settings screen
+  could not fix it (it has no field for the first key, and the save path runs
+  the same check over the text it is asked to save). `config check` now reports
+  every difference with its code, its exact edits and a diff; `config upgrade
+  --confirm-plan <id>` applies them in one write, and the window offers the
+  same thing on Settings as "Config from an earlier version". The plan id
+  covers the file's bytes, so a config edited in between stops the upgrade;
+  comments survive, arrays grow and shrink line by line rather than being
+  re-rendered, an optional finding can be declined (`--skip CODE`), and the
+  replaced file is kept in `config-history/`. `doctor` reports this as
+  `config_compat` instead of saying `config: PASS` about a config nothing can
+  write with.
+- **What this version knows about Codex's processes lives in one module.**
+  `process_knowledge.py` is now the single source for
+  `process_detection.process_names` and the per-OS background markers: the
+  loader defaults to it, the Settings screen renders it, the shipped template
+  is checked against it, and the config upgrade offers it. Before this the
+  loader still defaulted to what 0.1 knew, so a config without a
+  `[process_detection]` section — or one written by 0.1 — detected fewer Codex
+  processes than this version can, silently, and names are matched whole.
+- **The scheduled task is per account, and says when it is broken.** On Windows
+  it is registered as `CodexSync Job (<user>)`: the single shared name meant
+  one account's `automation apply` overwrote another account's task and
+  `automation remove` deleted it. A task belonging to another account is now
+  reported (`FOREIGN_TASK`) and never written or removed, and a task still
+  under the old shared name is found, reported and re-registered under this
+  account's name (the old one is deleted only after the new one exists, and
+  only when it was ours). `automation status` reads back what the installed
+  task actually runs, so an executable that was renamed or moved — what an
+  upgraded frozen install leaves behind — is named as `EXECUTABLE_MISSING` or
+  `EXECUTABLE_MOVED` rather than a vague "differs from configuration", on all
+  three platforms.
 - **Codex rewriting its own sessions is recognised.** The September 2026
   desktop build rewrote every session file into numbered records (keeping each
   file's mtime and dropping rolled-back turns on the way), which made a mirror
@@ -274,6 +322,54 @@ metadata.
   termination flow it belonged to.
 
 ### Fixed
+
+- **An always-running Windows service made the safety gate say "Codex is open"
+  forever.** `codex-windows-sandbox-service` was listed as a background marker,
+  but on Windows it is the service `CodexSandboxService.OpenAI.Codex`, started
+  automatically at boot and alive whether or not Codex ever ran. Every config
+  generated from the shipped template inherited it, so on such a machine the
+  window reported Codex as open with an empty system tray and `sync`, `restore`
+  and `repair-projects apply` could never run — the continuously-stopped window
+  they require would never arrive. The name is gone from the defaults, the
+  template and the documentation, and the rule it broke is now written down: a
+  name belongs in `background_process_names` only once it has been observed to
+  disappear when Codex closes.
+- **The safety gate now names the process it found.** "Codex or known
+  background process detected" is equally true of a running Codex and of an
+  unrelated service, and telling them apart took a live machine. The reason
+  string, the `codex_process` check and the window's banner now carry the
+  names and pids; an undetermined state stays a separate sentence, and the
+  description can never influence the decision.
+- **The windowed build no longer flashes console windows.** `codexsync-gui.exe`
+  owns no console, so every `tasklist` and `powershell` the process detector
+  started got a new one — up to eighteen per gated check, which is what a
+  screen did on arrival. The detector now spawns with `CREATE_NO_WINDOW`, a
+  hidden `STARTUPINFO` and an explicit `stdin`, the way the scheduler adapter
+  always has, and reads `tasklist` in the console code page instead of losing
+  non-ASCII names to UTF-8 decoding.
+- **A screen no longer starts scanning because it was opened.** Sync, Chats and
+  Sessions each ran a full read of `.codex` on arrival, which looked like the
+  program acting on its own and (with the console windows above) alarmingly so.
+  They now wait for their button. The Sessions screen still loads the stored
+  working set by itself, because that comes from the semantic store, touches no
+  Codex file and raises no gate — and without it the screen would claim it was
+  about to carry everything.
+- **A missing global state file now says which file and which config.**
+  `SourceMissingError: .codex-global-state.json` could not distinguish "Codex
+  is not installed" from "this is not the config you meant"; the two need
+  opposite fixes. The message carries the full path, and a read-only scan
+  reports it as a configuration error naming `paths.local_state_dir` and the
+  config file it came from.
+- **A remembered config path inside the temporary directory is no longer
+  trusted.** The window keeps the path of the config it last opened; a config
+  left in a scratch directory can outlive its purpose and be opened on every
+  later start, against a throwaway state directory. Such a path is now skipped
+  in favour of the ordinary search, and reported rather than dropped silently.
+  The status bar also says how the open config was chosen, not only where it is.
+- **The frozen builds report their real version.** Neither spec carried the
+  package metadata `version.py` reads, so both exes answered `0.0.0+unknown` —
+  and stamped that into every Guardian snapshot manifest through
+  `PRODUCER_VERSION`, leaving snapshots that cannot say which build wrote them.
 - **A sync or restore could not write into `.codex` at all when `paths.temp_dir`
   was on another drive.** Every payload was staged in the temp directory beside
   the cloud folder and then moved into place with an atomic replace, which only
@@ -332,7 +428,7 @@ metadata.
 - `automation status|apply|remove|run` and `init-config --machine-id
   --local-state-dir --workspace-root [--cloud-root]`, so the command line can do
   what the window does.
-- A windowed `CodexSync.exe` (`codexsync-gui.spec`) that is also the CLI when
+- A windowed `codexsync-gui.exe` (`codexsync-gui.spec`) that is also the CLI when
   given a command, so a frozen install's scheduled task runs without a console;
   the CI runs the GUI tests offscreen in a second job.
 - The window: chat titles next to session branches, the session index card, a

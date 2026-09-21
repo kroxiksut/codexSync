@@ -7,11 +7,12 @@
 ```powershell
 codexsync -c config.toml <命令>                # 已安装
 python -m codexsync -c config.toml <命令>      # 直接用源码检出，不安装
-CodexSync.exe -c config.toml <命令>            # Windows 窗口版构建，不弹控制台
+codexsync-gui.exe -c config.toml <命令>        # Windows 窗口版构建，不弹控制台
 ```
 
 全局选项：`-c/--config` —— `config.toml` 的路径；`-v/--verbose` —— 详细日志，包括
-看到了哪些 Codex 进程。在任何命令或子命令后加 `-h` 会打印它的选项。
+看到了哪些 Codex 进程；`-V/--version` —— 打印版本并退出，用它可以询问下载到的
+exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它的选项。
 
 ## 全部命令
 
@@ -22,6 +23,8 @@ CodexSync.exe -c config.toml <命令>            # Windows 窗口版构建，不
 |---|---|---|---|
 | `init-config` | — | 用内置模板写出一个 `config.toml` | [见下](#上手) |
 | `validate` | 否 | 加载并检查配置，仅此而已 | [见下](#上手) |
+| `config check` | 否 | 报告本版本会对 `config.toml` 做哪些改动 | [配置](CONFIGURATION.md#升级来自旧版本的配置) |
+| `config upgrade` | 否 | 以一次确认过的写入应用这些改动 | [配置](CONFIGURATION.md#升级来自旧版本的配置) |
 | `doctor` / `preflight` | 否 | 环境诊断；两者相同且无副作用 | [见下](#上手) |
 | `plan` | 否 | 显示一次同步会复制什么（Codex 开着时标记为 `volatile`） | [同步](SYNC.md) |
 | `sync` | **是** | 双向复制状态，先备份 | [同步](SYNC.md) |
@@ -67,6 +70,18 @@ codexsync init-config --output D:\codexSync\config.toml --force
 ```powershell
 codexsync init-config --output config.toml --machine-id laptop-1 --local-state-dir C:/Users/me/.codex --workspace-root D:/Cloud/codexSync
 ```
+
+### 打开的是哪个配置
+
+`-c` 指明文件，而指向一个还不存在的路径就是要求在那里创建它。不带 `-c` 时，
+搜索顺序与窗口一致：当前目录下的 `config.toml`，然后是可执行文件旁边，最后是
+按用户的位置 —— Windows 上是 `%APPDATA%\CodexSync\config.toml`，macOS 上是
+`~/Library/Application Support/CodexSync/`，Linux 上是
+`$XDG_CONFIG_HOME/codexsync/`。在当前目录以外找到的文件会被明确说明，这样命令
+就不会悄悄地对着一个你没在看的文件工作。
+
+窗口会记住上次打开的配置并以它启动；命令行什么都不记，所以在脚本或计划任务里，
+`-c` 仍然是把话说准的方式。
 
 先检查配置，再检查环境：
 

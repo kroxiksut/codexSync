@@ -24,9 +24,7 @@ delete_policy = "never"
 dry_run_default = true
 # Session mode:
 # all|last_date_only (latest date folder under sessions/, if date-based layout is detected)
-# Keep "all": last_date_only can discard branches, so every mutation command
-# (sync/restore/repair-projects apply/recover) rejects it with exit code 4.
-session_mode = "all"
+session_mode = "last_date_only"
 
 [paths]
 # codexSync workspace root (used for variable expansion in other paths)
@@ -40,39 +38,6 @@ backup_dir = "${workspace_root}/backups"
 # Temporary directory for atomic operations (tmp + rename)
 temp_dir = "${workspace_root}/.tmp"
 
-[guardian]
-# Immutable Guardian snapshots. Must stay outside .codex, sync, backups and temp.
-root_dir = "${workspace_root}/guardian"
-# Maximum accepted .codex-global-state.json size (1 MiB to 1 GiB).
-max_state_bytes = 67108864
-# Suspicion threshold for a verified state-count reduction.
-shrink_min_count = 2
-shrink_ratio = 0.25
-# Independent retention limits; 0 disables the corresponding limit.
-retention_days = 30
-max_snapshots = 100
-quarantine_retention_days = 30
-staging_retention_hours = 24
-poll_interval_seconds = 3
-debounce_seconds = 2
-stable_reads = 3
-stable_read_interval_seconds = 0.5
-fallback_scan_seconds = 60
-once_timeout_seconds = 120
-
-[semantic]
-# Immutable semantic publications; may be placed in a user-managed cloud folder.
-root_dir = "${workspace_root}/semantic"
-max_jsonl_line_bytes = 67108864
-# Container the cloud mirror stores a session branch in: none|gzip|xz.
-# Only the mirror is affected; a branch written back into the Codex state
-# directory is always plain JSONL. Branch hashes, record counts and every
-# comparison are taken from the decompressed stream, so a compressed mirror
-# copy is the same branch as the plain one rather than a divergence.
-# Changing this renames every mirror destination and so changes the plan id:
-# rescan and confirm the new id before applying.
-mirror_compression = "xz"
-
 [targets]
 # Relative paths under local_state_dir/cloud_state_dir included in sync
 include_roots = [
@@ -84,9 +49,6 @@ include_roots = [
 
 [filters]
 # Global exclusions (temporary/cache/lock files, etc.)
-# "skills/.system/**": those skills are installed and removed by the Codex
-# runtime itself. With delete_policy = "never" a file it deleted there would
-# come back from the mirror on every run, so that tree is left to it entirely.
 exclude_globs = [
   "**/*.lock",
   "**/*.tmp",
@@ -96,7 +58,6 @@ exclude_globs = [
   "**/.cache/**",
   "**/__pycache__/**",
   "**/*.log",
-  "skills/.system/**",
 ]
 
 [conflict]
@@ -123,14 +84,12 @@ require_codex_stopped = true
 fail_on_unknown = true
 
 [process_detection]
-# Codex process names across operating systems. Matched as whole process
-# names, never as substrings. On Linux `ps` cuts a name to 15 characters and
-# the detector compares the truncation too.
-process_names = ["codex.exe", "codex", "codex-app-server"]
+# Codex process names across operating systems
+process_names = ["codex.exe", "codex"]
 # Small grace delay after process close before sync starts
 grace_period_seconds = 2
 # Allow automatic Codex process termination before sync (Windows only)
-allow_terminate_if_running = false
+allow_terminate_if_running = true
 # Require manual GUI confirmation before termination by default
 manual_terminate_confirmation = true
 # Confirmation channel: gui|console
@@ -139,32 +98,10 @@ terminate_confirmation_mode = "gui"
 terminate_timeout_seconds = 20
 
 [process_detection.background_process_names]
-# Background processes treated as "Codex is still running".
-# An entry containing "/" is a path marker matched against the process path
-# instead of its name: the macOS desktop build is called ChatGPT since
-# 2026-07-09 (bundle id com.openai.codex), and a bare "ChatGPT" would also
-# match the ordinary ChatGPT app, which has nothing to do with Codex.
-# A name here must disappear when Codex closes. "codex-windows-sandbox-service"
-# is deliberately absent: on Windows it is the always-running service
-# CodexSandboxService.OpenAI.Codex, so listing it blocked every mutation.
-windows = [
-  "codex-windows-sandbox",
-  "codex-windows-sandbox-setup",
-  "codex-command-runner",
-]
-macos = [
-  "ChatGPT.app/Contents/MacOS/",
-  "codex-app-server",
-  "codex-execve-wrapper",
-  "codex-code-mode-host",
-]
-linux = [
-  "/usr/lib/chatgpt/",
-  "codex-app-server",
-  "codex-linux-sandbox",
-  "codex-execve-wrapper",
-  "codex-code-mode-host",
-]
+# Background processes treated as "Codex is still running"
+windows = ["codex-windows-sandbox"]
+macos = []
+linux = []
 
 [state]
 # Internal coordination files between machines
@@ -177,21 +114,14 @@ manifest_file = "${workspace_root}/state/manifest.json"
 data_version = 1
 
 [scheduler]
-# Periodic safe work, registered as a user-level task of the operating system
-# (Task Scheduler on Windows, launchd on macOS, systemd --user on Linux).
-# Manual runs are always available.
+# Enable scheduling (manual run is always available)
 enabled = false
-# Safe job only: guardian_snapshot|preflight|sync_dry_run.
-# Mutating operations are deliberately not valid scheduler modes.
-mode = "guardian_snapshot"
-# Repeat interval; must be at least 60 seconds.
-interval_seconds = 60
-# Run the user-level job after the user signs in / user session starts.
-run_at_login = true
-# Optional delay after sign-in or session start; avoids competing with startup.
-startup_delay_seconds = 0
-# Random delay before a regular run; 0 disables it.
-jitter_seconds = 0
+# Scheduler type: windows_task_scheduler|cron|launchd|systemd
+kind = "windows_task_scheduler"
+# Run interval in minutes
+interval_minutes = 10
+# Random startup jitter (seconds) to reduce simultaneous runs on two machines
+jitter_seconds = 30
 
 [logging]
 # Logging level: DEBUG|INFO|WARNING|ERROR

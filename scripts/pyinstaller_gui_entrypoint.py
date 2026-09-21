@@ -1,8 +1,8 @@
-"""Entry point of the windowed ``CodexSync.exe``: the window, and the CLI too.
+"""Entry point of the windowed ``codexsync-gui.exe``: the window, and the CLI too.
 
 The scheduled task runs whatever ``system_scheduler.job_command()`` returns,
 and in a frozen build that is ``sys.executable`` itself -- so this one exe is
-started as ``CodexSync.exe -c <config> guardian snapshot --once`` every minute
+started as ``codexsync-gui.exe -c <config> guardian snapshot --once`` every minute
 or so. Being windowed is what keeps a console from flashing each time; it also
 means the same file must behave as the command line whenever it is given a
 command, and open the window only when it is not.

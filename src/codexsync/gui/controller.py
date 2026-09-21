@@ -89,6 +89,15 @@ from ..app import (
     scan_repair_projects,
     scan_session_transfer,
     restore_from_backup,
+    default_background_process_names,
+    default_process_names,
+    ConfigFinding,
+    ConfigMigrationPlan,
+    apply_config_migration,
+    preview_config_migration,
+    BROKEN_TASK_CODES,
+    FOREIGN_TASK,
+    LEGACY_TASK,
 )
 from ..exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .locations import find_workspaces as find_workspace_candidates
@@ -340,7 +349,7 @@ class Controller:
         """What this build is. Reads no configuration and cannot fail.
 
         ``sys.frozen`` is what PyInstaller sets, and it is the difference that
-        matters to a bug report: a packaged `CodexSync.exe` carries its own
+        matters to a bug report: a packaged `codexsync-gui.exe` carries its own
         Python and its own copy of the package, so "which version" cannot be
         answered from the interpreter the user happens to have.
         """
@@ -701,6 +710,19 @@ class Controller:
 
     def save_config(self, text: str, *, expected_sha256: str) -> Outcome:
         return run(lambda: save_config_text(self._config_path, text, expected_sha256=expected_sha256))
+
+    def config_migration(self, *, skip: tuple[str, ...] = ()) -> Outcome:
+        """What this version would change in the config, and the diff of it.
+
+        Read-only: the window shows this before anything is written, and the
+        plan id it returns is what the apply has to quote back.
+        """
+        return run(lambda: preview_config_migration(self._config_path, skip=skip))
+
+    def apply_config_migration(self, *, confirm_plan: str, skip: tuple[str, ...] = ()) -> Outcome:
+        return run(lambda: apply_config_migration(
+            self._config_path, confirm_plan_id=confirm_plan, skip=skip
+        ))
 
     def config_history(self) -> Outcome:
         return run(lambda: list_config_history(load_config(self._config_path), self._config_path))

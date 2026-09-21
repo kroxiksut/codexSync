@@ -38,6 +38,43 @@ import sys
 
 DETECTOR_CONTRACT_VERSION = 1
 
+
+def _run_console_tool(argv: list[str], *, encoding: str) -> subprocess.CompletedProcess[str]:
+    """Run a console helper without ever showing a console window.
+
+    The window is not a cosmetic detail. `codexsync-gui.exe` is built windowed,
+    so the process owns no console; every `tasklist` and `powershell` started
+    from it therefore gets a *new* one, which Windows shows. One gated check is
+    up to nine samples of two adapters, so a screen that checks the process
+    state flashed up to eighteen windows (CS-259).
+
+    Three things make that stop, and each is needed on its own: `CREATE_NO_WINDOW`
+    for the console the child would allocate, `STARTF_USESHOWWINDOW` for a child
+    that asks for a window anyway, and an explicit `stdin` -- a windowed process
+    has no standard handles to inherit, and a console tool handed an invalid one
+    can fail in ways that read here as "process state unknown".
+
+    `system_scheduler._default_run` has done this since it was written; the
+    detector simply never did.
+    """
+    kwargs: dict[str, object] = {}
+    if sys.platform.startswith("win"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = startupinfo
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        encoding=encoding,
+        errors="ignore",
+        check=False,
+        stdin=subprocess.DEVNULL,
+        **kwargs,
+    )
+
 #: Platforms whose adapter has been run against a live Codex, mapping
 #: ``sys.platform`` to the observation that proved it (OS build and Codex
 #: version). **Filled only from `docs/dev/experiments/process-detector-macos.md`,
@@ -227,14 +264,10 @@ class CodexProcessDetector:
         return list(merged.values())
 
     def _list_windows_tasklist(self) -> list[ProcessInfo]:
-        result = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            check=False,
-        )
+        # "oem", not "utf-8": `tasklist` writes in the console code page, so on
+        # a localized Windows a name with non-ASCII bytes was silently losing
+        # them to `errors="ignore"`.
+        result = _run_console_tool(["tasklist", "/FO", "CSV", "/NH"], encoding="oem")
         if result.returncode != 0:
             raise RuntimeError(f"tasklist failed with exit code {result.returncode}")
 
@@ -257,13 +290,9 @@ class CodexProcessDetector:
             "Get-CimInstance Win32_Process | "
             "Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress"
         )
-        result = subprocess.run(
+        result = _run_console_tool(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True,
-            text=True,
             encoding="utf-8",
-            errors="ignore",
-            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(f"CIM process enumeration failed with exit code {result.returncode}")
@@ -317,12 +346,7 @@ class CodexProcessDetector:
         ]
 
 def _run_ps(ps: str, column: str) -> str:
-    result = subprocess.run(
-        [ps, "-A", "-o", "pid=", "-o", column],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _run_console_tool([ps, "-A", "-o", "pid=", "-o", column], encoding="utf-8")
     if result.returncode != 0:
         raise RuntimeError(f"ps failed with exit code {result.returncode}")
     return result.stdout

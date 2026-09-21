@@ -78,34 +78,52 @@ def _bootstrap_cloud_targets(cfg: AppConfig) -> None:
 
 def _make_safety_gate(cfg: AppConfig) -> SafetyGate:
     detector = CodexProcessDetector(cfg.process_detection.process_names)
+    # What the last sample saw, so the gate's reason can name it. Kept here and
+    # not returned from `sample` because the decision must not depend on it.
+    last: dict[str, str] = {"detail": ""}
 
     def sample() -> ProcessState:
         capability = detector.capability()
         if not capability.supported:
+            last["detail"] = ""
             return ProcessState.UNKNOWN
         snapshot = collect_process_snapshot(cfg, detector=detector)
+        last["detail"] = describe_process_snapshot(snapshot)
         if snapshot.main_processes or snapshot.sandbox_detected or snapshot.background_processes:
             return ProcessState.RUNNING
         return ProcessState.STOPPED
 
     return SafetyGate(
         sample,
+        describe=lambda: last["detail"],
         stable_window_seconds=2.0,
         sample_interval_seconds=0.25,
         monotonic=time.monotonic,
         sleep=time.sleep,
     )
 
+#: Appended to every compatibility refusal. Two of the three values below are
+#: what the 0.1 template itself shipped, so a user hitting this did nothing
+#: wrong; the message names the command that fixes it rather than leaving them
+#: to find the key by hand (`config_migrate`).
+MIGRATION_HINT = "run `config check` to see what this version would change, and `config upgrade` to apply it"
+
+
 def _require_mutation_compatible_config(cfg: AppConfig) -> None:
     if cfg.process_detection.allow_terminate_if_running:
         raise ConfigError(
             "process_detection.allow_terminate_if_running=true is no longer supported for mutation commands; "
-            "close Codex manually before retrying"
+            f"codexSync never stops Codex. {MIGRATION_HINT}"
         )
     if not cfg.backup.backup_before_overwrite:
-        raise ConfigError("backup.backup_before_overwrite=false is not supported for mutation commands")
+        raise ConfigError(
+            f"backup.backup_before_overwrite=false is not supported for mutation commands. {MIGRATION_HINT}"
+        )
     if cfg.sync.session_mode == "last_date_only":
-        raise ConfigError("sync.session_mode=last_date_only is incompatible with branch-preserving semantic mode")
+        raise ConfigError(
+            "sync.session_mode=last_date_only is incompatible with branch-preserving semantic mode. "
+            f"{MIGRATION_HINT}"
+        )
 
 def _current_os_background_processes(cfg: AppConfig) -> list[str]:
     os_key = _current_os_key()
@@ -118,6 +136,26 @@ def _current_os_key() -> str:
     if sys.platform == "darwin":
         return "macos"
     return "linux"
+
+def describe_process_snapshot(snapshot: ProcessSnapshot) -> str:
+    """``codex.exe (pid 27472), codex-windows-sandbox.exe (pid 8296)``.
+
+    Only names and pids, and only of processes this machine is already running:
+    nothing here reaches into a Codex file. Duplicates collapse to one entry per
+    name so a build that runs eight helpers does not fill the line.
+    """
+    seen: dict[str, list[int]] = {}
+    for proc in (*snapshot.main_processes, *snapshot.background_processes):
+        seen.setdefault(proc.name, []).append(proc.pid)
+    parts = []
+    for name in sorted(seen):
+        pids = sorted(seen[name])
+        shown = ", ".join(str(pid) for pid in pids[:3])
+        if len(pids) > 3:
+            shown += f", +{len(pids) - 3}"
+        parts.append(f"{name} (pid {shown})")
+    return ", ".join(parts)
+
 
 def collect_codex_processes(cfg: AppConfig) -> list[ProcessInfo]:
     snapshot = collect_process_snapshot(cfg)

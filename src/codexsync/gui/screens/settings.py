@@ -48,7 +48,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..controller import PATH_SUBSTITUTIONS, REMOVE, ConfigEdits, Outcome, resolve_path_preview
+from ..controller import (
+    BROKEN_TASK_CODES,
+    FOREIGN_TASK,
+    LEGACY_TASK,
+    PATH_SUBSTITUTIONS,
+    REMOVE,
+    ConfigEdits,
+    Outcome,
+    default_background_process_names,
+    default_process_names,
+    resolve_path_preview,
+)
 from ..i18n import available_languages, load
 from ..widgets import (
     Banner,
@@ -119,28 +130,21 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
     ("protection", (
         Field("safety", "require_codex_stopped", "bool", True, locked=True),
         Field("safety", "fail_on_unknown", "bool", True, locked=True),
-        Field("process_detection", "process_names", "lines", ["codex.exe", "codex", "codex-app-server"]),
+        # The lists come from process_knowledge so the screen, the template and
+        # the loader cannot drift apart (CS-256).
+        Field("process_detection", "process_names", "lines", default_process_names()),
         Field("process_detection", "grace_period_seconds", "int", 2, maximum=600),
         Field(
             "process_detection.background_process_names", "windows", "lines",
-            [
-                "codex-windows-sandbox", "codex-windows-sandbox-setup",
-                "codex-windows-sandbox-service", "codex-command-runner",
-            ],
+            default_background_process_names()["windows"],
         ),
         Field(
             "process_detection.background_process_names", "macos", "lines",
-            [
-                "ChatGPT.app/Contents/MacOS/", "codex-app-server",
-                "codex-execve-wrapper", "codex-code-mode-host",
-            ],
+            default_background_process_names()["macos"],
         ),
         Field(
             "process_detection.background_process_names", "linux", "lines",
-            [
-                "/usr/lib/chatgpt/", "codex-app-server", "codex-linux-sandbox",
-                "codex-execve-wrapper", "codex-code-mode-host",
-            ],
+            default_background_process_names()["linux"],
         ),
         Field("guardian", "root_dir", "path", ""),
         Field("guardian", "retention_days", "int", 30, maximum=36500),
@@ -227,6 +231,13 @@ class SettingsModel(Model):
         self.task_busy = False
         self.task_kind = ""
         self.task_result: Outcome | None = None
+        #: What this version would change in the config file itself, the diff
+        #: it would produce, and which optional findings the user unticked.
+        self.migration: Outcome | None = None
+        self.migration_busy = False
+        self.migration_skip: set[str] = set()
+        self.migration_open = False
+        self.migration_result: Outcome | None = None
 
     def reset_plans(self) -> None:
         self.opened = None
@@ -235,6 +246,10 @@ class SettingsModel(Model):
         self.history = None
         self.automation = None
         self.hints = None
+        self.migration = None
+        self.migration_skip = set()
+        self.migration_open = False
+        self.migration_result = None
 
 
 class SettingsScreen(Screen):
@@ -250,6 +265,8 @@ class SettingsScreen(Screen):
         self.banner.actions.addWidget(self.switch_button)
         self.body.addWidget(self.banner)
         self._build_language_chooser()
+        self.migration_card = self._build_migration()
+        self.body.addWidget(self.migration_card)
 
         self._widgets: dict[tuple[str, str], QWidget] = {}
         #: Field id -> the line under a path box showing what it resolves to.
@@ -755,9 +772,29 @@ class SettingsScreen(Screen):
 
         self.read(self.host.controller.automation, apply)
 
+    def _task_codes(self) -> tuple[str, ...]:
+        outcome = self.model.automation
+        if outcome is None or not outcome.ok or outcome.value is None:
+            return ()
+        status = outcome.value.status
+        return status.codes if status is not None else ()
+
     def apply_task(self) -> None:
         """Save pending edits first (with the usual review), then update the OS task."""
         if self.model.task_busy:
+            return
+        codes = self._task_codes()
+        if FOREIGN_TASK in codes:
+            return
+        broken = [code for code in codes if code in BROKEN_TASK_CODES]
+        if (broken or LEGACY_TASK in codes) and not self.host.confirm(
+            self.t("automation.repair.confirm.title"),
+            self.t(
+                "automation.repair.confirm.body",
+                codes=", ".join(broken or [LEGACY_TASK]),
+            ),
+            self.t("automation.apply"),
+        ):
             return
         if self.model.draft or self.model.mappings is not None:
             self.check(save=True, then_apply=True)
@@ -804,6 +841,160 @@ class SettingsScreen(Screen):
 
         self.run(go, apply)
 
+    def _build_migration(self) -> QWidget:
+        """The card that appears when the config was written by an older version.
+
+        It is not a dialog: the findings, the exact diff and the plan id stay
+        on the screen while the user decides, and an optional finding can be
+        left alone with its own tick. Nothing here writes -- the button asks
+        for confirmation and the write happens in `app.py`.
+        """
+        self.migration_summary = label(wrap=True)
+        frame, layout = card(self.t("settings.migration.title"), self.migration_summary)
+        layout.addWidget(label(self.t("settings.migration.caption"), "muted", wrap=True))
+        self.migration_findings = QVBoxLayout()
+        self.migration_findings.setSpacing(6)
+        layout.addLayout(self.migration_findings)
+        self.migration_diff = QPlainTextEdit()
+        self.migration_diff.setReadOnly(True)
+        self.migration_diff.setMinimumHeight(200)
+        self.migration_diff.hide()
+        layout.addWidget(self.migration_diff)
+        self.migration_toggle = button(self.t("settings.migration.show"))
+        self.migration_toggle.clicked.connect(self.toggle_migration_diff)
+        self.migration_apply = button(self.t("settings.migration.apply"), primary=True)
+        self.migration_apply.clicked.connect(self.apply_migration)
+        layout.addLayout(row(self.migration_toggle, self.migration_apply, stretch_last=False))
+        self.migration_status = label(wrap=True)
+        layout.addWidget(self.migration_status)
+        frame.hide()
+        return frame
+
+    def refresh_migration(self) -> None:
+        if self.model.migration_busy or not self.host.controller.config_exists():
+            return
+        self.model.migration_busy = True
+        skip = tuple(sorted(self.model.migration_skip))
+
+        def apply(model: SettingsModel, outcome: Outcome) -> None:
+            model.migration_busy = False
+            model.migration = outcome
+
+        self.read(lambda: self.host.controller.config_migration(skip=skip), apply)
+
+    def toggle_migration_diff(self) -> None:
+        self.model.migration_open = not self.model.migration_open
+        self._render_migration()
+
+    def set_migration_skip(self, code: str, keep: bool) -> None:
+        """Tick off an optional finding, then rebuild the diff without it."""
+        if keep:
+            self.model.migration_skip.add(code)
+        else:
+            self.model.migration_skip.discard(code)
+        self.model.migration = None
+        self.refresh_migration()
+
+    def apply_migration(self) -> None:
+        model = self.model
+        plan = self._migration_plan()
+        if plan is None or model.migration_busy:
+            return
+        if not self.host.confirm(
+            self.t("settings.migration.confirm.title"),
+            self.t(
+                "settings.migration.confirm.body",
+                count=len(plan.fixable) - len(model.migration_skip & set(plan.codes())),
+                plan_id=plan.plan_id,
+            ),
+            self.t("settings.migration.apply"),
+        ):
+            return
+        model.migration_busy = True
+        model.migration_result = None
+        self._render_migration()
+        controller = self.host.controller
+        plan_id = plan.plan_id
+        skip = tuple(sorted(model.migration_skip))
+
+        def apply(model: SettingsModel, outcome: Outcome) -> None:
+            model.migration_busy = False
+            model.migration_result = outcome
+            model.migration = None
+            model.migration_skip = set()
+
+        def go() -> Outcome:
+            return controller.apply_config_migration(confirm_plan=plan_id, skip=skip)
+
+        self.run(lambda: go(), apply)
+
+    def _migration_plan(self):
+        outcome = self.model.migration
+        if outcome is None or not outcome.ok or outcome.value is None:
+            return None
+        plan, _diff = outcome.value
+        return plan
+
+    def _render_migration(self) -> None:
+        plan = self._migration_plan()
+        diff = ""
+        if self.model.migration is not None and self.model.migration.ok and self.model.migration.value:
+            _plan, diff = self.model.migration.value
+        showing = plan is not None and not plan.is_current
+        self.migration_card.setVisible(showing or self.model.migration_result is not None)
+        if self.model.migration_result is not None:
+            result = self.model.migration_result
+            self.migration_status.setText(
+                self.t("settings.migration.done") if result.ok else self.failure_text(result)
+            )
+        else:
+            self.migration_status.setText("")
+        while self.migration_findings.count():
+            item = self.migration_findings.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not showing:
+            self.migration_summary.setText("")
+            self.migration_diff.hide()
+            self.migration_toggle.setEnabled(False)
+            self.migration_apply.setEnabled(False)
+            return
+        self.migration_summary.setText(
+            self.p("settings.migration.summary", len(plan.findings))
+        )
+        for finding in plan.findings:
+            self.migration_findings.addWidget(self._finding_row(finding))
+        self.migration_toggle.setEnabled(True)
+        self.migration_toggle.setText(
+            self.t("settings.migration.hide" if self.model.migration_open else "settings.migration.show")
+        )
+        self.migration_diff.setPlainText(diff)
+        self.migration_diff.setVisible(self.model.migration_open and bool(diff))
+        self.migration_apply.setEnabled(
+            bool(plan.fixable) and not self.model.migration_busy and bool(diff)
+        )
+
+    def _finding_row(self, finding) -> QWidget:
+        text = label(
+            f"{self.t('settings.migration.level.' + finding.level)} — {finding.detail}",
+            wrap=True,
+        )
+        set_tone(text, "danger" if finding.level == "blocker" else None, self.palette_)
+        if not finding.optional:
+            return text
+        keep = QCheckBox(self.t("settings.migration.keep"))
+        keep.setChecked(finding.code in self.model.migration_skip)
+        code = finding.code
+        keep.toggled.connect(lambda checked, code=code: self.set_migration_skip(code, checked))
+        holder = QWidget()
+        inner = QVBoxLayout(holder)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(2)
+        inner.addWidget(text)
+        inner.addWidget(keep)
+        return holder
+
     def _build_history(self) -> QWidget:
         self.history_summary = label()
         frame, layout = card(self.t("settings.history.title"), self.history_summary)
@@ -821,6 +1012,8 @@ class SettingsScreen(Screen):
             self.reload(keep_result=True)
         if self.model.automation is None and not self.model.task_busy and exists:
             self.refresh_task()
+        if self.model.migration is None and not self.model.migration_busy and exists:
+            self.refresh_migration()
         if self.model.tab == "mappings":
             self.load_mapping_hints()
 
@@ -1041,6 +1234,7 @@ class SettingsScreen(Screen):
         model = self.model
         palette = self.palette_
         self.reload_button.setEnabled(not model.busy)
+        self._render_migration()
         self._render_paths()
         opened = model.opened
         if not self.host.controller.config_exists():
@@ -1135,6 +1329,13 @@ class SettingsScreen(Screen):
             elif status is None or not status.installed:
                 tone = "attention" if view.enabled else "neutral"
                 title = self.t("automation.os.not_installed")
+            elif FOREIGN_TASK in status.codes:
+                # Another account's task: shown, never touched.
+                tone, title = "attention", self.t("automation.os.foreign")
+            elif any(code in BROKEN_TASK_CODES for code in status.codes):
+                tone, title = "danger", self.t("automation.os.broken")
+            elif LEGACY_TASK in status.codes:
+                tone, title = "attention", self.t("automation.os.legacy")
             elif not view.enabled:
                 tone, title = "attention", self.t("automation.os.installed_but_disabled")
             elif status.definition_matches is False:
@@ -1154,6 +1355,13 @@ class SettingsScreen(Screen):
                     lines.append(self.t("automation.last_result", code=status.last_result, meaning=meaning))
                 if not view.reports_run_times:
                     lines.append(self.t("automation.no_run_times"))
+            if status is not None and status.owner and status.owned_by_me is False:
+                lines.append(self.t("automation.task.owner", owner=status.owner))
+            if status is not None and any(code in BROKEN_TASK_CODES for code in status.codes):
+                lines.append(self.t(
+                    "automation.task.runs",
+                    command=" ".join(_quote(part) for part in (status.installed_command or ())),
+                ))
             if view.ignored:
                 names = ", ".join(self.t(f"settings.field.scheduler.{name}") for name in view.ignored)
                 lines.append(self.t("automation.ignored", settings=names))

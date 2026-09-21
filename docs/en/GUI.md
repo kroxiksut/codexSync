@@ -240,6 +240,15 @@ refused if the file changed on disk since it was opened, and keeps the replaced
 version under `<workspace>/config-history/`. Open plans are discarded afterwards.
 A setting the rules forbid is shown with its reason.
 
+**A config from an earlier version** is announced at the top of this screen:
+the 0.1 template set two values this version refuses for every write, so such a
+file blocks `sync`, `restore` and every repair until it is brought up to date.
+The card lists what would change and why, shows the exact difference, and
+applies it all in one confirmed write that keeps your comments and copies the
+replaced file into `config-history/`. An optional finding can be left alone with
+its own tick. See
+[Configuration → Upgrading a config from an earlier version](CONFIGURATION.md#upgrading-a-config-from-an-earlier-version).
+
 The language switch is at the top of the screen. The window itself remembers
 only its size, the last screen, the language and which config it opened last —
 never the contents of `config.toml`.
@@ -267,8 +276,8 @@ and the issue tracker in your browser.
 
 ## Windows exe
 
-`CodexSync.exe` is the windowed app, and it is also the command line: given a
-command (`CodexSync.exe -c config.toml validate`) it runs that command without
+`codexsync-gui.exe` is the windowed app, and it is also the command line: given a
+command (`codexsync-gui.exe -c config.toml validate`) it runs that command without
 opening a console, which is what a scheduled task of a frozen install runs. The
 console-only `codexsync.exe` ships separately, without Qt.
 

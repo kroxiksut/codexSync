@@ -49,6 +49,7 @@ from codexsync.app import (
 from codexsync.guardian_inventory import GuardianSnapshotInfo
 from codexsync.chat_directory import Association, ChatDirectory, ChatEntry, ChatKind, ProjectView
 from codexsync.chat_move import ChatMoveAction, ChatMoveKind, ChatMovePlan
+from codexsync.config_migrate import ConfigEdit, ConfigFinding, ConfigMigrationPlan
 from codexsync.gui import BRAND_NAME
 from codexsync.gui.controller import (
     CheckRow,
@@ -249,6 +250,15 @@ class FakeController(Controller):
     def config_history(self) -> Outcome:
         return Outcome(value=[])
 
+    def config_migration(self, *, skip: tuple = ()) -> Outcome:
+        self.calls.append(("config_migration", tuple(skip)))
+        return self._answer("config_migration", Outcome(value=(_migration_plan(skip), _MIGRATION_DIFF)))
+
+    def apply_config_migration(self, *, confirm_plan: str, skip: tuple = ()) -> Outcome:
+        self.calls.append(("apply_config_migration", confirm_plan, tuple(skip)))
+        return self._answer("apply_config_migration", Outcome(value=object()))
+
+
     def automation(self) -> Outcome:
         return self._answer("automation", Outcome(failure=Failure.CONFIGURATION, message="not in this test"))
 
@@ -299,6 +309,28 @@ class FakeController(Controller):
     def run_automation_now(self) -> Outcome:
         self.calls.append(("run_automation_now",))
         return Outcome(failure=Failure.CODEX_NOT_STOPPED, message="open")
+
+
+
+_MIGRATION_DIFF = "--- config.toml\n+++ config.toml\n-session_mode = \"last_date_only\"\n+session_mode = \"all\"\n"
+
+
+def _migration_plan(skip: tuple = (), *, current: bool = False) -> ConfigMigrationPlan:
+    """A plan shaped like the one a 0.1 config produces."""
+    if current:
+        return ConfigMigrationPlan(1, "plan-current", "sha", ())
+    findings = [
+        ConfigFinding(
+            "SESSION_MODE_LAST_DATE", "blocker", "session_mode drops branches",
+            (ConfigEdit("set", "sync", "session_mode", "all"),),
+        ),
+        ConfigFinding(
+            "DETECTION_LIST_OUTDATED", "safety", "codex-app-server is missing",
+            (ConfigEdit("append", "process_detection", "process_names", ["codex-app-server"]),),
+            optional=True,
+        ),
+    ]
+    return ConfigMigrationPlan(1, "plan-" + "-".join(sorted(skip)) if skip else "plan-full", "sha", tuple(findings))
 
 
 class _Settings:
@@ -731,6 +763,8 @@ class ChatsTests(_WindowTestCase):
 
         window.go_to("chats")
         screen = window.screen("chats")
+        # Arrival no longer scans (CS-262); this is the button the user presses.
+        screen.refresh()
         root = screen.tree.invisibleRootItem()
         for i in range(root.childCount()):
             group = root.child(i)
@@ -744,6 +778,7 @@ class ChatsTests(_WindowTestCase):
     def test_the_tree_groups_chats_under_projects_and_the_unassigned(self) -> None:
         window, _ = self.make()
         window.go_to("chats")
+        window.screen("chats").refresh()  # arrival no longer scans (CS-262)
         screen = window.screen("chats")
         self.assertEqual(screen.tree.topLevelItemCount(), 3)
         self.assertEqual(screen.tree.topLevelItem(2).text(0), window.catalog.text("chats.no_project"))
@@ -751,6 +786,7 @@ class ChatsTests(_WindowTestCase):
     def test_the_stranded_chats_are_announced_and_offered_for_auto_repair(self) -> None:
         window, _ = self.make()
         window.go_to("chats")
+        window.screen("chats").refresh()  # arrival no longer scans (CS-262)
         screen = window.screen("chats")
         self.assertEqual(screen.banner.title.text(), window.catalog.plural("chats.stranded.title", 1))
         self.assertEqual(screen.autofix.currentData(), "p2")
@@ -771,6 +807,7 @@ class ChatsTests(_WindowTestCase):
     def test_auto_repair_previews_exactly_the_stranded_chats(self) -> None:
         window, controller = self.make()
         window.go_to("chats")
+        window.screen("chats").refresh()  # arrival no longer scans (CS-262)
         window.screen("chats").preview_autofix()
         previews = [kwargs for name, kwargs in controller.calls if name == "move_chats" and not kwargs.get("confirm_plan")]
         self.assertEqual(previews[-1]["chat_refs"], ["bbbb-2"])
@@ -1072,7 +1109,10 @@ class SessionsExtrasTests(_WindowTestCase):
     def test_the_session_index_card_reports_both_sides(self) -> None:
         window, _ = self.make()
         window.go_to("sessions")
-        text = window.screen("sessions").index_text.text()
+        screen = window.screen("sessions")
+        # The index is a read of `.codex`, so it waits to be asked (CS-262).
+        screen.refresh_index()
+        text = screen.index_text.text()
         self.assertIn(window.catalog.text("sessions.index.local", records=5, sessions=4), text)
         self.assertIn(window.catalog.text("sessions.index.cloud.missing"), text)
 
@@ -1203,7 +1243,11 @@ class WorkingSetTests(_WindowTestCase):
     def _screen(self):
         window, controller = self.make()
         window.go_to("sessions")
-        return window, window.screen("sessions"), controller
+        screen = window.screen("sessions")
+        # The scope tree is drawn from the chat directory, which now loads on
+        # request rather than on arrival (CS-262).
+        screen.load_projects()
+        return window, screen, controller
 
     def _tree_names(self, screen) -> list[str]:
         root = screen.scope_tree.invisibleRootItem()
@@ -1950,3 +1994,136 @@ class AboutTests(_WindowTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfigMigrationCardTests(_WindowTestCase):
+    """The window's half of the config upgrade (CS-255).
+
+    A 0.1 config makes every mutating command exit 4, and the Settings screen
+    could not fix it: it has no field for the key involved, and the save path
+    refuses any text that still carries it. So the card is the only way out
+    from the window, and it has to behave like every other mutation here --
+    show what changes, quote the plan id, and write nothing until confirmed.
+    """
+
+    def _screen(self, *, confirm: bool = True, answers: dict | None = None):
+        controller = FakeController()
+        if answers:
+            controller.outcomes.update(answers)
+        window, controller = self.make(controller=controller, confirm=confirm)
+        window.go_to("settings")
+        screen = window.screen("settings")
+        self.pump(lambda: screen.model.migration is not None)
+        return window, controller, screen
+
+    def test_a_config_from_an_older_version_is_announced_with_its_findings(self) -> None:
+        _window, _controller, screen = self._screen()
+        self.assertFalse(screen.migration_card.isHidden())
+        self.assertEqual(
+            screen.migration_summary.text(), load("en").plural("settings.migration.summary", 2)
+        )
+        self.assertEqual(screen.migration_findings.count(), 2)
+
+    def test_a_current_config_shows_no_card_at_all(self) -> None:
+        _window, _controller, screen = self._screen(
+            answers={"config_migration": Outcome(value=(_migration_plan(current=True), ""))}
+        )
+        self.assertTrue(screen.migration_card.isHidden())
+
+    def test_applying_asks_first_and_quotes_the_plan_id(self) -> None:
+        _window, controller, screen = self._screen()
+        screen.apply_migration()
+        self.assertTrue(self.confirmations, "the window wrote without asking")
+        self.assertIn("plan-full", self.confirmations[-1][1])
+        self.assertIn(
+            ("apply_config_migration", "plan-full", ()),
+            controller.calls,
+        )
+
+    def test_declining_the_dialog_writes_nothing(self) -> None:
+        _window, controller, screen = self._screen(confirm=False)
+        screen.apply_migration()
+        self.assertFalse(
+            [call for call in controller.calls if call[0] == "apply_config_migration"]
+        )
+
+    def test_keeping_an_optional_finding_asks_for_a_plan_without_it(self) -> None:
+        _window, controller, screen = self._screen()
+        screen.set_migration_skip("DETECTION_LIST_OUTDATED", True)
+        self.pump(lambda: screen.model.migration is not None)
+        self.assertIn(
+            ("config_migration", ("DETECTION_LIST_OUTDATED",)),
+            controller.calls,
+        )
+
+    def test_a_blocker_offers_no_way_to_keep_it(self) -> None:
+        from PySide6.QtWidgets import QCheckBox
+
+        _window, _controller, screen = self._screen()
+        rows = [screen.migration_findings.itemAt(i).widget() for i in range(screen.migration_findings.count())]
+        boxes = [box for row_widget in rows for box in row_widget.findChildren(QCheckBox)]
+        self.assertEqual(len(boxes), 1, "only the optional finding may be declined")
+
+
+class ArrivalDoesNotScanTests(_WindowTestCase):
+    """Opening a screen is not asking it to work (CS-262).
+
+    Every one of these reads the real `.codex` and raises the safety gate. On a
+    windowed build that also meant a burst of console windows the moment a tab
+    was clicked (CS-259), which is what made it look like the program had
+    started something on its own. The button is the request; arrival is not.
+    """
+
+    class _Recording(FakeController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads: list[str] = []
+
+        def preview_sync(self) -> Outcome:
+            self.reads.append("preview_sync")
+            return super().preview_sync()
+
+        def chats(self, *, source_machine=None, target_machine=None, progress=None) -> Outcome:
+            self.reads.append("chats")
+            return super().chats(
+                source_machine=source_machine, target_machine=target_machine, progress=progress
+            )
+
+        def session_index(self) -> Outcome:
+            self.reads.append("session_index")
+            return super().session_index()
+
+    def _arrive(self, page: str) -> list[str]:
+        window, controller = self.make(controller=self._Recording())
+        window.go_to(page)
+        self.pump(seconds=0.3)
+        return controller.reads
+
+    def test_the_sync_screen_plans_nothing_on_arrival(self) -> None:
+        self.assertNotIn("preview_sync", self._arrive("sync"))
+
+    def test_the_chats_screen_reads_nothing_on_arrival(self) -> None:
+        self.assertNotIn("chats", self._arrive("chats"))
+
+    def test_the_sessions_screen_reads_no_codex_file_on_arrival(self) -> None:
+        reads = self._arrive("sessions")
+        self.assertNotIn("session_index", reads)
+        self.assertNotIn("chats", reads)
+
+    def test_the_stored_working_set_still_loads_because_it_touches_no_state(self) -> None:
+        window, controller = self.make(controller=self._Recording())
+        window.go_to("sessions")
+        self.pump(seconds=0.3)
+        self.assertTrue(
+            any(call[0] == "working_set" for call in controller.calls)
+            or window.screen("sessions").model.scope_loaded,
+            "the screen must show the set a scan would actually use",
+        )
+
+    def test_the_button_still_works(self) -> None:
+        window, controller = self.make(controller=self._Recording())
+        window.go_to("sync")
+        self.pump(seconds=0.3)
+        window.screen("sync").check_plan()
+        self.pump(seconds=0.5)
+        self.assertIn("preview_sync", controller.reads)

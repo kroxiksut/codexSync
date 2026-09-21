@@ -250,10 +250,14 @@ class SessionsScreen(Screen):
         return frame
 
     def activated(self) -> None:
-        if self.model.index is None and not self.model.index_busy:
-            self.refresh_index()
-        if self.model.directory is None and not self.model.directory_busy:
-            self.load_projects()
+        """The screen was just shown.
+
+        Only the stored working set loads by itself: it comes from the semantic
+        store, touches no `.codex` file and raises no safety gate, and the
+        screen would otherwise claim "carry everything" while a scan quietly
+        used a stored set. The index and the project tree are reads of `.codex`
+        and wait to be asked (CS-262).
+        """
         if not self.model.scope_loaded:
             self.load_working_set()
 
@@ -280,6 +284,8 @@ class SessionsScreen(Screen):
 
     def load_projects(self) -> None:
         """Read the chats once, to draw the tree of projects."""
+        if self.model.directory_busy:
+            return
         self.model.directory_busy = True
 
         def apply(model: SessionsModel, outcome: Outcome) -> None:
@@ -407,6 +413,10 @@ class SessionsScreen(Screen):
             return
         model.source = self.source.currentText().strip()
         model.target = self.target.currentText().strip()
+        # The scope tree is drawn from the chat directory. Asking for a scan is
+        # also asking for the tree, so it loads here rather than on arrival.
+        if model.directory is None:
+            self.load_projects()
         if not model.source or not model.target:
             model.scan = Outcome(failure=Failure.CONFIGURATION, message=self.t("machines.required"))
             self.render()

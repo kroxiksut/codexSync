@@ -56,7 +56,7 @@ pip install ".[gui]"     # командная строка и окно (PySide6)
 
 На Windows можно вместо этого скачать готовую сборку из
 [Releases](https://github.com/kroxiksut/codexSync/releases) — ни одной из них не
-нужен установленный Python: `CodexSync-gui-<tag>-windows-amd64.zip` (окно, оно
+нужен установленный Python: `codexsync-gui-<tag>-windows-amd64.zip` (окно, оно
 же командная строка) или `codexsync-<tag>-windows-amd64.zip` (только командная
 строка, без Qt).
 

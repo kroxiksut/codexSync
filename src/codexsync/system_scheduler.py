@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 import codecs
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import getpass
 import json
@@ -185,6 +185,13 @@ class SchedulerStatus:
     ``definition_matches`` is ``None`` when it was not asked for (no
     ``expected``), when nothing is installed, or when the installed definition
     could not be read; ``True``/``False`` only when a comparison was made.
+
+    ``owner``/``owned_by_me`` exist because a Windows task lives in a
+    machine-wide folder: before CS-257 one account's install overwrote another
+    account's task, its remove deleted it, and its status reported that task as
+    ours and merely "different from configuration". ``codes`` says *why* a task
+    differs -- an executable that moved is a broken task, while a changed
+    interval is a stale one, and the two want different words.
     """
 
     installed: bool
@@ -194,7 +201,82 @@ class SchedulerStatus:
     last_result: int | None = None
     detail: str = ""
     definition_matches: bool | None = None
+    #: The task/agent/unit this status is about, as the OS names it.
+    task_name: str | None = None
+    #: Whose task it is, exactly as the OS records it (a SID on Windows).
+    owner: str | None = None
+    #: None when ownership is not a question on this platform, or unreadable.
+    owned_by_me: bool | None = None
+    #: The program and arguments the installed task actually runs.
+    installed_command: tuple[str, ...] | None = None
+    codes: tuple[str, ...] = ()
 
+
+
+# Status codes. They name what is wrong with an installed task, which a single
+# "differs from configuration" could not: an executable that no longer exists
+# is a task that fails every run, and it is the ordinary result of upgrading a
+# frozen install whose file was renamed.
+#: Sentinel for "this account's SID has not been looked up yet".
+_UNREAD = object()
+
+FOREIGN_TASK = "FOREIGN_TASK"
+LEGACY_TASK = "LEGACY_TASK"
+EXECUTABLE_MISSING = "EXECUTABLE_MISSING"
+EXECUTABLE_MOVED = "EXECUTABLE_MOVED"
+CONFIG_PATH_MISSING = "CONFIG_PATH_MISSING"
+SETTINGS_DIFFER = "SETTINGS_DIFFER"
+
+#: Codes that mean the task cannot do its job as installed.
+BROKEN_TASK_CODES = frozenset({EXECUTABLE_MISSING, EXECUTABLE_MOVED, CONFIG_PATH_MISSING})
+
+
+def classify_task(status: SchedulerStatus, expected: JobDefinition | None) -> tuple[str, ...]:
+    """Why an installed task is not what this installation would write.
+
+    Pure, so the same reasoning covers every platform and can be tested
+    without a scheduler. Ownership is decided by the adapter (only Windows has
+    a shared namespace); everything else is decided here from what the adapter
+    managed to read back.
+    """
+    if not status.installed:
+        return ()
+    codes: list[str] = []
+    if status.owned_by_me is False:
+        # Nothing else is worth saying: it is not ours to compare, fix or remove.
+        return (FOREIGN_TASK,)
+    installed = status.installed_command
+    if installed:
+        program = Path(installed[0])
+        if not program.exists():
+            codes.append(EXECUTABLE_MISSING)
+        elif expected is not None and not _same_program(program, Path(expected.command[0])):
+            codes.append(EXECUTABLE_MOVED)
+        config = _config_argument(installed)
+        if config is not None and not config.exists():
+            codes.append(CONFIG_PATH_MISSING)
+    if status.definition_matches is False and not codes:
+        codes.append(SETTINGS_DIFFER)
+    return tuple(codes)
+
+
+def _same_program(installed: Path, expected: Path) -> bool:
+    """Two paths naming the same executable, as the file system sees them."""
+    try:
+        return installed.resolve() == expected.resolve()
+    except OSError:  # pragma: no cover - a path the OS refuses to resolve
+        return str(installed).casefold() == str(expected).casefold()
+
+
+def _config_argument(command: Sequence[str]) -> Path | None:
+    """The `-c <path>` the installed task passes, if it passes one."""
+    tokens = list(command)
+    for index, token in enumerate(tokens):
+        if token in ("-c", "--config") and index + 1 < len(tokens):
+            return Path(tokens[index + 1])
+        if token.startswith("--config="):
+            return Path(token.split("=", 1)[1])
+    return None
 
 class RunResult(Protocol):
     returncode: int
@@ -357,8 +439,28 @@ def _utc_text(moment: datetime) -> str:
 # --------------------------------------------------------------------------
 
 TASK_FOLDER = "\\CodexSync\\"
-TASK_LEAF_NAME = "CodexSync Job"
-TASK_NAME = TASK_FOLDER + TASK_LEAF_NAME
+#: What every version up to 0.2 installed: one name shared by every account on
+#: the machine. It is still read -- so a task installed before the rename can
+#: be found and taken over -- but never written any more.
+LEGACY_TASK_LEAF_NAME = "CodexSync Job"
+LEGACY_TASK_NAME = TASK_FOLDER + LEGACY_TASK_LEAF_NAME
+_TASK_NAME_FORBIDDEN = re.compile(r'[\\/:*?"<>|]')
+
+
+def task_leaf_name(user_id: str) -> str:
+    """`CodexSync Job (<user>)`: one task per account, in a shared folder.
+
+    Task Scheduler folders are machine-wide, so a single leaf name made two
+    accounts share one task -- and `schtasks /Create /F` overwrites, so the
+    second person to enable automation silently replaced the first person's
+    task with one that runs as themselves.
+    """
+    cleaned = _TASK_NAME_FORBIDDEN.sub("-", user_id.strip()) or "user"
+    return f"{LEGACY_TASK_LEAF_NAME} ({cleaned})"
+
+
+def task_name_for(user_id: str) -> str:
+    return TASK_FOLDER + task_leaf_name(user_id)
 _TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 
 #: ``SCHED_S_*`` informational values Task Scheduler puts in LastTaskResult
@@ -529,6 +631,69 @@ def _strip_namespace(element: ElementTree.Element) -> None:
     for node in element.iter():
         if isinstance(node.tag, str) and "}" in node.tag:
             node.tag = node.tag.split("}", 1)[1]
+
+
+
+def _installed_command(root: ElementTree.Element) -> tuple[str, ...] | None:
+    """The program and arguments an installed Windows task actually runs."""
+    for action in _children(root, "Actions"):
+        command = _child_text(action, "Command")
+        if not command:
+            continue
+        # `<Command>` is written by `quote_windows_argument`, so a program path
+        # containing a space arrives quoted; reading it back as-is would name a
+        # file that cannot exist and call every task broken.
+        program = _split_arguments(command)
+        arguments = _child_text(action, "Arguments") or ""
+        return (*program, *_split_arguments(arguments)) if program else None
+    return None
+
+
+def _split_arguments(text: str) -> tuple[str, ...]:
+    """Split a task's `Arguments` the way `CommandLineToArgvW` would.
+
+    The mirror of `quote_windows_argument`: backslashes are literal except in
+    front of a quote, where they escape in pairs. A Windows path ending in a
+    backslash inside quotes is exactly the case a simpler split gets wrong,
+    and the path in question is the one the task runs.
+    """
+    words: list[str] = []
+    current: list[str] = []
+    quoted = False
+    backslashes = 0
+    started = False
+
+    def flush_backslashes(count: int) -> None:
+        current.extend("\\" * count)
+
+    for char in text:
+        if char == "\\":
+            backslashes += 1
+            started = True
+            continue
+        if char == '"':
+            flush_backslashes(backslashes // 2)
+            if backslashes % 2:
+                current.append('"')
+            else:
+                quoted = not quoted
+            backslashes = 0
+            started = True
+            continue
+        flush_backslashes(backslashes)
+        backslashes = 0
+        if char in " 	" and not quoted:
+            if started or current:
+                words.append("".join(current))
+                current = []
+                started = False
+            continue
+        current.append(char)
+        started = True
+    flush_backslashes(backslashes)
+    if started or current:
+        words.append("".join(current))
+    return tuple(words)
 
 
 def parse_task_xml(text: str) -> ElementTree.Element:
@@ -709,6 +874,7 @@ class WindowsTaskScheduler:
     ) -> None:
         self._run = run
         self._user_id = user_id or _default_user_id()
+        self._sid: str | None | object = _UNREAD
         self._now = now
         self._temp_dir = Path(tempfile.gettempdir()) if temp_dir is None else Path(temp_dir)
         self._protected = tuple(default_protected_roots() if protected_roots is None else protected_roots)
@@ -719,29 +885,123 @@ class WindowsTaskScheduler:
         text = render_task_xml(definition, user_id=self._user_id, now=self._now())
         return {"codexsync-job.xml": encode_task_xml(text)}
 
+    @property
+    def task_name(self) -> str:
+        """This account's task. Another account's task has another name."""
+        return task_name_for(self._user_id)
+
+    def current_sid(self) -> str | None:
+        """This account's SID, which is what a task records as its principal.
+
+        Compared as a SID and not as a name because that is what Task
+        Scheduler stores, and because a display name is localized and can be
+        renamed while the SID cannot.
+        """
+        if self._sid is _UNREAD:
+            script = "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"
+            try:
+                result = _invoke(
+                    self._run,
+                    [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+                )
+            except SchedulerError:
+                self._sid = None
+            else:
+                text = (result.stdout or "").strip()
+                self._sid = text if result.returncode == 0 and text.upper().startswith("S-1-") else None
+        return self._sid
+
+    def _owns(self, principal: str | None) -> bool | None:
+        """Whether `principal` from an installed task is this account.
+
+        `None` means it could not be decided -- an unreadable principal, or a
+        SID this machine would not resolve. The two callers treat that
+        asymmetrically on purpose: deleting the old shared-name task needs
+        proof that it is ours (`is True`), while installing under our *own*
+        per-account name only needs the absence of proof that it is someone
+        else's (`is False`). Refusing on "undecided" there would mean a machine
+        whose PowerShell is locked down could never enable automation at all.
+        """
+        if not principal:
+            return None
+        recorded = principal.strip()
+        if recorded.upper().startswith("S-1-"):
+            mine = self.current_sid()
+            return None if mine is None else recorded.casefold() == mine.casefold()
+        mine = self._user_id.strip().casefold()
+        candidate = recorded.casefold()
+        return candidate == mine or candidate.rsplit("\\", 1)[-1] == mine.rsplit("\\", 1)[-1]
+
     def install(self, job: ScheduledJob, *, command: Sequence[str], config_path: Path, log_dir: Path) -> None:
         definition = JobDefinition(job, tuple(command), config_path, log_dir)
         payload = self.render(definition)["codexsync-job.xml"]
+        # Before anything leaves this process: a staging directory inside the
+        # Codex state is refused outright, and asking the scheduler first would
+        # make that refusal arrive after a command had already been run.
         _refuse_protected(self._temp_dir, self._protected)
+        self._require_not_foreign(self.task_name, "Registering the scheduled task")
         handle, name = tempfile.mkstemp(prefix="codexsync-task-", suffix=".xml", dir=self._temp_dir)
         path = Path(name)
         try:
             with os.fdopen(handle, "wb") as stream:
                 stream.write(payload)
-            result = _invoke(self._run, [self.schtasks, "/Create", "/XML", str(path), "/TN", TASK_NAME, "/F"])
+            result = _invoke(
+                self._run, [self.schtasks, "/Create", "/XML", str(path), "/TN", self.task_name, "/F"]
+            )
             _require_success(result, "Registering the scheduled task")
         finally:
             path.unlink(missing_ok=True)
+        self._retire_legacy_task()
+
+    def _retire_legacy_task(self) -> None:
+        """Remove this account's task under the old shared name, once ours exists.
+
+        Only after the new task is registered, and only when the old one is
+        ours: the shared name was installed by every account before CS-257, so
+        the one sitting there may belong to someone else entirely.
+        """
+        installed, query = self._query_xml(LEGACY_TASK_NAME)
+        if not installed:
+            return
+        if self._owns(self._principal_user(query.stdout or "")) is not True:
+            return
+        _invoke(self._run, [self.schtasks, "/Delete", "/TN", LEGACY_TASK_NAME, "/F"])
 
     def remove(self) -> bool:
-        result = _invoke(self._run, [self.schtasks, "/Delete", "/TN", TASK_NAME, "/F"])
-        if result.returncode == 0:
+        self._require_not_foreign(self.task_name, "Removing the scheduled task")
+        removed = self._remove_one(self.task_name)
+        self._retire_legacy_task()
+        if removed:
             self._remove_empty_folder()
+        return removed
+
+    def _remove_one(self, name: str) -> bool:
+        result = _invoke(self._run, [self.schtasks, "/Delete", "/TN", name, "/F"])
+        if result.returncode == 0:
             return True
         # The "cannot find" message is localized; ask again instead of reading it.
-        if self._query_xml()[0]:
+        if self._query_xml(name)[0]:
             _require_success(result, "Removing the scheduled task")
         return False
+
+    def _require_not_foreign(self, name: str, action: str) -> None:
+        installed, query = self._query_xml(name)
+        if not installed:
+            return
+        principal = self._principal_user(query.stdout or "")
+        if self._owns(principal) is False:
+            raise SchedulerError(
+                f"{action} failed: the scheduled task {name} belongs to another user"
+                f" ({principal}); codexSync does not touch it"
+            )
+
+    def _principal_user(self, xml_text: str) -> str | None:
+        try:
+            root = parse_task_xml(xml_text)
+        except ElementTree.ParseError:
+            return None
+        principal = root.find("Principals/Principal")
+        return _child_text(principal, "UserId")
 
     def _remove_empty_folder_argv(self) -> list[str]:
         # Only an empty folder is deleted, so a task someone else filed under
@@ -762,31 +1022,48 @@ class WindowsTaskScheduler:
         except SchedulerError:
             pass
 
-    def _query_xml(self) -> tuple[bool, RunResult]:
-        result = _invoke(self._run, [self.schtasks, "/Query", "/TN", TASK_NAME, "/XML"])
+    def _query_xml(self, name: str | None = None) -> tuple[bool, RunResult]:
+        result = _invoke(
+            self._run, [self.schtasks, "/Query", "/TN", name or self.task_name, "/XML"]
+        )
         return result.returncode == 0, result
 
-    def _task_info_argv(self) -> list[str]:
+    def _task_info_argv(self, name: str | None = None) -> list[str]:
+        leaf = (name or self.task_name).rsplit("\\", 1)[-1].replace("'", "''")
         script = (
-            f"Get-ScheduledTaskInfo -TaskPath '{TASK_FOLDER}' -TaskName '{TASK_LEAF_NAME}'"
+            f"Get-ScheduledTaskInfo -TaskPath '{TASK_FOLDER}' -TaskName '{leaf}'"
             " | Select-Object LastRunTime,NextRunTime,LastTaskResult | ConvertTo-Json -Compress"
         )
         return [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script]
 
     def status(self, expected: JobDefinition | None = None) -> SchedulerStatus:
-        installed, query = self._query_xml()
+        name = self.task_name
+        installed, query = self._query_xml(name)
+        codes: list[str] = []
         if not installed:
-            return SchedulerStatus(installed=False, detail="Scheduled task is not installed")
+            # A task installed before the per-account rename still runs, and
+            # saying "not installed" about it would invite a second one.
+            legacy_installed, legacy_query = self._query_xml(LEGACY_TASK_NAME)
+            if not legacy_installed:
+                return SchedulerStatus(installed=False, detail="Scheduled task is not installed")
+            name, query = LEGACY_TASK_NAME, legacy_query
+            codes.append(LEGACY_TASK)
         notes: list[str] = []
         enabled: bool | None = None
         matches: bool | None = None
+        owner: str | None = None
+        owned: bool | None = None
+        command: tuple[str, ...] | None = None
         try:
             root = parse_task_xml(query.stdout or "")
         except ElementTree.ParseError as exc:
             notes.append(f"task definition unreadable: {exc}")
         else:
+            owner = _child_text(root.find("Principals/Principal"), "UserId")
+            owned = self._owns(owner)
             enabled = _bool_text(_child_text(root.find("Settings"), "Enabled"), True)
             notes.append("enabled" if enabled else "disabled")
+            command = _installed_command(root)
             if expected is not None:
                 rendered = parse_task_xml(render_task_xml(expected, user_id=self._user_id, now=self._now()))
                 matches = normalise_task_definition(root) == normalise_task_definition(rendered)
@@ -797,7 +1074,7 @@ class WindowsTaskScheduler:
         last_run = next_run = None
         last_result: int | None = None
         try:
-            info = _invoke(self._run, self._task_info_argv())
+            info = _invoke(self._run, self._task_info_argv(name))
             if info.returncode != 0:
                 raise ValueError(_first_line(info.stderr, info.stdout) or f"exit code {info.returncode}")
             last_run, next_run, last_result, note = parse_task_info(info.stdout or "")
@@ -805,7 +1082,7 @@ class WindowsTaskScheduler:
                 notes.append(note)
         except (SchedulerError, ValueError) as exc:
             notes.append(f"run times unavailable: {exc}")
-        return SchedulerStatus(
+        status = SchedulerStatus(
             installed=True,
             enabled=enabled,
             last_run_utc=last_run,
@@ -813,8 +1090,12 @@ class WindowsTaskScheduler:
             last_result=last_result,
             detail="; ".join(notes),
             definition_matches=matches,
+            task_name=name,
+            owner=owner,
+            owned_by_me=owned,
+            installed_command=command,
         )
-
+        return replace(status, codes=tuple(dict.fromkeys([*codes, *classify_task(status, expected)])))
 
 # --------------------------------------------------------------------------
 # macOS: launchd LaunchAgent
@@ -916,24 +1197,32 @@ class LaunchdScheduler:
         if match:
             last_result = int(match.group(1))
         matches: bool | None = None
-        if expected is not None and present:
+        command: tuple[str, ...] | None = None
+        if present:
             try:
                 current = plistlib.loads(self.plist_path.read_bytes())
             except (plistlib.InvalidFileException, ValueError, OSError) as exc:
                 notes.append(f"plist unreadable: {exc}")
             else:
-                matches = current == self.definition(expected)
-                if not matches:
-                    notes.append("definition differs from configuration")
+                arguments = current.get("ProgramArguments")
+                if isinstance(arguments, list) and arguments:
+                    command = tuple(str(item) for item in arguments)
+                if expected is not None:
+                    matches = current == self.definition(expected)
+                    if not matches:
+                        notes.append("definition differs from configuration")
         notes.extend(_ignored_notes(self.ignored_settings, expected))
         notes.append("launchd does not report run times")
-        return SchedulerStatus(
+        status = SchedulerStatus(
             installed=True,
             enabled=enabled,
             last_result=last_result,
             detail="; ".join(notes),
             definition_matches=matches,
+            task_name=self._service,
+            installed_command=command,
         )
+        return replace(status, codes=classify_task(status, expected))
 
 
 # --------------------------------------------------------------------------
@@ -1161,7 +1450,7 @@ class SystemdUserScheduler:
             if not matches:
                 notes.append("definition differs from configuration")
         notes.extend(_ignored_notes(self.ignored_settings, expected))
-        return SchedulerStatus(
+        status = SchedulerStatus(
             installed=True,
             enabled=enabled,
             last_run_utc=last_run,
@@ -1169,7 +1458,59 @@ class SystemdUserScheduler:
             last_result=last_result,
             detail="; ".join(notes),
             definition_matches=matches,
+            task_name=SYSTEMD_TIMER,
+            installed_command=_unit_exec_start(service_path),
         )
+        return replace(status, codes=classify_task(status, expected))
+
+
+def _unit_exec_start(service_path: Path) -> tuple[str, ...] | None:
+    """The command an installed service unit runs, read back from `ExecStart=`.
+
+    `quote_systemd_argument` wrote it, and this reads that quoting back -- a
+    double-quoted word with its four escapes undone -- so an executable that
+    moved is recognised here as it is on the other two platforms.
+    """
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in text.splitlines():
+        if not line.startswith("ExecStart="):
+            continue
+        words = _split_unit_arguments(line.split("=", 1)[1].strip())
+        return words or None
+    return None
+
+
+def _split_unit_arguments(text: str) -> tuple[str, ...]:
+    words: list[str] = []
+    current: list[str] = []
+    quoted = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            quoted = not quoted
+        elif char == "\\" and quoted and index + 1 < len(text):
+            index += 1
+            current.append(text[index])
+        elif char == "%" and index + 1 < len(text) and text[index + 1] == "%":
+            index += 1
+            current.append("%")
+        elif char == "$" and index + 1 < len(text) and text[index + 1] == "$":
+            index += 1
+            current.append("$")
+        elif char == " " and not quoted:
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(char)
+        index += 1
+    if current:
+        words.append("".join(current))
+    return tuple(words)
 
 
 def _normalise_unit_text(text: str) -> list[str]:

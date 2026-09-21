@@ -33,17 +33,28 @@ import os
 from pathlib import Path
 import sys
 
+# One rule for both shells: the command line resolves a missing `-c`
+# through the same function, so the window cannot look in places a
+# terminal command would not find (CS-258).
+from ..config_locations import (
+    CONFIG_NAME,
+    ConfigChoice,
+    choose_config_path,
+    frozen_executable_dir,
+    is_under_temp,
+    user_config_path,
+)
+
 __all__ = [
     "CONFIG_NAME",
     "ConfigChoice",
     "WorkspaceCandidate",
     "choose_config_path",
     "find_workspaces",
+    "is_under_temp",
     "machines_in_workspace",
     "user_config_path",
 ]
-
-CONFIG_NAME = "config.toml"
 
 #: Folders codexSync creates inside a workspace. One of them has to be there
 #: for a folder to count as a workspace rather than a folder with the name.
@@ -80,16 +91,6 @@ MAX_DEPTH = 2
 
 
 @dataclass(frozen=True)
-class ConfigChoice:
-    """Which config file the window should open, and why that one."""
-
-    path: Path
-    #: ``explicit`` | ``remembered`` | ``cwd`` | ``executable`` | ``user`` | ``new``
-    source: str
-    exists: bool
-
-
-@dataclass(frozen=True)
 class WorkspaceCandidate:
     """A folder that looks like a codexSync workspace someone already made."""
 
@@ -99,64 +100,6 @@ class WorkspaceCandidate:
     #: Machine names already filed in it. Offered as a warning, never selected:
     #: two machines under one name mix their Guardian snapshots together.
     machines: tuple[str, ...]
-
-
-def user_config_path() -> Path:
-    """The per-user config location for this platform.
-
-    Where a config is created when the machine has none anywhere else, so an
-    exe that lives in Downloads still keeps its settings somewhere sane.
-    """
-    if sys.platform == "win32":
-        base = os.getenv("APPDATA")
-        root = Path(base) if base else Path.home() / "AppData" / "Roaming"
-        return root / "CodexSync" / CONFIG_NAME
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "CodexSync" / CONFIG_NAME
-    base = os.getenv("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / "codexsync" / CONFIG_NAME
-
-
-def choose_config_path(
-    explicit: str | Path | None = None,
-    remembered: str | Path | None = None,
-    *,
-    cwd: Path | None = None,
-    executable_dir: Path | None = None,
-    user_path: Path | None = None,
-) -> ConfigChoice:
-    """Pick the config file to open.
-
-    ``-c`` wins even when the file is absent: naming a path that does not exist
-    yet is a request to create it there, not a typo to route around. Everything
-    after it is tried only if the file is actually there, and the last resort is
-    the per-user path as a file still to be created.
-    """
-    if explicit is not None:
-        path = Path(explicit).expanduser()
-        return ConfigChoice(path, "explicit", path.is_file())
-
-    user = (user_path or user_config_path()).expanduser()
-    ordered: list[tuple[Path, str]] = []
-    if remembered is not None:
-        ordered.append((Path(remembered).expanduser(), "remembered"))
-    ordered.append(((cwd or Path.cwd()) / CONFIG_NAME, "cwd"))
-    if executable_dir is not None:
-        ordered.append((Path(executable_dir) / CONFIG_NAME, "executable"))
-    ordered.append((user, "user"))
-
-    for path, source in ordered:
-        if path.is_file():
-            return ConfigChoice(path, source, True)
-    return ConfigChoice(user, "new", False)
-
-
-def frozen_executable_dir() -> Path | None:
-    """The folder of a PyInstaller build, or ``None`` in a source checkout."""
-    if not getattr(sys, "frozen", False):
-        return None
-    return Path(sys.executable).resolve().parent
 
 
 # --- finding a workspace --------------------------------------------------

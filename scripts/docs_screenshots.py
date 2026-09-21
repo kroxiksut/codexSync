@@ -205,7 +205,7 @@ class DemoController(Controller):
         return BuildInfo(
             version=__version__,
             frozen=True,
-            executable=f"{HOME}/AppData/Local/CodexSync/CodexSync.exe",
+            executable=f"{HOME}/AppData/Local/CodexSync/codexsync-gui.exe",
             python="3.13.2",
             system="Windows 11",
             architecture="AMD64",
@@ -233,7 +233,7 @@ class DemoController(Controller):
     def automation(self) -> Outcome:
         return Outcome(value=AutomationView(
             True, "guardian_snapshot", 300, True, 30, 0,
-            (f"{HOME}/AppData/Local/CodexSync/CodexSync.exe", "-c", f"{WORKSPACE}/config.toml",
+            (f"{HOME}/AppData/Local/CodexSync/codexsync-gui.exe", "-c", f"{WORKSPACE}/config.toml",
              "guardian", "snapshot", "--once"),
             (), True,
             SchedulerStatus(True, True, "2026-09-17T08:15:00Z", "2026-09-17T08:20:00Z", 0, "", True),

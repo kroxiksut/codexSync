@@ -219,13 +219,22 @@ class ProjectsScreen(Screen):
         menu.exec(self.projects.viewport().mapToGlobal(point))
 
     def show_chats(self) -> None:
-        """Open the chats screen already filtered to this project."""
+        """Open the chats screen already filtered to this project.
+
+        This one *does* read: asking to see a project's chats is a request for
+        them, unlike merely arriving on the screen (CS-262). The read is only
+        started when the screen holds nothing yet, so returning to a list that
+        is already drawn does not rescan.
+        """
         project = self.selected_project()
         if project is None:
             return
         chats = self.host.model("chats")
         chats.project = project
         self.host.go_to("chats")
+        screen = self.host.screen("chats")
+        if chats.directory is None and not chats.busy:
+            screen.refresh()
 
     def move_selected(self) -> None:
         """Fill the move card below with the selected project."""
