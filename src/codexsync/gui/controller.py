@@ -63,6 +63,7 @@ from ..app import (
     build_guardian_runner,
     inspect_recovery,
     list_backup_snapshots,
+    list_history,
     list_journals,
     load_config,
     preview_path,
@@ -335,15 +336,17 @@ class Controller:
     rather than at the next restart.
     """
 
-    def __init__(self, config_path: Path) -> None:
-        self._config_path = Path(config_path)
+    def __init__(self, config_path: Path | None) -> None:
+        #: ``None`` when no config was found or named. The window then offers
+        #: to open or create one and runs nothing against a made-up path.
+        self._config_path = None if config_path is None else Path(config_path)
 
     @property
-    def config_path(self) -> Path:
+    def config_path(self) -> Path | None:
         return self._config_path
 
     def config_exists(self) -> bool:
-        return self._config_path.is_file()
+        return self._config_path is not None and self._config_path.is_file()
 
     def about(self) -> BuildInfo:
         """What this build is. Reads no configuration and cannot fail.
@@ -361,7 +364,7 @@ class Controller:
             python=platform.python_version(),
             system=f"{platform.system()} {platform.release()}".strip(),
             architecture=platform.machine() or "unknown",
-            config_path=str(self._config_path),
+            config_path="" if self._config_path is None else str(self._config_path),
             config_exists=self.config_exists(),
         )
 
@@ -585,7 +588,7 @@ class Controller:
 
         def go() -> SyncResult:
             context = build_context(self._config_path, enforce_safety=True)
-            run_sync(context, dry_run=dry_run)
+            run_sync(context, dry_run=dry_run, origin="window")
             return SyncResult(
                 applied=not dry_run,
                 actions=context.plan.action_count,
@@ -658,6 +661,10 @@ class Controller:
 
     def journals(self) -> Outcome:
         return run(lambda: list_journals(self._config_path))
+
+    def sync_history(self, *, limit: int | None = None) -> Outcome:
+        """Past sync runs, newest first, from the same journals recovery reads."""
+        return run(lambda: list_history(self._config_path, family="sync", limit=limit))
 
     def inspect_journal(self, operation_id: str) -> Outcome:
         return run(lambda: inspect_recovery(self._config_path, operation_id))

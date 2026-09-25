@@ -127,9 +127,12 @@ class AboutScreen(Screen):
         """The facts as they are drawn and as they are copied: one pair per line."""
         info = info if info is not None else self.host.controller.about()
         started = self.t("about.build.frozen") if info.frozen else self.t("about.build.source")
-        config = info.config_path if info.config_exists else self.t(
-            "about.build.config_missing", path=info.config_path
-        )
+        if info.config_exists:
+            config = info.config_path
+        elif info.config_path:
+            config = self.t("about.build.config_missing", path=info.config_path)
+        else:
+            config = self.t("about.build.config_none")
         return [
             (self.t("about.build.version"), info.version),
             (self.t("about.build.started"), started),

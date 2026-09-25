@@ -29,6 +29,10 @@ class Screen(QWidget):
     #: Long forms scroll; screens whose table should take the remaining height
     #: do not, because a table inside a scroll area never gets a height to fill.
     scrollable = False
+    #: A scrolling screen normally ends in a stretch so short content sits at
+    #: the top. One whose last big widget should take the spare height instead
+    #: (settings: the tabs) turns it off.
+    scroll_tail_stretch = True
 
     def __init__(self, host: "MainWindow", model: Model) -> None:
         super().__init__()
@@ -61,7 +65,8 @@ class Screen(QWidget):
         self.build()
 
         if self.scrollable:
-            column.addStretch(1)
+            if self.scroll_tail_stretch:
+                column.addStretch(1)
             scroll = QScrollArea()
             scroll.setObjectName("content")
             scroll.setWidgetResizable(True)

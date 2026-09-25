@@ -29,8 +29,11 @@ codexsync-gui -c config.toml       # or: python -m codexsync.gui -c config.toml
 ```
 
 Without `-c`, the window opens the config it used last; failing that, a
-`config.toml` in the current folder, beside the executable, or in the per-user
-location. If there is none, it starts on the *First run* screen.
+`config.toml` in the current folder or beside the executable. If there is none,
+it starts on the *First run* screen, and every other page offers to open an
+existing `config.toml` — from any folder — or to create one where you choose.
+No location is proposed on your behalf, and choosing a file that already
+exists in the *Config file* field opens it rather than replacing it.
 
 The status bar at the bottom always shows which `config.toml` is open, and the
 side panel shows this machine's name.
@@ -61,8 +64,8 @@ Codex looks closed. The table is the `doctor` report: configuration, state
 directories, the Codex process, the detected global-state schema, the latest
 restorable snapshot, session files, the session index, the SQLite thread
 catalogue, what a sync is allowed to do, where projects are stored, and the sync
-manifest. Below it: a dry run of the sync, and the state of the scheduled task
-with a link to its settings.
+manifest. Below it: a dry run of the sync, the last synchronisation with a link to its
+history, and the state of the scheduled task with a link to its settings.
 
 ## First run
 
@@ -99,6 +102,8 @@ The cloud → local and local → cloud plan.
   applies the whole plan.
 - Files changed on both sides are listed as conflicts and decided by
   [`conflict.policy`](SYNC.md#conflicts).
+- The **History** tab lists past syncs: when, result, who started them, what
+  they copied and their backup. See [Synchronisation → History](SYNC.md#history).
 
 See [Synchronisation](SYNC.md).
 
@@ -243,7 +248,9 @@ A setting the rules forbid is shown with its reason.
 **A config from an earlier version** is announced at the top of this screen:
 the 0.1 template set two values this version refuses for every write, so such a
 file blocks `sync`, `restore` and every repair until it is brought up to date.
-The card lists what would change and why, shows the exact difference, and
+The card is one line until you open **Details** (it opens by itself when
+something blocks every write); it lists what would change and why, shows the
+exact difference, and
 applies it all in one confirmed write that keeps your comments and copies the
 replaced file into `config-history/`. An optional finding can be left alone with
 its own tick. See

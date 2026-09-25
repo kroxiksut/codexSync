@@ -339,6 +339,7 @@ def _parse_scheduler(raw: Any) -> SchedulerConfig:
         run_at_login=raw.get("run_at_login", defaults.run_at_login),
         startup_delay_seconds=raw.get("startup_delay_seconds", defaults.startup_delay_seconds),
         jitter_seconds=raw.get("jitter_seconds", defaults.jitter_seconds),
+        sync_at_login=raw.get("sync_at_login", defaults.sync_at_login),
     )
 
 
@@ -346,6 +347,7 @@ def _validate_scheduler(scheduler: SchedulerConfig) -> None:
     for field_name, value in (
         ("scheduler.enabled", scheduler.enabled),
         ("scheduler.run_at_login", scheduler.run_at_login),
+        ("scheduler.sync_at_login", scheduler.sync_at_login),
     ):
         if not isinstance(value, bool):
             raise ConfigError(f"{field_name} must be a boolean (true or false, without quotes)")

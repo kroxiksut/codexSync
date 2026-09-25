@@ -10,6 +10,23 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **Sync history.** Every real sync's journal now records how many files went
+  each way, who started it (`window`, `cli`, `unattended`), when it ended and,
+  for a failure, the kind of error (never its message). `codexsync history`
+  lists past runs (`--family all`, `--json`, `--limit`); the window shows them
+  on a **History** tab of *Synchronisation* and the last run on *Overview*.
+  Journals written before this show their total only; a dry run and a run
+  stopped before its first write are not listed.
+- **Sync after sign-in, as a checkbox** (`[scheduler] sync_at_login`, `D-016`).
+  Off by default. A second user-level task runs `sync --apply --unattended` once
+  after signing in; it is refused while Codex is open, any conflict stops it
+  before a write, and Settings shows its last run and what the result meant.
+- **The window no longer invents a config location.** With no `config.toml`
+  found, pages offer to open one from any folder or to create one where you
+  choose, instead of working against a made-up `%APPDATA%` file. Picking an
+  existing file in the first-run form opens it. The window records the opened
+  path in a pointer file (`%LOCALAPPDATA%\CodexSync\config-path.txt`), which
+  the command line reads too, so both work on the same file.
 - **`codexsync --version` (`-V`).** Until now the version appeared only on the
   window's About screen, so a downloaded exe could not be asked what it was —
   which is how both builds reported `0.0.0+unknown` without anyone noticing.
@@ -323,6 +340,15 @@ metadata.
 
 ### Fixed
 
+- **Settings: a config from an earlier version squeezed the tabs to nothing.**
+  The upgrade card sat above the tabs in a page that did not scroll, so the
+  form of every tab was about 50 px tall, and in a small window the card's
+  own labels and buttons were drawn over each other. The page now scrolls, the
+  tabs keep a minimum height, the card is one line until **Details** is
+  pressed (it opens itself when something blocks every write), and removed
+  finding rows are hidden at once instead of drawing under the new ones until
+  deleted. The upgrade findings were shown in English in every language; they
+  are now rendered from the language files by code.
 - **An always-running Windows service made the safety gate say "Codex is open"
   forever.** `codex-windows-sandbox-service` was listed as a background marker,
   but on Windows it is the service `CodexSandboxService.OpenAI.Codex`, started

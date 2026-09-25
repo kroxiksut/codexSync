@@ -56,14 +56,23 @@ def _run_console_tool(argv: list[str], *, encoding: str) -> subprocess.Completed
 
     `system_scheduler._default_run` has done this since it was written; the
     detector simply never did.
+
+    Whether the flags exist is asked of `subprocess`, not of `sys.platform`:
+    `STARTUPINFO` and `CREATE_NO_WINDOW` are defined only in the Windows build
+    of the module, and this module's platform string is patched by tests that
+    exercise the Windows adapter from macOS and Linux. Reading the name and
+    then assuming the attributes crashed exactly there -- and would crash the
+    same way in any environment that reports Windows without offering them.
     """
     kwargs: dict[str, object] = {}
-    if sys.platform.startswith("win"):
-        startupinfo = subprocess.STARTUPINFO()
+    startupinfo_class = getattr(subprocess, "STARTUPINFO", None)
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", None)
+    if startupinfo_class is not None and no_window is not None:
+        startupinfo = startupinfo_class()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
         kwargs["startupinfo"] = startupinfo
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        kwargs["creationflags"] = no_window
     return subprocess.run(
         argv,
         capture_output=True,

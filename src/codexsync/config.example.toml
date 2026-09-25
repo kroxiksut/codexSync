@@ -192,6 +192,12 @@ run_at_login = true
 startup_delay_seconds = 0
 # Random delay before a regular run; 0 disables it.
 jitter_seconds = 0
+# Sync settings once after signing in, in a separate task (off by default).
+# This is `sync --apply --unattended`: refused while Codex is open, and any
+# conflict stops it before a write, whatever conflict.policy says. It waits
+# startup_delay_seconds after sign-in. Session transfer, restore and repair
+# are never scheduled.
+sync_at_login = false
 
 [logging]
 # Logging level: DEBUG|INFO|WARNING|ERROR

@@ -43,7 +43,8 @@ import hashlib
 import json
 from pathlib import Path
 import tomllib
-from typing import Any, Collection, Iterable
+from types import MappingProxyType
+from typing import Any, Collection, Iterable, Mapping
 
 from .config import decode_config_bytes
 from .config_edit import (
@@ -96,6 +97,23 @@ LEGACY_SCHEDULER_KEYS = "LEGACY_SCHEDULER_KEYS"
 SCHEDULER_INTERVAL_MIGRATED = "SCHEDULER_INTERVAL_MIGRATED"
 SECTION_ABSENT = "SECTION_ABSENT"
 
+#: Every code `inspect_config` can emit. A window renders each from its own
+#: language file; the i18n test reads this tuple, so a new code without a
+#: sentence fails there rather than showing up in English.
+FINDING_CODES: tuple[str, ...] = (
+    TERMINATE_FLAG_SET,
+    BACKUP_DISABLED,
+    SESSION_MODE_LAST_DATE,
+    DETECTION_LIST_OUTDATED,
+    MISSING_EXCLUDE_SKILLS_SYSTEM,
+    OBSOLETE_INCLUDE_ROOT,
+    SCHEDULER_INTERVAL_MIGRATED,
+    LEGACY_SCHEDULER_KEYS,
+    *(f"{SECTION_ABSENT}_{name.upper()}" for name in OPTIONAL_SECTIONS),
+)
+
+_NO_PARAMS: Mapping[str, str] = MappingProxyType({})
+
 
 @dataclass(frozen=True, slots=True)
 class ConfigEdit:
@@ -139,6 +157,9 @@ class ConfigFinding:
     edits: tuple[ConfigEdit, ...] = ()
     #: True when the user may keep the current value: the config still works.
     optional: bool = False
+    #: The values `detail` names, as text, so a window can say the same thing
+    #: in its own language. Not part of the plan id: it restates the edits.
+    params: Mapping[str, str] = _NO_PARAMS
 
     @property
     def fixable(self) -> bool:
@@ -411,6 +432,7 @@ def _detection_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
         f"seen at all: {described}",
         tuple(edits),
         optional=True,
+        params=MappingProxyType({"names": described}),
     )
 
 
@@ -423,6 +445,7 @@ def _correctness_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
             f"{SKILLS_SYSTEM_GLOB} is not excluded: the Codex runtime installs and removes those "
             "skills itself, and with delete_policy = \"never\" a file it deleted returns on every run",
             (ConfigEdit("append", "filters", "exclude_globs", [SKILLS_SYSTEM_GLOB]),),
+            params=MappingProxyType({"glob": SKILLS_SYSTEM_GLOB}),
         )
 
     targets = _table(document, "targets")
@@ -446,6 +469,7 @@ def _correctness_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
             f"listing them changes nothing: {', '.join(obsolete)}",
             (ConfigEdit("remove_items", "targets", "include_roots", obsolete),),
             optional=True,
+            params=MappingProxyType({"roots": ", ".join(obsolete)}),
         )
 
     scheduler = _table(document, "scheduler")
@@ -468,6 +492,7 @@ def _correctness_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
                 ConfigEdit("set", "scheduler", "interval_seconds", seconds),
                 ConfigEdit("remove_key", "scheduler", "interval_minutes"),
             ),
+            params=MappingProxyType({"minutes": str(minutes), "seconds": str(seconds)}),
         )
     legacy = ["kind"] if "kind" in scheduler else []
     if "interval_minutes" in scheduler and not carries_period:
@@ -478,6 +503,7 @@ def _correctness_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
             "scheduler keys this version ignores: " + ", ".join(legacy),
             tuple(ConfigEdit("remove_key", "scheduler", key) for key in legacy),
             optional=True,
+            params=MappingProxyType({"keys": ", ".join(legacy)}),
         )
 
 
@@ -491,6 +517,7 @@ def _absent_section_findings(document: dict[str, Any]) -> Iterable[ConfigFinding
                 "and editable",
                 (),
                 optional=True,
+                params=MappingProxyType({"section": name}),
             )
 
 
@@ -528,6 +555,7 @@ __all__ = [
     "ConfigEdit",
     "ConfigFinding",
     "ConfigMigrationPlan",
+    "FINDING_CODES",
     "INFO",
     "MigrationOutcome",
     "SAFETY",

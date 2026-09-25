@@ -6,11 +6,18 @@ same loader the command line uses. It does not create, touch or even look inside
 the Codex state directory, and it does not create the workspace folders: those
 appear when an operation that needs them runs.
 
+Where the file goes is the user's to say. The field starts empty -- an earlier
+version proposed a per-user path under %APPDATA% and the rest of the window
+then worked against that path although nobody had created it (CS-268). A path
+that names a file which already exists is a request to *use* that file, so the
+button turns into "open this file" rather than refusing or overwriting it.
+
 A machine name is permanent in practice. Backups, Guardian snapshots and
 session plans are all filed under it, and `[[path_mappings]]` rules on the
 other machine refer to it, so the screen says so instead of generating one
-silently on every start. Names already filed in the workspace are offered as
-choices with a warning attached and never selected for the user: two machines
+silently on every start. Names already filed in the workspace are shown
+calmly with a button each -- most often they are this very machine's history
+from an earlier version -- and never selected for the user: two machines
 writing under one name mix their Guardian snapshots together.
 
 The screen also answers the other half of "there is no config here": this
@@ -23,7 +30,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtWidgets import QFileDialog, QFormLayout, QLineEdit
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QFileDialog, QFormLayout, QHBoxLayout, QLineEdit
 
 from ..controller import Outcome, find_workspaces, suggested_codex_dir, suggested_machine_id
 from ..widgets import Banner, PathField, button, card, field, label, machine_combo, row, set_tone
@@ -35,6 +43,8 @@ class FirstRunModel(Model):
         self.values: dict[str, str] = {}
         self.busy = False
         self.result: Outcome | None = None
+        #: The result is a prompt ("say where") rather than a create outcome.
+        self.result_is_prompt = False
         #: What the workspace search found, and whether it has run at all.
         self.workspaces: tuple = ()
         self.searched = False
@@ -57,18 +67,31 @@ class FirstRunScreen(Screen):
         form.setVerticalSpacing(12)
         browse = self.t("common.browse")
 
-        self.config_path = PathField(browse, directory=False, save_file=True)
-        self.config_path.setText(m.values.get("config", str(controller.config_path.resolve())))
+        self.config_path = PathField(
+            browse, directory=False, any_file=True,
+            dialog_title=self.t("first_run.config.dialog"), accept_text=self.t("common.choose"),
+        )
+        self.config_path.chosen = self._config_chosen
+        # A path is only ever set without a file when it was named with `-c`,
+        # which is a request to create it there; otherwise the field is empty.
+        named = controller.config_path
+        opened = str(named.resolve()) if named is not None else ""
+        # An open file speaks for itself: the form shows what it says, never
+        # this computer's host name or a guessed `.codex` beside it.
+        loaded = self._loaded_values()
+        self.config_path.setText(m.values.get("config", opened))
+        self.config_path.edit.setPlaceholderText(self.t("first_run.config.placeholder"))
         self.machine = machine_combo(
-            self._known_machines(), m.values.get("machine", suggested_machine_id())
+            self._known_machines(),
+            m.values.get("machine", loaded.get("machine", suggested_machine_id())),
         )
         self.codex = PathField(browse)
-        self.codex.setText(m.values.get("codex", str(suggested_codex_dir())))
+        self.codex.setText(m.values.get("codex", loaded.get("codex", str(suggested_codex_dir()))))
         self.workspace = PathField(browse)
-        self.workspace.setText(m.values.get("workspace", ""))
+        self.workspace.setText(m.values.get("workspace", loaded.get("workspace", "")))
         self.workspace.edit.setPlaceholderText(self.t("first_run.workspace.placeholder"))
         self.mirror = PathField(browse)
-        self.mirror.setText(m.values.get("mirror", ""))
+        self.mirror.setText(m.values.get("mirror", loaded.get("mirror", "")))
         self.mirror.edit.setPlaceholderText("${workspace_root}/sync")
 
         for key, widget in (
@@ -89,6 +112,11 @@ class FirstRunScreen(Screen):
 
         self.machine_warning = label("", wrap=True)
         inner.addWidget(self.machine_warning)
+        #: One "this is <name>" button per machine the workspace holds.
+        self.machine_actions = QHBoxLayout()
+        self.machine_actions.setSpacing(8)
+        inner.addLayout(self.machine_actions)
+        self._machine_buttons: dict[str, object] = {}
         self.found = label("", wrap=True)
         inner.addWidget(self.found)
 
@@ -110,6 +138,65 @@ class FirstRunScreen(Screen):
         widget = {"config": self.config_path, "machine": self.machine, "codex": self.codex,
                   "workspace": self.workspace, "mirror": self.mirror}[key]
         self.model.values[key] = widget.currentText() if key == "machine" else widget.text()
+        if key == "config":
+            self._render_create_button()
+        elif key == "machine":
+            self._render_machine_hint()
+
+    def _existing_target(self) -> Path | None:
+        """The file the config field names, when it already exists."""
+        text = self.config_path.text()
+        if not text:
+            return None
+        path = Path(text).expanduser()
+        return path if path.is_file() else None
+
+    def _loaded_values(self) -> dict[str, str]:
+        """The form's values as the open config file states them."""
+        info = self.host.config_info()
+        if info is None:
+            return {}
+        values: dict[str, str] = {}
+        if info.machine_id:
+            values["machine"] = info.machine_id
+        if info.local_state_dir is not None:
+            values["codex"] = str(info.local_state_dir)
+        if info.workspace_root_dir is not None:
+            values["workspace"] = str(info.workspace_root_dir)
+        # The default mirror stays the placeholder rather than a spelled-out path.
+        default_mirror = info.workspace_root_dir / "sync" if info.workspace_root_dir else None
+        if info.cloud_root_dir != default_mirror:
+            values["mirror"] = str(info.cloud_root_dir)
+        return values
+
+    def _config_chosen(self, _text: str) -> None:
+        """Picking a file that exists is opening it; there is nothing to confirm."""
+        existing = self._existing_target()
+        if existing is not None:
+            self.open_existing(existing)
+
+    def _is_open(self, path: Path | None) -> bool:
+        current = self.host.controller.config_path
+        return path is not None and current is not None and path.resolve() == current.resolve()
+
+    def _render_create_button(self) -> None:
+        if not hasattr(self, "create_button"):
+            return
+        existing = self._existing_target()
+        if self._is_open(existing):
+            key = "first_run.is_open"
+        elif existing is not None:
+            key = "first_run.open_this"
+        else:
+            key = "first_run.create"
+        self.create_button.setText(self.t(key))
+        self.create_button.setEnabled(not self.model.busy and not self._is_open(existing))
+
+    def use_machine(self, name: str) -> None:
+        """Take a name the workspace already holds: this machine continues it."""
+        self.machine.setEditText(name)
+        self.model.values["machine"] = name
+        self._render_machine_hint()
 
     def _known_machines(self) -> tuple[str, ...]:
         names: list[str] = []
@@ -139,14 +226,27 @@ class FirstRunScreen(Screen):
             if not chosen:
                 return
             path = Path(chosen)
+        # The window stays here: the form now shows what the file says, which
+        # is the proof it was read; jumping away would hide exactly that.
         self.host.open_config(Path(path))
-        self.host.go_to("overview")
 
     def create(self) -> None:
         model = self.model
         if model.busy:
             return
+        existing = self._existing_target()
+        if existing is not None:
+            # Naming a file that exists is asking to use it, never to replace it.
+            if not self._is_open(existing):
+                self.open_existing(existing)
+            return
+        if not self.config_path.text():
+            model.result = Outcome(message=self.t("first_run.config.required"))
+            model.result_is_prompt = True
+            self.render()
+            return
         path = Path(self.config_path.text()).expanduser()
+        model.result_is_prompt = False
         model.busy = True
         model.result = None
         self.render()
@@ -167,7 +267,10 @@ class FirstRunScreen(Screen):
             apply(model, outcome)
             if outcome.ok:
                 host.config_changed(outcome.value.path)
-                host.go_to("overview")
+                # Another file starts every page afresh; the "created" line
+                # belongs to the new one, and the window stays where it is.
+                host.model("first_run").result = outcome
+                host.screen("first_run").render()
 
         self.run(lambda: controller.create_config(
             path, machine_id=machine, local_state_dir=codex,
@@ -187,12 +290,14 @@ class FirstRunScreen(Screen):
         else:
             self.banner.show_message(
                 "attention", self.t("first_run.missing.title"),
-                self.t("first_run.missing.detail", path=controller.config_path.resolve()), palette,
+                self.t("first_run.missing.detail"), palette,
             )
-        self.create_button.setEnabled(not model.busy)
+        self._render_create_button()
         text, tone = "", None
         if model.busy:
             text = self.t("first_run.creating")
+        elif model.result is not None and model.result_is_prompt:
+            text, tone = model.result.message, "attention"
         elif model.result is not None:
             if model.result.ok:
                 text, tone = self.t("first_run.created", path=model.result.value.path), "ok"
@@ -235,7 +340,48 @@ class FirstRunScreen(Screen):
                 self.machine.setEditText(typed)
         finally:
             self.machine.blockSignals(blocked)
-        warning = self.t("first_run.machine.known", names=self.join(list(names))) if names else ""
-        self.machine_warning.setText(warning)
-        set_tone(self.machine_warning, "attention" if warning else None, palette)
-        self.machine_warning.setVisible(bool(warning))
+        self._render_machine_buttons(names)
+        self._render_machine_hint()
+
+    def _render_machine_buttons(self, names: tuple[str, ...]) -> None:
+        """A button per known name; rebuilt only when the names change.
+
+        A click sets the name, which re-renders the hint -- rebuilding the
+        buttons from inside that click would delete the very button whose
+        signal is running, which is how a Qt window crashes.
+        """
+        if tuple(self._machine_buttons) == names:
+            return
+        while self.machine_actions.count():
+            item = self.machine_actions.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()
+                item.widget().deleteLater()
+        self._machine_buttons = {}
+        for name in names:
+            widget = button(self.t("first_run.machine.use", name=name))
+            widget.clicked.connect(
+                lambda _checked=False, name=name: QTimer.singleShot(0, lambda: self.use_machine(name))
+            )
+            self.machine_actions.addWidget(widget)
+            self._machine_buttons[name] = widget
+        if names:
+            self.machine_actions.addStretch(1)
+
+    def _render_machine_hint(self) -> None:
+        """Say calmly what the workspace holds; most often it is this machine's past."""
+        if not hasattr(self, "machine_warning"):
+            return
+        names = self._known_machines()
+        typed = self.machine.currentText().strip()
+        if not names:
+            text, tone = "", None
+        elif typed in names:
+            text, tone = self.t("first_run.machine.continues", name=typed), "ok"
+        else:
+            text, tone = self.t("first_run.machine.known", names=self.join(list(names))), None
+        self.machine_warning.setText(text)
+        set_tone(self.machine_warning, tone, self.palette_)
+        self.machine_warning.setVisible(bool(text))
+        for name, widget in self._machine_buttons.items():
+            widget.setVisible(name != typed)

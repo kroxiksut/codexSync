@@ -117,3 +117,25 @@ With `propagate`:
 - the first run after switching it on deletes nothing, because there is no proof
   yet;
 - semantic-owned paths are never deleted this way.
+
+## History
+
+Every real sync leaves an operation journal, and the history is those journals
+read newest first — there is no separate log to keep:
+
+```powershell
+codexsync -c config.toml history                 # the last 20 syncs
+codexsync -c config.toml history --family all    # every kind of write: sync, sessions, chats, restore…
+codexsync -c config.toml history --json --limit 0
+```
+
+Each run shows when it started, its result (and, for a failure, the kind of
+error — never its message, which may name files), who started it (`window`,
+`cli` or `unattended` for the task at sign-in), how many files went to the
+cloud, to the local side and were deleted, and the backup it made. A journal
+written before 0.2 recorded these fields shows only its total.
+
+Not listed: a dry run, which writes nothing, and a run that stopped before its
+first write — Codex open, or a conflict under `manual_abort`. The window shows
+the same list on the **History** tab of *Synchronisation*, and the last run on
+*Overview*.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import logging
 import json
 import sys
@@ -21,6 +20,7 @@ from .app import (
     build_guardian_runner,
     collect_process_snapshot,
     inspect_recovery,
+    list_history,
     move_chats,
     print_preflight_report,
     record_branch_resolution,
@@ -50,7 +50,12 @@ from .app import (
 from .chat_directory import Association, ChatDirectory, ChatEntry, search_chats
 from .chat_move import ChatMovePlan
 from .config import load_config
-from .config_locations import ConfigChoice, choose_config_path, frozen_executable_dir
+from .config_locations import (
+    ConfigChoice,
+    choose_config_path,
+    frozen_executable_dir,
+    read_config_pointer,
+)
 from .exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .exit_codes import ExitCode
 from .guardian_inventory import read_guardian_inventory
@@ -289,6 +294,18 @@ def print_automation_status(view: AutomationView) -> None:
     # shell's quoting rules are needed to read back where an argument ends.
     safe_print(f"  argv: {json.dumps(list(view.argv), ensure_ascii=False)}")
     print(f"  ignored_settings: {', '.join(view.ignored) if view.ignored else '(none)'}")
+    print(f"  sync_at_login: {_yes_no(view.sync_at_login)}")
+    safe_print(f"  login_argv: {json.dumps(list(view.login_argv), ensure_ascii=False)}")
+    login = view.login_status
+    if login is None:
+        safe_print(f"  login_task: {view.login_status_error or 'the scheduler could not be asked'}")
+    elif not login.installed:
+        print("  login_task: not installed")
+    else:
+        safe_print(
+            f"  login_task: {login.task_name}; last run {login.last_run_utc or 'never'}; "
+            f"last result {login.last_result if login.last_result is not None else 'none'}"
+        )
     print("Operating system task")
     status = view.status
     if status is None:
@@ -490,6 +507,14 @@ def build_parser() -> argparse.ArgumentParser:
     mode_group = sync.add_mutually_exclusive_group()
     mode_group.add_argument("--dry-run", action="store_true", help="Force dry-run mode")
     mode_group.add_argument("--apply", action="store_true", help="Apply changes (overrides dry-run)")
+    sync.add_argument(
+        "--unattended",
+        action="store_true",
+        help=(
+            "Nobody is watching (the sign-in task): any conflict stops the run before "
+            "a write, whatever conflict.policy says"
+        ),
+    )
 
     restore = sub.add_parser("restore", help="Restore files from backup snapshot")
     restore.add_argument("--from", dest="snapshot", default=None, help="Snapshot directory name in backup_dir")
@@ -701,6 +726,16 @@ def build_parser() -> argparse.ArgumentParser:
     chats_move.add_argument("--source-machine", default=None)
     chats_move.add_argument("--target-machine", default=None)
 
+    history = sub.add_parser(
+        "history", help="List past mutating runs (sync, sessions, ...) from their journals; writes nothing"
+    )
+    history.add_argument(
+        "--family", default="sync",
+        help="Operation family to list (sync, sessions, chats, restore, repair, ...) or 'all' (default: sync)",
+    )
+    history.add_argument("--limit", type=int, default=20, help="Newest runs to show (default: 20; 0 = all)")
+    history.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+
     recover = sub.add_parser("recover", help="Inspect and clear interrupted mutation evidence")
     recover_sub = recover.add_subparsers(dest="recover_command", required=True)
     recover_inspect = recover_sub.add_parser("inspect", help="Read one mutation journal without side effects")
@@ -812,19 +847,35 @@ def _warn_about_outdated_config(config_path: Path, command: str) -> None:
 def _resolve_config_path(explicit: str | None) -> ConfigChoice:
     """Which config this run works on, and where it was found.
 
-    Without `-c` the search is the window's: this directory, then the folder of
-    a frozen executable, then the per-user location. Before that the default
-    was the literal `config.toml`, so a machine set up through the window --
-    whose config sits in the per-user location -- answered every command run
-    from another directory with "Config file not found", while the window on
-    the same machine opened it happily.
+    Without `-c` the search is the window's: the config the window last opened
+    (its pointer file), this directory, then the folder of a frozen executable.
+    Before that the default was the literal `config.toml`, so a machine set up
+    through the window answered every command run from another directory with
+    "Config file not found", while the window on the same machine opened it
+    happily.
 
     The choice is returned rather than announced here: this runs before logging
     is configured, and a notice written to an unconfigured logger is a notice
     nobody reads.
     """
-    choice = choose_config_path(explicit, executable_dir=frozen_executable_dir())
-    return replace(choice, path=choice.path.expanduser())
+    return choose_config_path(
+        explicit, read_config_pointer(), executable_dir=frozen_executable_dir()
+    )
+
+
+def _require_config_path(choice: ConfigChoice) -> Path:
+    """The chosen path, or a refusal that says how to name one.
+
+    Nothing found is not a reason to invent a location: where the config lives
+    is the user's decision.
+    """
+    if choice.path is None:
+        raise ConfigError(
+            "No config.toml found: pass -c <path>, run from the folder that holds "
+            "config.toml, or open or create one in the window (the command line "
+            "then finds it too)."
+        )
+    return choice.path
 
 
 def _announce_config_choice(choice: ConfigChoice) -> None:
@@ -835,6 +886,41 @@ def _announce_config_choice(choice: ConfigChoice) -> None:
     """
     if choice.source not in ("explicit", "cwd") and choice.exists:
         LOG.info("Using config %s (found in the %s location)", choice.path, choice.source)
+
+
+def _history_record(run) -> dict:
+    return {
+        "operation_id": run.operation_id,
+        "family": run.family,
+        "state": run.state,
+        "readable": run.readable,
+        "created_at_utc": run.created_at_utc,
+        "finished_at_utc": run.finished_at_utc,
+        "origin": run.origin,
+        "action_count": run.action_count,
+        "counts": dict(run.counts) if run.counts is not None else None,
+        "failure": run.failure,
+        "backup_snapshot": run.backup_snapshot,
+    }
+
+
+def _print_history(runs) -> None:
+    """One line per run, newest first. Dry runs write no journal and are absent."""
+    if not runs:
+        print("No runs recorded.")
+        return
+    for run in runs:
+        state = run.state if run.readable and run.state else "UNREADABLE"
+        if run.failure:
+            state = f"{state} ({run.failure})"
+        if run.counts:
+            changes = " ".join(f"{key}={value}" for key, value in sorted(run.counts.items()))
+        else:
+            changes = f"actions={run.action_count if run.action_count is not None else '?'}"
+        print(
+            f"{run.created_at_utc or '?'}  {run.family or '?'}  {state}  "
+            f"origin={run.origin or '-'}  {changes}  backup={run.backup_snapshot or '-'}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -851,6 +937,8 @@ def main(argv: list[str] | None = None) -> int:
         # Logging is configured with defaults first, then with file settings from config when context is built.
         configure_logging(LoggingConfig(level="INFO", file=None), verbose=args.verbose)
         _announce_config_choice(config_choice)
+        if args.command != "init-config":
+            config_path = _require_config_path(config_choice)
         _warn_about_outdated_config(config_path, args.command)
         cfg_for_verbose = None
         if args.command in {"plan", "sync", "restore"}:
@@ -1305,7 +1393,23 @@ def main(argv: list[str] | None = None) -> int:
                 "plan_hash": journal.plan_hash,
                 "action_count": journal.action_count,
                 "backup_snapshot": journal.backup_snapshot,
+                "counts": dict(journal.counts) if journal.counts is not None else None,
+                "origin": journal.origin,
+                "finished_at_utc": journal.finished_at_utc,
+                "failure": journal.failure,
             }, sort_keys=True, indent=2))
+            return int(ExitCode.OK)
+
+        if args.command == "history":
+            runs = list_history(
+                config_path,
+                family=None if args.family == "all" else args.family,
+                limit=args.limit if args.limit > 0 else None,
+            )
+            if args.as_json:
+                print(json.dumps([_history_record(run) for run in runs], sort_keys=True, indent=2))
+            else:
+                _print_history(runs)
             return int(ExitCode.OK)
 
         if args.command == "recover" and args.recover_command in {"resume", "rollback"}:
@@ -1331,13 +1435,14 @@ def main(argv: list[str] | None = None) -> int:
                 config_path,
                 manual_terminate_confirmation_override=args.manual_terminate_confirmation_override,
                 enforce_safety=True,
+                unattended=args.unattended,
             )
             dry_run = ctx.config.sync.dry_run_default
             if args.dry_run:
                 dry_run = True
             if args.apply:
                 dry_run = False
-            run_sync(ctx, dry_run=dry_run)
+            run_sync(ctx, dry_run=dry_run, origin="unattended" if args.unattended else "cli")
             print("Sync finished." if not dry_run else "Dry-run finished.")
             return int(ExitCode.OK)
 

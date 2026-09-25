@@ -65,6 +65,8 @@ class AutomationTests(unittest.TestCase):
             self.config, machine_id="laptop", local_state_dir=str(self.root / "codex"),
             workspace_root_dir=str(self.root / "workspace"),
         )
+        #: The sign-in task's adapter. Always injected: the real one is schtasks.
+        self.login = FakeScheduler()
 
     def _set(self, **values) -> None:
         text = self.config.read_text(encoding="utf-8")
@@ -75,7 +77,7 @@ class AutomationTests(unittest.TestCase):
     def test_an_enabled_scheduler_installs_exactly_the_configured_safe_job(self) -> None:
         self._set(enabled=True, mode="sync_dry_run", interval_seconds=900, run_at_login=True)
         fake = FakeScheduler()
-        view = apply_automation(self.config, scheduler=fake)
+        view = apply_automation(self.config, scheduler=fake, login_scheduler=self.login)
         job, command, config_path, _log_dir = fake.installed
         self.assertEqual((job.mode, job.interval_seconds, job.run_at_login), ("sync_dry_run", 900, True))
         self.assertEqual(config_path, self.config.resolve())
@@ -86,41 +88,76 @@ class AutomationTests(unittest.TestCase):
     def test_a_disabled_scheduler_removes_the_task(self) -> None:
         fake = FakeScheduler()
         fake.installed = ("x", (), Path("c"), Path("l"))
-        view = apply_automation(self.config, scheduler=fake)
+        view = apply_automation(self.config, scheduler=fake, login_scheduler=self.login)
         self.assertEqual(fake.removed, 1)
         self.assertFalse(view.status.installed)
 
     def test_a_changed_config_reads_as_an_outdated_task(self) -> None:
         self._set(enabled=True, interval_seconds=600)
         fake = FakeScheduler()
-        apply_automation(self.config, scheduler=fake)
+        apply_automation(self.config, scheduler=fake, login_scheduler=self.login)
         self._set(interval_seconds=1200)
-        self.assertFalse(automation_status(self.config, scheduler=fake).status.definition_matches)
+        self.assertFalse(automation_status(self.config, scheduler=fake, login_scheduler=self.login).status.definition_matches)
 
     def test_an_os_refusal_is_a_fail_safe_stop_not_a_crash(self) -> None:
         self._set(enabled=True)
         with self.assertRaises(FailSafeError):
-            apply_automation(self.config, scheduler=FakeScheduler(fail=True))
+            apply_automation(self.config, scheduler=FakeScheduler(fail=True), login_scheduler=FakeScheduler(fail=True))
         with self.assertRaises(FailSafeError):
-            remove_automation(self.config, scheduler=FakeScheduler(fail=True))
+            remove_automation(self.config, scheduler=FakeScheduler(fail=True), login_scheduler=FakeScheduler(fail=True))
 
     def test_a_status_the_os_cannot_give_is_reported_not_raised(self) -> None:
         fake = FakeScheduler()
         fake.status = mock.Mock(side_effect=SchedulerError("schtasks missing"))  # type: ignore[method-assign]
-        view = automation_status(self.config, scheduler=fake)
+        view = automation_status(self.config, scheduler=fake, login_scheduler=self.login)
         self.assertIsNone(view.status)
         self.assertIn("schtasks", view.status_error)
 
     def test_ignored_settings_are_reported(self) -> None:
         self._set(run_at_login=True, jitter_seconds=30)
-        self.assertEqual(automation_status(self.config, scheduler=FakeScheduler()).ignored, ("jitter_seconds",))
+        self.assertEqual(automation_status(self.config, scheduler=FakeScheduler(), login_scheduler=self.login).ignored, ("jitter_seconds",))
 
     def test_the_task_never_writes_its_logs_inside_codex(self) -> None:
         self._set(enabled=True)
         fake = FakeScheduler()
-        apply_automation(self.config, scheduler=fake)
+        apply_automation(self.config, scheduler=fake, login_scheduler=self.login)
         _, _, _, log_dir = fake.installed
         self.assertNotIn(str((self.root / "codex").resolve()), str(log_dir))
+
+    def test_the_login_sync_is_its_own_task_and_off_by_default(self) -> None:
+        fake = FakeScheduler()
+        view = apply_automation(self.config, scheduler=fake, login_scheduler=self.login)
+        self.assertIsNone(self.login.installed)
+        self.assertEqual(self.login.removed, 1, "off means the task is removed")
+        self.assertFalse(view.sync_at_login)
+
+    def test_switching_the_login_sync_on_installs_exactly_one_unattended_sync(self) -> None:
+        self._set(sync_at_login=True, startup_delay_seconds=45)
+        fake = FakeScheduler()
+        view = apply_automation(self.config, scheduler=fake, login_scheduler=self.login)
+        job, _command, config_path, _log = self.login.installed
+        self.assertEqual(
+            (job.mode, job.interval_seconds, job.run_at_login, job.startup_delay_seconds),
+            ("sync_at_login", None, True, 45),
+        )
+        self.assertEqual(config_path, self.config.resolve())
+        self.assertEqual(view.login_argv[-3:], ("sync", "--apply", "--unattended"))
+        self.assertTrue(view.login_status.installed)
+        self.assertIsNone(fake.installed, "the periodic task is untouched: [scheduler] enabled is false")
+
+    def test_the_periodic_mode_can_never_be_the_login_sync(self) -> None:
+        from codexsync.exceptions import ConfigError
+
+        self._set(mode="sync_at_login")
+        with self.assertRaises(ConfigError):
+            automation_status(self.config, scheduler=FakeScheduler(), login_scheduler=self.login)
+
+    def test_one_injected_scheduler_without_the_other_is_refused(self) -> None:
+        """Otherwise the missing one is the real OS scheduler."""
+        with self.assertRaises(ValueError):
+            automation_status(self.config, scheduler=FakeScheduler())
+        with self.assertRaises(ValueError):
+            apply_automation(self.config, login_scheduler=FakeScheduler())
 
     def test_run_now_calls_what_the_scheduled_command_calls(self) -> None:
         self._set(mode="preflight")

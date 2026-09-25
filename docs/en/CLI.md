@@ -48,6 +48,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `repair-projects apply` | **yes** | Apply one exact plan, quoted by its id | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `project-move scan` | no | Hash a project and plan copying it to a new folder | [Projects](PROJECTS.md#moving-a-projects-files) |
 | `project-move apply` | **yes** | Copy, verify, then point Codex at the new folder | [Projects](PROJECTS.md#moving-a-projects-files) |
+| `history` | no | List past syncs (or every kind of write) from their journals | [Sync](SYNC.md#history) |
 | `recover inspect` | no | Read one mutation journal without side effects | [Recovery](RECOVERY.md#interrupted-mutations) |
 | `recover resume` / `rollback` | **yes** | Close an interrupted mutation | [Recovery](RECOVERY.md#interrupted-mutations) |
 
@@ -78,17 +79,21 @@ codexsync init-config --output config.toml --machine-id laptop-1 --local-state-d
 ### Which config is opened
 
 `-c` names the file, and naming one that does not exist yet is a request to
-create it there. Without `-c` the search is the same one the window does:
-`config.toml` in the current folder, then beside the executable, then the
-per-user location — `%APPDATA%\CodexSync\config.toml` on Windows,
-`~/Library/Application Support/CodexSync/` on macOS,
-`$XDG_CONFIG_HOME/codexsync/` on Linux. A file found anywhere but the current
-folder is announced, so a command never works quietly on a file you are not
-looking at.
+create it there. The config can live in any folder you like. Without `-c` the
+search is the same one the window does: the config the window last opened,
+then `config.toml` in the current folder, then beside the executable. If none
+of them has a file, the command stops with exit code 4 and says how to name
+one — no location is ever made up for you. A file found anywhere but the
+current folder is announced, so a command never works quietly on a file you
+are not looking at.
 
-The window remembers the config it last opened and starts with it; the command
-line does not remember anything, which is why `-c` stays the way to be precise
-in a script or a scheduled task.
+The window records the path of the config it opened or created in a small
+pointer file — the path only, never the content — at
+`%LOCALAPPDATA%\CodexSync\config-path.txt` on Windows,
+`~/Library/Application Support/CodexSync/config-path.txt` on macOS and
+`$XDG_CONFIG_HOME/codexsync/config-path.txt` on Linux. That is how a terminal
+command without `-c` finds the same file as the window. A script or a scheduled
+task should still pass `-c` to be precise.
 
 Check the configuration, then the environment:
 

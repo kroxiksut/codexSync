@@ -21,6 +21,7 @@ import unittest
 
 from codexsync.chat_directory import Association
 from codexsync.chat_move import ChatMoveKind
+from codexsync.config_migrate import FINDING_CODES
 from codexsync.gui import i18n
 from codexsync.gui.controller import Failure
 from codexsync.guardian_models import GuardianResultStatus
@@ -148,6 +149,11 @@ class CatalogueCompletenessTests(unittest.TestCase):
         computed |= {f"guardian.reason.{code}" for code in _module_codes(PACKAGE / "guardian_restore.py")}
         computed |= {f"sessions.index.{side}{suffix}" for side in ("local", "cloud") for suffix in ("", ".missing")}
         computed |= {f"progress.phase.{phase}" for phase in PHASES}
+        computed |= {f"settings.migration.finding.{code}" for code in FINDING_CODES}
+        computed |= {f"sync.history.result.{item.value}" for item in JournalState}
+        sync_screen = GUI / "screens" / "sync.py"
+        computed |= {f"sync.history.failure.{name}" for name in _module_constant(sync_screen, "KNOWN_FAILURES")}
+        computed |= {f"sync.history.origin.{name}" for name in _module_constant(sync_screen, "ORIGINS")}
         tabs = ("general", "sync", "protection", "automation", "mappings", "service")
         computed |= {f"settings.tab.{tab}" for tab in tabs}
         computed |= {f"settings.tab.{tab}.caption" for tab in tabs}
@@ -158,6 +164,20 @@ class CatalogueCompletenessTests(unittest.TestCase):
             if kind == "choice" and section != "logging":
                 computed |= {f"settings.choice.{section}.{key}.{choice}" for choice in choices}
         self.assertEqual(sorted(computed - english), [])
+
+    def test_a_finding_sentence_names_only_the_values_its_finding_carries(self) -> None:
+        """A placeholder the finding has no value for would fall back to English."""
+        from codexsync.config_migrate import inspect_config
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "config-0.1.2.toml"
+        plan = inspect_config(fixture.read_text(encoding="utf-8"), include_defaults=True)
+        emitted = {finding.code: finding for finding in plan.findings}
+        self.assertGreaterEqual(len(emitted), 3, "the 0.1.2 fixture stopped producing findings")
+        english = _raw("en")
+        for code, finding in emitted.items():
+            with self.subTest(code=code):
+                names = set(re.findall(r"[{](\w+)[}]", english[f"settings.migration.finding.{code}"]))
+                self.assertEqual(names, set(finding.params))
 
     def test_every_check_the_core_reports_has_a_label(self) -> None:
         """A new diagnostic would otherwise appear under its internal name."""

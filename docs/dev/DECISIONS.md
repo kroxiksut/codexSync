@@ -190,3 +190,29 @@ What was decided:
 - `doctor` reports both sides' formats from each file's first record
   (`session_format`), so a rewrite that reached one side is a known step rather
   than two hundred unexplained conflicts.
+
+## D-016: One settings sync may run unattended, once, after sign-in
+CS-232 made every scheduled job read-only: a task runs while nobody watches,
+and each mutation has its own plan and an explicit confirmation. On the owner's
+machine Codex stays open until shutdown, so the only cold window is right after
+sign-in, and asking for a manual sync then is asking for it to be forgotten.
+
+What was decided (2026-09-23, by the owner):
+
+- It is opt-in: `[scheduler] sync_at_login`, a checkbox, off by default and
+  independent of the periodic job.
+- It is one job and it runs once: `sync --apply --unattended` on a sign-in
+  trigger in a task of its own (`LOGIN_SYNC_SLOT`), never repeated, never a
+  periodic mode, so switching it off removes exactly that task.
+- It is the plain settings sync only, because that is the one mutation that
+  needs no plan id — its envelope (gate, lock, journal, verified backup) does
+  not depend on a person. Sessions, restore, repair and moves keep their
+  confirmation and are never scheduled.
+- `--unattended` forces `manual_abort` on conflicts before planning, whatever
+  `conflict.policy` says: nobody is there to decide one.
+- The process gate is not relaxed. A Codex that starts with the session makes
+  the run a refusal (exit 3) rather than a race, and the window reports the
+  task's last result in words.
+- Installing it must not run it: the Windows logon trigger and systemd's
+  `OnStartupSec` do not fire at install, and the LaunchAgent is written but not
+  bootstrapped, since loading it would fire `RunAtLoad`.

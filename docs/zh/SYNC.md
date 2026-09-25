@@ -105,3 +105,20 @@ exclude_globs = ["**/*.lock", "**/*.tmp", "**/*.temp", "**/tmp/**", "**/cache/**
 - 试运行不会删除任何东西；
 - 刚打开这个选项之后的第一次运行不会删除任何东西，因为还没有证据；
 - 语义层拥有的路径永远不会以这种方式被删除。
+
+## 历史
+
+每一次真正的同步都会留下一条操作日志，历史就是按从新到旧读取的这些日志——不需要另外维护记录：
+
+```powershell
+codexsync -c config.toml history                 # 最近 20 次同步
+codexsync -c config.toml history --family all    # 所有写操作：sync、sessions、chats、restore…
+codexsync -c config.toml history --json --limit 0
+```
+
+每次运行都会显示开始时间、结果（失败时显示错误类型——绝不显示错误消息，因为其中可能含有文件名）、
+启动方（`window`、`cli`，或登录时任务对应的 `unattended`）、有多少文件传到云端、传到本地以及被删除，
+以及它创建的备份。在这些字段出现之前写入的日志只显示总数。
+
+不会列出：不写入任何内容的试运行，以及在第一次写入前就停止的运行——Codex 已打开，或 `manual_abort`
+下的冲突。窗口在“同步”页面的 **历史** 选项卡中显示同一份列表，并在“概览”中显示最近一次运行。

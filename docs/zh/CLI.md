@@ -47,6 +47,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `repair-projects apply` | **是** | 按标识执行某一份确切的计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `project-move scan` | 否 | 为项目计算哈希，并规划复制到新文件夹 | [项目](PROJECTS.md#搬移项目的文件) |
 | `project-move apply` | **是** | 复制、校验，然后让 Codex 指向新文件夹 | [项目](PROJECTS.md#搬移项目的文件) |
+| `history` | 否 | 根据日志列出过去的同步（或所有写操作） | [同步](SYNC.md#历史) |
 | `recover inspect` | 否 | 无副作用地读取一条写操作日志 | [恢复](RECOVERY.md#被中断的写操作) |
 | `recover resume` / `rollback` | **是** | 收尾一个被中断的写操作 | [恢复](RECOVERY.md#被中断的写操作) |
 
@@ -73,15 +74,17 @@ codexsync init-config --output config.toml --machine-id laptop-1 --local-state-d
 
 ### 打开的是哪个配置
 
-`-c` 指明文件，而指向一个还不存在的路径就是要求在那里创建它。不带 `-c` 时，
-搜索顺序与窗口一致：当前目录下的 `config.toml`，然后是可执行文件旁边，最后是
-按用户的位置 —— Windows 上是 `%APPDATA%\CodexSync\config.toml`，macOS 上是
-`~/Library/Application Support/CodexSync/`，Linux 上是
-`$XDG_CONFIG_HOME/codexsync/`。在当前目录以外找到的文件会被明确说明，这样命令
-就不会悄悄地对着一个你没在看的文件工作。
+`-c` 指明文件，而指向一个还不存在的路径就是要求在那里创建它。配置可以放在任何
+文件夹里。不带 `-c` 时，搜索顺序与窗口一致：窗口上次打开的配置，然后是当前目录下
+的 `config.toml`，再然后是可执行文件旁边。如果都没有，命令以退出码 4 结束并说明
+如何指定 —— 绝不会替你编造一个位置。在当前目录以外找到的文件会被明确说明，这样
+命令就不会悄悄地对着一个你没在看的文件工作。
 
-窗口会记住上次打开的配置并以它启动；命令行什么都不记，所以在脚本或计划任务里，
-`-c` 仍然是把话说准的方式。
+窗口会把打开或创建的配置路径写进一个小的指针文件 —— 只有路径，没有内容：
+Windows 上是 `%LOCALAPPDATA%\CodexSync\config-path.txt`，macOS 上是
+`~/Library/Application Support/CodexSync/config-path.txt`，Linux 上是
+`$XDG_CONFIG_HOME/codexsync/config-path.txt`。这样不带 `-c` 的命令就能找到与窗口
+相同的文件。在脚本或计划任务里仍建议显式传 `-c`。
 
 先检查配置，再检查环境：
 

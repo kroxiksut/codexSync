@@ -42,6 +42,30 @@ class ConsoleToolSpawnTests(unittest.TestCase):
         self.assertTrue(startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW)
         self.assertEqual(startupinfo.wShowWindow, subprocess.SW_HIDE)
 
+    def test_a_platform_without_the_flags_still_runs(self) -> None:
+        """The Windows adapter is exercised from macOS and Linux.
+
+        `test_process_detector.py` patches this module's `sys.platform` to
+        "win32" so the tasklist parser can be tested anywhere. Deciding on the
+        platform *name* and then reaching for `subprocess.STARTUPINFO` made
+        those tests crash on CI, and would crash the same way in any
+        environment that calls itself Windows without offering the attributes.
+        """
+        completed = subprocess.CompletedProcess(["x"], 0, "", "")
+        # `create=True`: on POSIX these attributes do not exist at all, which is
+        # the very condition under test, so `patch.object` has to be allowed to
+        # invent them before setting them to None.
+        absent = dict(new=None, create=True)
+        with patch("codexsync.process_detector.subprocess.run", return_value=completed) as run:
+            with patch.object(subprocess, "STARTUPINFO", **absent):
+                with patch.object(subprocess, "CREATE_NO_WINDOW", **absent):
+                    _run_console_tool(["tasklist"], encoding="utf-8")
+        kwargs = run.call_args.kwargs
+        self.assertNotIn("startupinfo", kwargs)
+        self.assertNotIn("creationflags", kwargs)
+        # The part that is not Windows-specific still applies.
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+
     @unittest.skipUnless(sys.platform.startswith("win"), "Windows spawn flags")
     def test_encoding_is_the_console_code_page(self) -> None:
         # `tasklist` writes in the OEM code page; decoding it as UTF-8 with

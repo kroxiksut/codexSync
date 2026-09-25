@@ -234,11 +234,11 @@ def restore_from_backup(
                     engine.execute(plan, dry_run=False)
                     current[0] = journals.transition(current[0], JournalState.COMMITTED)
                     mgr.prune()
-                except Exception:
+                except Exception as exc:
                     recovery_required = current[0].state is JournalState.COMMITTING
                     failure = JournalState.RECOVERY_REQUIRED if recovery_required else JournalState.FAILED
                     try:
-                        current[0] = journals.transition(current[0], failure)
+                        current[0] = journals.transition(current[0], failure, failure=exc)
                     except Exception:
                         LOG.exception("Could not persist terminal restore journal state")
                     raise

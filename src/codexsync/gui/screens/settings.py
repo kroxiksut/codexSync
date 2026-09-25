@@ -168,6 +168,7 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("scheduler", "run_at_login", "bool", True),
         Field("scheduler", "startup_delay_seconds", "int", 0, maximum=24 * 3600),
         Field("scheduler", "jitter_seconds", "int", 0, maximum=24 * 3600),
+        Field("scheduler", "sync_at_login", "bool", False),
     )),
     ("mappings", ()),
     ("service", (
@@ -192,6 +193,11 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
 #: replaced. Dropped when the automation settings are saved, so the file does
 #: not keep saying something nothing reads.
 LEGACY_SCHEDULER_KEYS = ("kind", "interval_minutes")
+#: The tab area never gets less than this, whatever the cards above it hold.
+TABS_MIN_HEIGHT = 380
+#: An unfolded migration card scrolls inside this height instead of growing.
+MIGRATION_DETAILS_MIN_HEIGHT = 220
+MIGRATION_DETAILS_MAX_HEIGHT = 320
 MAPPING_COLUMNS = ("rule_id", "source_machine", "target_machine", "from", "to", "case_sensitive")
 
 
@@ -237,6 +243,9 @@ class SettingsModel(Model):
         self.migration_busy = False
         self.migration_skip: set[str] = set()
         self.migration_open = False
+        #: Findings shown or folded away; ``None`` follows the plan -- open
+        #: when something blocks every write, folded otherwise.
+        self.migration_details: bool | None = None
         self.migration_result: Outcome | None = None
 
     def reset_plans(self) -> None:
@@ -249,14 +258,20 @@ class SettingsModel(Model):
         self.migration = None
         self.migration_skip = set()
         self.migration_open = False
+        self.migration_details = None
         self.migration_result = None
 
 
 class SettingsScreen(Screen):
     page = "settings"
+    #: The page scrolls as a whole so that nothing above the tabs -- the
+    #: migration card above all -- can squeeze them to nothing: on a small
+    #: window the page scrolls instead of every label drawing over the next.
+    scrollable = True
+    scroll_tail_stretch = False
 
     def build(self) -> None:
-        self.banner = Banner()
+        self.banner = Banner(actions_below=True)
         self.reload_button = button(self.t("settings.reload"))
         self.reload_button.clicked.connect(self.reload)
         self.banner.actions.addWidget(self.reload_button)
@@ -286,6 +301,8 @@ class SettingsScreen(Screen):
         if self.model.tab in self._tab_ids:
             self.tabs.setCurrentIndex(self._tab_ids.index(self.model.tab))
         self.tabs.currentChanged.connect(self._tab_changed)
+        # Enough for a few fields whatever sits above; the page scrolls past it.
+        self.tabs.setMinimumHeight(TABS_MIN_HEIGHT)
         self.body.addWidget(self.tabs, stretch=1)
 
         self.check_button = button(self.t("settings.check"))
@@ -741,6 +758,9 @@ class SettingsScreen(Screen):
         layout.addWidget(self.task_banner)
         self.task_details = label("", "muted", wrap=True)
         layout.addWidget(self.task_details)
+        #: The sign-in sync is its own task (CS-267); its state is its own line.
+        self.login_task = label("", wrap=True)
+        layout.addWidget(self.login_task)
         self.task_command = label("", "command", wrap=True)
         layout.addWidget(self.task_command)
         self.task_run = button(self.t("automation.run_now"))
@@ -849,22 +869,41 @@ class SettingsScreen(Screen):
         left alone with its own tick. Nothing here writes -- the button asks
         for confirmation and the write happens in `app.py`.
         """
+        frame, layout = card(self.t("settings.migration.title"))
         self.migration_summary = label(wrap=True)
-        frame, layout = card(self.t("settings.migration.title"), self.migration_summary)
-        layout.addWidget(label(self.t("settings.migration.caption"), "muted", wrap=True))
+        layout.addWidget(self.migration_summary)
+        # What the card says when unfolded. It scrolls inside a bounded height:
+        # a long process list or an open diff must not push the tabs away.
+        details = QWidget()
+        details.setObjectName("content")
+        inner = QVBoxLayout(details)
+        inner.setContentsMargins(0, 0, 8, 0)
+        inner.setSpacing(8)
+        inner.addWidget(label(self.t("settings.migration.caption"), "muted", wrap=True))
         self.migration_findings = QVBoxLayout()
         self.migration_findings.setSpacing(6)
-        layout.addLayout(self.migration_findings)
+        inner.addLayout(self.migration_findings)
+        self.migration_toggle = button(self.t("settings.migration.show"))
+        self.migration_toggle.clicked.connect(self.toggle_migration_diff)
+        inner.addLayout(row(self.migration_toggle))
         self.migration_diff = QPlainTextEdit()
         self.migration_diff.setReadOnly(True)
         self.migration_diff.setMinimumHeight(200)
         self.migration_diff.hide()
-        layout.addWidget(self.migration_diff)
-        self.migration_toggle = button(self.t("settings.migration.show"))
-        self.migration_toggle.clicked.connect(self.toggle_migration_diff)
+        inner.addWidget(self.migration_diff)
+        self.migration_details_box = self._scroll(details)
+        # Part of the card, not a page of its own: no grey page ground.
+        for part in (self.migration_details_box, self.migration_details_box.viewport(), details):
+            part.setObjectName("migrationDetails")
+        self.migration_details_box.setStyleSheet("#migrationDetails { background: transparent; }")
+        self.migration_details_box.setMinimumHeight(MIGRATION_DETAILS_MIN_HEIGHT)
+        self.migration_details_box.setMaximumHeight(MIGRATION_DETAILS_MAX_HEIGHT)
+        layout.addWidget(self.migration_details_box)
+        self.migration_more = button(self.t("settings.migration.details"))
+        self.migration_more.clicked.connect(self.toggle_migration_details)
         self.migration_apply = button(self.t("settings.migration.apply"), primary=True)
         self.migration_apply.clicked.connect(self.apply_migration)
-        layout.addLayout(row(self.migration_toggle, self.migration_apply, stretch_last=False))
+        layout.addLayout(row(self.migration_more, self.migration_apply))
         self.migration_status = label(wrap=True)
         layout.addWidget(self.migration_status)
         frame.hide()
@@ -881,6 +920,16 @@ class SettingsScreen(Screen):
             model.migration = outcome
 
         self.read(lambda: self.host.controller.config_migration(skip=skip), apply)
+
+    def toggle_migration_details(self) -> None:
+        self.model.migration_details = not self._migration_details_open()
+        self._render_migration()
+
+    def _migration_details_open(self) -> bool:
+        if self.model.migration_details is not None:
+            return self.model.migration_details
+        plan = self._migration_plan()
+        return plan is not None and bool(plan.blockers)
 
     def toggle_migration_diff(self) -> None:
         self.model.migration_open = not self.model.migration_open
@@ -949,19 +998,32 @@ class SettingsScreen(Screen):
             )
         else:
             self.migration_status.setText("")
+        self.migration_status.setVisible(bool(self.migration_status.text()))
         while self.migration_findings.count():
             item = self.migration_findings.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # Out of the layout is not off the screen: until the deferred
+                # delete runs, the old row keeps drawing under the new one.
+                widget.hide()
                 widget.deleteLater()
         if not showing:
             self.migration_summary.setText("")
             self.migration_diff.hide()
+            self.migration_details_box.hide()
+            self.migration_more.setVisible(False)
             self.migration_toggle.setEnabled(False)
             self.migration_apply.setEnabled(False)
             return
         self.migration_summary.setText(
             self.p("settings.migration.summary", len(plan.findings))
+        )
+        set_tone(self.migration_summary, "danger" if plan.blockers else None, self.palette_)
+        unfolded = self._migration_details_open()
+        self.migration_details_box.setVisible(unfolded)
+        self.migration_more.setVisible(True)
+        self.migration_more.setText(
+            self.t("settings.migration.collapse" if unfolded else "settings.migration.details")
         )
         for finding in plan.findings:
             self.migration_findings.addWidget(self._finding_row(finding))
@@ -977,7 +1039,7 @@ class SettingsScreen(Screen):
 
     def _finding_row(self, finding) -> QWidget:
         text = label(
-            f"{self.t('settings.migration.level.' + finding.level)} — {finding.detail}",
+            f"{self.t('settings.migration.level.' + finding.level)} — {self._finding_text(finding)}",
             wrap=True,
         )
         set_tone(text, "danger" if finding.level == "blocker" else None, self.palette_)
@@ -994,6 +1056,17 @@ class SettingsScreen(Screen):
         inner.addWidget(text)
         inner.addWidget(keep)
         return holder
+
+    def _finding_text(self, finding) -> str:
+        """The finding in the window's language; core's English for a code it does not know."""
+        key = f"settings.migration.finding.{finding.code}"
+        if not self.host.catalog.has(key):
+            return finding.detail
+        try:
+            return self.t(key, **dict(finding.params))
+        except (KeyError, IndexError):
+            # A finding without the values its sentence names: say it as core does.
+            return finding.detail
 
     def _build_history(self) -> QWidget:
         self.history_summary = label()
@@ -1142,6 +1215,9 @@ class SettingsScreen(Screen):
         # against, just changed: the computed lines have to follow the text.
         if field.kind == "path" or field.id == ("paths", "workspace_root_dir"):
             self._render_paths()
+        # The automation card describes the draft, including the sign-in sync.
+        if field.id[0] == "scheduler":
+            self._render_task()
 
     def _file_mappings(self) -> list[dict[str, Any]]:
         raw = self._raw() or {}
@@ -1394,6 +1470,40 @@ class SettingsScreen(Screen):
         self.task_status.setText(text)
         set_tone(self.task_status, tone, palette)
         self.task_status.setVisible(bool(text))
+        self._render_login_task(view, bool(values.get("sync_at_login")))
+
+    def _render_login_task(self, view, wanted: bool) -> None:
+        """One line on the sign-in sync task: off, waiting to be applied, or its last result."""
+        palette = self.palette_
+        text, tone = "", None
+        if view is not None:
+            status = view.login_status
+            installed = status is not None and status.installed
+            if view.login_status_error:
+                text, tone = self.t("automation.login.error", error=view.login_status_error), "danger"
+            elif not wanted and not installed:
+                text = self.t("automation.login.off")
+            elif not wanted:
+                text, tone = self.t("automation.login.installed_but_off"), "attention"
+            elif not installed:
+                text, tone = self.t("automation.login.not_installed"), "attention"
+            else:
+                if status.last_result is None:
+                    result = self.t("automation.never")
+                else:
+                    key = f"automation.exit.{status.last_result}"
+                    result = self.t(key) if self.host.catalog.has(key) else self.t("automation.exit.other")
+                text = self.t(
+                    "automation.login.active",
+                    when=_when_or_never(status.last_run_utc, self.t("automation.never")),
+                    result=result,
+                )
+                tone = "ok"
+        elif wanted:
+            text = self.t("automation.login.pending")
+        self.login_task.setText(text)
+        set_tone(self.login_task, tone, palette)
+        self.login_task.setVisible(bool(text))
 
     def _interval(self, seconds: int) -> str:
         if seconds % 3600 == 0:

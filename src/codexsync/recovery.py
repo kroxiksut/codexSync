@@ -21,6 +21,7 @@ from enum import Enum
 import json
 import logging
 from pathlib import Path
+from typing import Mapping
 
 from .config import load_config
 from .exceptions import FailSafeError
@@ -82,6 +83,11 @@ class JournalInfo:
     #: when none is recorded. Absent is not an error: rollback then closes the
     #: journal as ``NOTHING_TO_ROLL_BACK``.
     backup_snapshot_present: bool | None
+    # Descriptive only, from builds that record them (`MutationJournal`).
+    counts: Mapping[str, int] | None = None
+    origin: str | None = None
+    finished_at_utc: str | None = None
+    failure: str | None = None
 
 
 def list_journals(config_path: Path) -> list[JournalInfo]:
@@ -111,6 +117,24 @@ def list_journals(config_path: Path) -> list[JournalInfo]:
     return result
 
 
+def list_history(
+    config_path: Path, *, family: str | None = None, limit: int | None = None
+) -> list[JournalInfo]:
+    """Past runs, newest first, optionally of one family.
+
+    The same journals `list_journals` reads -- a history needs no store of its
+    own -- but ordered by time alone: here an unfinished run is one more row,
+    not the thing to put first. A dry run writes no journal and so is never in
+    it. Like the recovery listing it creates, repairs and closes nothing.
+    """
+    items = [
+        item for item in list_journals(config_path)
+        if family is None or item.family == family
+    ]
+    items.sort(key=lambda item: (item.created_at_utc or "", item.operation_id), reverse=True)
+    return items if limit is None else items[:max(limit, 0)]
+
+
 def _describe_journal(store: JournalStore, path: Path, backup_root: Path) -> JournalInfo:
     operation_id = path.stem
     try:
@@ -131,6 +155,10 @@ def _describe_journal(store: JournalStore, path: Path, backup_root: Path) -> Jou
             can_resume=not terminal,
             can_rollback=not terminal and journal.backup_snapshot is not None,
             backup_snapshot_present=_snapshot_presence(backup_root, journal.backup_snapshot),
+            counts=journal.counts,
+            origin=journal.origin,
+            finished_at_utc=journal.finished_at_utc,
+            failure=journal.failure,
         )
     # Unreadable, or it claims another operation's identity, which
     # ``_load_recoverable`` refuses. Salvage correctly typed fields for display.

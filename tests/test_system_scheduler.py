@@ -1014,10 +1014,16 @@ def argv_index(argv: list[str]) -> int:
 class ClassifyTaskTests(unittest.TestCase):
     """The reasoning, without a scheduler: it is the same on every platform."""
 
+    #: An absolute path on whichever platform is running the test. `JobDefinition`
+    #: refuses a relative log directory, and "C:/w" is only absolute on Windows --
+    #: which made this class, whose whole point is being platform-independent,
+    #: fail on the macOS and Linux CI jobs.
+    ROOT = Path(Path(sys.executable).anchor or "/")
+
     def definition_for(self, program: Path) -> JobDefinition:
         return JobDefinition(
             ScheduledJob("preflight", 60, False), (str(program), "-c", "x", "preflight"),
-            Path("C:/w/config.toml"), Path("C:/w/logs"),
+            self.ROOT / "w" / "config.toml", self.ROOT / "w" / "logs",
         )
 
     def test_nothing_is_said_about_a_task_that_is_not_installed(self) -> None:
@@ -1046,6 +1052,120 @@ class ClassifyTaskTests(unittest.TestCase):
             installed_command=(str(program), "-c", "C:/nowhere/config.toml", "preflight"),
         )
         self.assertIn(ss.CONFIG_PATH_MISSING, ss.classify_task(status, self.definition_for(program)))
+
+
+
+# --------------------------------------------------------------------------
+# The sign-in sync (CS-267, D-016)
+# --------------------------------------------------------------------------
+
+def login_job(delay: int = 30) -> ScheduledJob:
+    return ScheduledJob(ss.LOGIN_SYNC_MODE, None, True, delay, 0)
+
+
+class LoginSyncJobTests(SandboxCase):
+    def test_it_runs_an_unattended_apply_and_nothing_else(self) -> None:
+        self.assertEqual(
+            job_arguments(ss.LOGIN_SYNC_MODE, self.config)[-3:], ["sync", "--apply", "--unattended"]
+        )
+
+    def test_it_never_repeats_and_only_runs_at_sign_in(self) -> None:
+        for bad in (
+            lambda: ScheduledJob(ss.LOGIN_SYNC_MODE, 60, True),
+            lambda: ScheduledJob(ss.LOGIN_SYNC_MODE, None, False),
+            lambda: ScheduledJob(ss.LOGIN_SYNC_MODE, None, True, 0, 30),
+        ):
+            with self.assertRaises(ValueError):
+                bad()
+
+    def test_it_is_not_a_periodic_mode(self) -> None:
+        self.assertNotIn(ss.LOGIN_SYNC_MODE, JOB_MODES)
+        with self.assertRaises(ValueError):
+            ScheduledJob(ss.LOGIN_SYNC_MODE, None, True).__class__("sync_at_login", 60, True)
+
+    def test_a_slot_runs_only_its_own_job(self) -> None:
+        periodic = WindowsTaskScheduler(run=FakeRun(), user_id=USER_ID, temp_dir=self.root,
+                                        protected_roots=[self.root / ".codex"])
+        login = WindowsTaskScheduler(run=FakeRun(), user_id=USER_ID, temp_dir=self.root,
+                                     protected_roots=[self.root / ".codex"], slot=ss.LOGIN_SYNC_SLOT)
+        with self.assertRaises(ValueError):
+            periodic.install(login_job(), command=self.command, config_path=self.config, log_dir=self.logs)
+        with self.assertRaises(ValueError):
+            login.install(ScheduledJob("preflight", 60, True), command=self.command,
+                          config_path=self.config, log_dir=self.logs)
+
+
+class LoginSyncWindowsTests(WindowsRenderTests):
+    def login_adapter(self, run=None) -> WindowsTaskScheduler:
+        return WindowsTaskScheduler(
+            run=run or FakeRun(), user_id=USER_ID, now=lambda: self.NOW, temp_dir=self.root,
+            protected_roots=[self.root / ".codex"], schtasks="schtasks.exe",
+            powershell="powershell.exe", slot=ss.LOGIN_SYNC_SLOT,
+        )
+
+    def test_its_task_has_its_own_name_beside_the_periodic_one(self) -> None:
+        name = self.login_adapter().task_name
+        self.assertNotEqual(name, TASK_NAME)
+        self.assertTrue(name.startswith(ss.TASK_FOLDER))
+        self.assertIn("krox", name)
+
+    def test_one_logon_trigger_without_repetition(self) -> None:
+        text = ss.render_task_xml(self.definition(login_job(45)), user_id=USER_ID, now=self.NOW)
+        root = ss.parse_task_xml(text)
+        triggers = list(root.find("Triggers"))
+        self.assertEqual([trigger.tag for trigger in triggers], ["LogonTrigger"])
+        self.assertIsNone(triggers[0].find("Repetition"), "the sign-in sync never repeats")
+        self.assertEqual(ss._child_text(triggers[0], "Delay"), "PT45S")
+        self.assertIn("--unattended", ss._child_text(root, "Actions/Exec/Arguments"))
+
+    def test_install_and_remove_touch_only_the_login_task(self) -> None:
+        run = FakeRun(lambda argv: FakeResult(1) if "/Query" in argv else FakeResult(0))
+        adapter = self.login_adapter(run)
+        adapter.install(login_job(), command=self.command, config_path=self.config, log_dir=self.logs)
+        adapter.remove()
+        named = {argv[argv.index("/TN") + 1] for argv in run.calls if "/TN" in argv}
+        self.assertEqual(named, {adapter.task_name}, "neither the periodic nor the legacy task is touched")
+
+    def test_a_missing_login_task_is_not_confused_with_the_legacy_one(self) -> None:
+        run = FakeRun(lambda argv: FakeResult(1) if "/Query" in argv else FakeResult(0))
+        self.assertFalse(self.login_adapter(run).status().installed)
+        queried = [argv[argv.index("/TN") + 1] for argv in run.calls if "/Query" in argv]
+        self.assertNotIn(LEGACY_TASK_NAME, queried)
+
+
+class LoginSyncLaunchdTests(SandboxCase):
+    def adapter(self, run) -> LaunchdScheduler:
+        return LaunchdScheduler(run=run, home=self.root / "home", uid=501,
+                                protected_roots=[self.root / "home" / ".codex"], launchctl="launchctl",
+                                slot=ss.LOGIN_SYNC_SLOT)
+
+    def test_install_writes_the_agent_without_loading_it(self) -> None:
+        """Loading now would fire RunAtLoad: a sync at install time, not at sign-in."""
+        run = FakeRun()
+        adapter = self.adapter(run)
+        adapter.install(login_job(), command=self.command, config_path=self.config, log_dir=self.logs)
+        plist = plistlib.loads(adapter.plist_path.read_bytes())
+        self.assertEqual(plist["Label"], ss.LAUNCHD_LOGIN_SYNC_LABEL)
+        self.assertTrue(plist["RunAtLoad"])
+        self.assertNotIn("StartInterval", plist)
+        self.assertEqual(plist["ProgramArguments"][-3:], ["sync", "--apply", "--unattended"])
+        self.assertFalse(any(argv[1] == "bootstrap" for argv in run.calls))
+
+
+class LoginSyncSystemdTests(SandboxCase):
+    def adapter(self, run) -> SystemdUserScheduler:
+        return SystemdUserScheduler(run=run, home=self.root / "home",
+                                    protected_roots=[self.root / "home" / ".codex"], systemctl="systemctl",
+                                    slot=ss.LOGIN_SYNC_SLOT)
+
+    def test_the_timer_fires_once_after_the_session_starts(self) -> None:
+        files = self.adapter(FakeRun()).render(self.definition(login_job(20)))
+        timer = files[ss.SYSTEMD_LOGIN_SYNC_TIMER].decode("utf-8")
+        self.assertIn("OnStartupSec=20s", timer)
+        self.assertNotIn("OnUnitActiveSec", timer)
+        self.assertNotIn("OnActiveSec", timer, "counting from activation would sync at install time")
+        self.assertIn(f"Unit={ss.SYSTEMD_LOGIN_SYNC_SERVICE}", timer)
+        self.assertNotIn(ss.SYSTEMD_TIMER, files)
 
 
 if __name__ == "__main__":

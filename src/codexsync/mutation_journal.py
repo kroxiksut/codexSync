@@ -1,12 +1,13 @@
 """Durable, payload-free evidence for an interrupted mutation."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 import json
 import os
 from pathlib import Path
+from typing import Mapping
 from uuid import uuid4
 
 from .exceptions import FailSafeError
@@ -45,6 +46,20 @@ class MutationJournal:
     #: either the operation overwrote nothing, or it was journalled by a build
     #: that did not record the link.  Rollback refuses to guess in that case.
     backup_snapshot: str | None = None
+    # What a history needs and a recovery does not. All optional, because a
+    # journal written by an older build has none of them, and none of them is
+    # ever consulted by a gate: they describe a run, they do not decide one.
+    # Still payload-free -- numbers and fixed words, never a path or a message.
+    #: How many actions of each kind the plan held (``to_cloud``, ``to_local``,
+    #: ``deletions`` for a sync), when the caller knows.
+    counts: Mapping[str, int] | None = None
+    #: Who started the run: ``window``, ``cli`` or ``unattended``.
+    origin: str | None = None
+    #: When the journal reached ``COMMITTED`` or ``FAILED``.
+    finished_at_utc: str | None = None
+    #: The exception class that ended a failed run (``ConflictError`` ...),
+    #: never its message, which may name files.
+    failure: str | None = None
 
 
 class JournalStore:
@@ -58,6 +73,8 @@ class JournalStore:
         action_count: int,
         *,
         backup_snapshot: str | None = None,
+        counts: Mapping[str, int] | None = None,
+        origin: str | None = None,
     ) -> MutationJournal:
         pending = self.non_terminal()
         if pending:
@@ -73,6 +90,8 @@ class JournalStore:
             plan_hash,
             action_count,
             backup_snapshot,
+            dict(counts) if counts is not None else None,
+            origin,
         )
         self.write(journal)
         return journal
@@ -88,17 +107,20 @@ class JournalStore:
             os.fsync(handle.fileno())
         os.replace(temp, path)
 
-    def transition(self, journal: MutationJournal, state: JournalState) -> MutationJournal:
+    def transition(
+        self,
+        journal: MutationJournal,
+        state: JournalState,
+        *,
+        failure: BaseException | None = None,
+    ) -> MutationJournal:
         if state not in _TRANSITIONS[journal.state]:
             raise FailSafeError(f"Invalid mutation journal transition: {journal.state.value} -> {state.value}")
-        updated = MutationJournal(
-            journal.operation_id,
-            journal.family,
-            state,
-            journal.created_at_utc,
-            journal.plan_hash,
-            journal.action_count,
-            journal.backup_snapshot,
+        updated = replace(
+            journal,
+            state=state,
+            finished_at_utc=_now() if state in TERMINAL else journal.finished_at_utc,
+            failure=type(failure).__name__ if failure is not None else journal.failure,
         )
         self.write(updated)
         return updated
@@ -115,6 +137,10 @@ class JournalStore:
                 plan_hash=str(raw["plan_hash"]),
                 action_count=int(raw["action_count"]),
                 backup_snapshot=_optional_str(raw.get("backup_snapshot")),
+                counts=_lenient_counts(raw.get("counts")),
+                origin=_lenient_str(raw.get("origin")),
+                finished_at_utc=_lenient_str(raw.get("finished_at_utc")),
+                failure=_lenient_str(raw.get("failure")),
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise FailSafeError("Mutation journal is missing or invalid") from exc
@@ -139,6 +165,25 @@ def _optional_str(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         raise ValueError("backup_snapshot must be a non-empty string when present")
     return value
+
+
+def _lenient_str(value: object) -> str | None:
+    """A descriptive field: a malformed one is dropped, never a reason to block.
+
+    The required fields stay strict because a gate reads them; these only
+    feed a history, and a journal that became unreadable over a label would
+    block every later mutation for nothing.
+    """
+    return value if isinstance(value, str) and value else None
+
+
+def _lenient_counts(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        str(key): item for key, item in value.items()
+        if isinstance(item, int) and not isinstance(item, bool)
+    }
 
 
 def _now() -> str:

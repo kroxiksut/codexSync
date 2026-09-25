@@ -131,6 +131,9 @@ class SchedulerConfig:
     run_at_login: bool = True
     startup_delay_seconds: int = 0
     jitter_seconds: int = 0
+    #: A settings sync once after sign-in, in its own task (CS-267, `D-016`).
+    #: Independent of ``enabled``/``mode``, which stay read-only and periodic.
+    sync_at_login: bool = False
 
 
 @dataclass(slots=True)

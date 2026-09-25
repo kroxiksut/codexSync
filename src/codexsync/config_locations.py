@@ -1,24 +1,26 @@
 """Which `config.toml` a command opens when it was not told.
 
 This used to live in the GUI, and the two shells disagreed because of it: the
-window looked in four places, while the command line's `-c` defaulted to the
+window looked in several places, while the command line's `-c` defaulted to the
 literal `config.toml` and therefore only ever looked in the current directory.
-A machine set up through the window -- whose config sits in the per-user
-location, or beside a downloaded exe -- answered every terminal command with
-"Config file not found: config.toml". The rule is one rule now, and it lives
-here so that neither shell can drift from it again.
+The rule is one rule now, and it lives here so that neither shell can drift
+from it again.
 
-The order is deliberate. An explicit `-c` wins even when the file is absent,
-because naming a path that does not exist yet is a request to create it there
-rather than a typo to route around. After that only files that actually exist
-are considered: the window's remembered path (a window notion -- the command
-line passes `None`), the current directory, the folder of a frozen executable,
-and finally the per-user location, which is also what is proposed when nothing
-was found at all.
+The order: an explicit `-c` wins even when the file is absent, because naming a
+path that does not exist yet is a request to create it there rather than a typo
+to route around. After that only files that actually exist are considered: the
+config the window last opened (the *pointer*), the current directory, and the
+folder of a frozen executable. When none of them holds a file the answer is
+"no config" -- never a location made up on the user's behalf. An earlier
+version proposed a per-user file under `%APPDATA%` and every screen of the
+window then worked against that file although nobody had created it or asked
+for it there (CS-268). Where a config lives is the user's decision.
 
-Nothing here reads a config, and nothing here is remembered: the *content* of
-a config never leaves the file, and the caller decides what to do with a path
-that does not exist.
+The pointer is how a terminal finds the file chosen in the window: one line
+holding the absolute path, in the per-user *local* application directory. It
+carries the path and never the content, it is written only by the window after
+a file was opened or created, and it is local rather than roaming because a
+path on this machine's `D:` means nothing on another one.
 """
 from __future__ import annotations
 
@@ -29,12 +31,16 @@ import sys
 import tempfile
 
 CONFIG_NAME = "config.toml"
+#: The file holding the path of the config the window last opened.
+POINTER_NAME = "config-path.txt"
 
 
 @dataclass(frozen=True)
 class ConfigChoice:
-    path: Path
-    #: ``explicit`` | ``remembered`` | ``cwd`` | ``executable`` | ``user`` | ``new``
+    #: ``None`` when nothing was found and nothing was named: there is no
+    #: config, and none is invented.
+    path: Path | None
+    #: ``explicit`` | ``remembered`` | ``cwd`` | ``executable`` | ``none``
     source: str
     exists: bool
     #: Set when a remembered path was on offer and deliberately not taken.
@@ -59,21 +65,63 @@ def is_under_temp(path: Path) -> bool:
     return resolved == temp or temp in resolved.parents
 
 
-def user_config_path() -> Path:
-    """The per-user config location for this platform.
+def pointer_path() -> Path:
+    """Where the window records the path of the config it last opened.
 
-    Where a config is created when the machine has none anywhere else, so an
-    exe that lives in Downloads still keeps its settings somewhere sane.
+    Local, not roaming: the recorded path belongs to this machine.
     """
     if sys.platform == "win32":
-        base = os.getenv("APPDATA")
-        root = Path(base) if base else Path.home() / "AppData" / "Roaming"
-        return root / "CodexSync" / CONFIG_NAME
+        base = os.getenv("LOCALAPPDATA")
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+        return root / "CodexSync" / POINTER_NAME
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "CodexSync" / CONFIG_NAME
+        return Path.home() / "Library" / "Application Support" / "CodexSync" / POINTER_NAME
     base = os.getenv("XDG_CONFIG_HOME")
     root = Path(base) if base else Path.home() / ".config"
-    return root / "codexsync" / CONFIG_NAME
+    return root / "codexsync" / POINTER_NAME
+
+
+def read_config_pointer(pointer: Path | None = None) -> Path | None:
+    """The config the window last opened, or ``None``.
+
+    A pointer that is missing, unreadable, empty or relative is simply no
+    pointer: it is a hint, and a broken hint is not an error for the command
+    that happened to look at it.
+    """
+    target = pointer if pointer is not None else pointer_path()
+    try:
+        text = target.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    if not text or "\n" in text:
+        return None
+    path = Path(text)
+    return path if path.is_absolute() else None
+
+
+def write_config_pointer(config: Path, pointer: Path | None = None) -> bool:
+    """Record ``config`` as the one to open next time; ``False`` if it was not.
+
+    Only an existing file outside the temporary directory is recorded -- a
+    scratch config left there by a test or a smoke run is exactly what must
+    not become the default (CS-266). The write replaces the pointer in one
+    step, so a reader never sees half a path.
+    """
+    config = Path(config)
+    if not config.is_file() or is_under_temp(config):
+        return False
+    target = pointer if pointer is not None else pointer_path()
+    try:
+        value = str(config.resolve())
+        if read_config_pointer(target) == Path(value):
+            return True
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staged = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        staged.write_text(value + "\n", encoding="utf-8")
+        os.replace(staged, target)
+    except OSError:
+        return False
+    return True
 
 
 def choose_config_path(
@@ -82,20 +130,18 @@ def choose_config_path(
     *,
     cwd: Path | None = None,
     executable_dir: Path | None = None,
-    user_path: Path | None = None,
 ) -> ConfigChoice:
     """Pick the config file to open.
 
     ``-c`` wins even when the file is absent: naming a path that does not exist
     yet is a request to create it there, not a typo to route around. Everything
-    after it is tried only if the file is actually there, and the last resort is
-    the per-user path as a file still to be created.
+    after it is tried only if the file is actually there. When nothing is,
+    the answer has no path at all.
     """
     if explicit is not None:
         path = Path(explicit).expanduser()
         return ConfigChoice(path, "explicit", path.is_file())
 
-    user = (user_path or user_config_path()).expanduser()
     ordered: list[tuple[Path, str]] = []
     rejected: Path | None = None
     if remembered is not None:
@@ -109,12 +155,11 @@ def choose_config_path(
     ordered.append(((cwd or Path.cwd()) / CONFIG_NAME, "cwd"))
     if executable_dir is not None:
         ordered.append((Path(executable_dir) / CONFIG_NAME, "executable"))
-    ordered.append((user, "user"))
 
     for path, source in ordered:
         if path.is_file():
             return ConfigChoice(path, source, True, rejected)
-    return ConfigChoice(user, "new", False, rejected)
+    return ConfigChoice(None, "none", False, rejected)
 
 
 def frozen_executable_dir() -> Path | None:
@@ -130,5 +175,7 @@ __all__ = [
     "choose_config_path",
     "frozen_executable_dir",
     "is_under_temp",
-    "user_config_path",
+    "pointer_path",
+    "read_config_pointer",
+    "write_config_pointer",
 ]

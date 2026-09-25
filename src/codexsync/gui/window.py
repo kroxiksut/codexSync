@@ -40,7 +40,14 @@ from . import BRAND_NAME
 from . import theme
 from .controller import ConfigInfo, Controller, Failure, Outcome
 from .i18n import Catalog, available_languages, load, pick_language
-from .locations import ConfigChoice, choose_config_path, frozen_executable_dir
+from .locations import (
+    CONFIG_NAME,
+    ConfigChoice,
+    choose_config_path,
+    frozen_executable_dir,
+    read_config_pointer,
+    write_config_pointer,
+)
 from .screens.about import AboutModel, AboutScreen
 from .screens.backups import BackupsModel, BackupsScreen
 from .screens.base import Model, Screen
@@ -50,6 +57,7 @@ from .screens.guardian import GuardianModel, GuardianScreen
 from .screens.overview import OverviewModel, OverviewScreen
 from .screens.projects import ProjectsModel, ProjectsScreen
 from .screens.journals import RecoveryModel, RecoveryScreen
+from .screens.no_config import NoConfigScreen
 from .screens.sessions import SessionsModel, SessionsScreen
 from .screens.settings import SettingsModel, SettingsScreen
 from .screens.sync import SyncModel, SyncScreen
@@ -105,8 +113,14 @@ __all__ = ["MainWindow", "PAGES", "SCREENS", "launch"]
 SETTING_SIZE = "window/size"
 SETTING_PAGE = "window/page"
 SETTING_LANGUAGE = "interface/language"
-#: The path of the config last opened -- the path and never its content.
-SETTING_CONFIG = "config/path"
+#: Where earlier builds kept the config path. Read once, then removed.
+LEGACY_SETTING_CONFIG = "config/path"
+
+#: Pages that mean something without a config. Every other page shows
+#: `NoConfigScreen` until one is opened or created: a screen running against a
+#: path nobody chose is how every page came to talk about a file in %APPDATA%
+#: that did not exist (CS-268).
+WITHOUT_CONFIG = ("first_run", "about")
 
 #: Opening size before anything is remembered, and the floor under it.
 DEFAULT_SIZE = (1240, 820)
@@ -126,10 +140,16 @@ class MainWindow(QMainWindow):
         language: str | None = None,
         runner: Any = None,
         choice: ConfigChoice | None = None,
+        remember: Callable[[Path], object] | None = None,
     ) -> None:
         super().__init__()
         self._controller = controller
         self._settings = settings
+        #: Records the opened config for the next start and for the command
+        #: line (`config_locations.write_config_pointer`). ``None`` records
+        #: nothing -- which is what a test or a smoke run must pass, or it
+        #: repoints the user's real window at its scratch file.
+        self._remember = remember
         #: How the opened config was found. Shown, never decided from: a window
         #: that does not say which file it is running against cannot be argued
         #: with when it turns out to be the wrong one (CS-263).
@@ -157,8 +177,10 @@ class MainWindow(QMainWindow):
 
         self._remember_config()
         self.setStatusBar(QStatusBar())
-        #: token -> (page, apply, cancellable, started); what the status bar counts.
-        self._active: dict[Any, tuple[str, Callable[[Any, Outcome], None], bool, float]] = {}
+        #: token -> (page, apply, cancellable, started, model); what the status
+        #: bar counts. The model is the one the job started with: after a switch
+        #: to another config file a late result must not land on the new pages.
+        self._active: dict[Any, tuple[str, Callable[[Any, Outcome], None], bool, float, Model]] = {}
         #: token -> (phase, done, total); the last report a running read made.
         self._progress: dict[Any, tuple[str, int, int]] = {}
         self._activity_timer = QTimer(self)
@@ -215,13 +237,14 @@ class MainWindow(QMainWindow):
         both show the same number without either of them polling.
         """
         key: list[Any] = [None]
+        model = self._models[page]
 
         def done(outcome: Outcome) -> None:
             self._active.pop(key[0], None)
             self._progress.pop(key[0], None)
-            apply(self._models[page], outcome)
+            apply(model, outcome)
             screen = self._screens.get(page)
-            if screen is not None:
+            if screen is not None and self._models[page] is model:
                 screen.render()
             self._update_activity()
 
@@ -235,7 +258,7 @@ class MainWindow(QMainWindow):
                 screen.render()
 
         key[0] = object()
-        self._active[key[0]] = (page, apply, cancellable, time.monotonic())
+        self._active[key[0]] = (page, apply, cancellable, time.monotonic(), model)
         started = self._jobs.start(call, done, report) if progress else self._jobs.start(call, done)
         token = started
         if key[0] in self._active:
@@ -250,22 +273,22 @@ class MainWindow(QMainWindow):
 
     def cancel_waiting(self) -> None:
         """Stop waiting for every cancellable (read-only) job."""
-        for token, (page, apply, cancellable, _) in list(self._active.items()):
+        for token, (page, apply, cancellable, _, model) in list(self._active.items()):
             if not cancellable or not self._jobs.abandon(token):
                 continue
             self._active.pop(token, None)
             self._progress.pop(token, None)
-            apply(self._models[page], Outcome(failure=Failure.STOPPED_SAFELY, message=self._catalog.text("activity.cancelled")))
+            apply(model, Outcome(failure=Failure.STOPPED_SAFELY, message=self._catalog.text("activity.cancelled")))
             screen = self._screens.get(page)
-            if screen is not None:
+            if screen is not None and self._models[page] is model:
                 screen.render()
         self._update_activity()
 
     def progress_text(self, page: str) -> str:
         """The latest "reading 120 of 252" line for this page, or nothing."""
-        for token, (running_page, _apply, _cancellable, _started) in self._active.items():
+        for token, (running_page, _apply, _cancellable, _started, model) in self._active.items():
             report = self._progress.get(token)
-            if running_page != page or report is None:
+            if running_page != page or report is None or self._models[page] is not model:
                 continue
             phase, count, total = report
             key = f"progress.phase.{phase}"
@@ -290,7 +313,7 @@ class MainWindow(QMainWindow):
             return
         if not self._activity_timer.isActive():
             self._activity_timer.start()
-        oldest = min(started for _, _, _, started in self._active.values())
+        oldest = min(started for _, _, _, started, _ in self._active.values())
         reported = next(iter(sorted(self._progress.values(), key=lambda item: -item[2])), None)
         if reported is not None and reported[2] > 0:
             phase, done, total = reported
@@ -307,7 +330,7 @@ class MainWindow(QMainWindow):
                 "activity.running", count, seconds=int(time.monotonic() - oldest)
             ))
         self._activity_bar.setVisible(True)
-        self._activity_cancel.setVisible(any(cancellable for _, _, cancellable, _ in self._active.values()))
+        self._activity_cancel.setVisible(any(cancellable for _, _, cancellable, _, _ in self._active.values()))
 
     def go_to(self, page: str) -> None:
         if page in PAGES:
@@ -329,20 +352,29 @@ class MainWindow(QMainWindow):
         return self._config_info
 
     def quoted_config(self) -> str:
+        if self._controller.config_path is None:
+            return CONFIG_NAME
         path = str(self._controller.config_path)
         return f'"{path}"' if " " in path else path
 
     def config_changed(self, path: Path | None = None) -> None:
-        """The config file was saved or created: forget every plan, redraw everything.
+        """The config file was saved, created or swapped: redraw everything from it.
 
-        A plan computed under the previous rules would otherwise stay on screen
-        looking applicable.
+        Saving the same file forgets every plan -- one computed under the
+        previous rules would otherwise stay on screen looking applicable.
+        Another file forgets every page's state: a form, a chosen machine or
+        a reading taken for the old file describes that file, and showing it
+        next to the new one reads as if the new file had said it.
         """
         if path is not None and Path(path) != self._controller.config_path:
             self._controller = Controller(Path(path))
+            # Whatever the start-up search found no longer describes this file.
+            self._config_choice = None
+            self._models = {page: SCREENS[page][1]() for page in PAGES}
+        else:
+            for model in self._models.values():
+                model.reset_plans()
         self._remember_config()
-        for model in self._models.values():
-            model.reset_plans()
         self._load_config_info()
         self._build(self._stack.currentIndex())
 
@@ -371,10 +403,12 @@ class MainWindow(QMainWindow):
         """Keep where this config is, so the next start opens the same one.
 
         Only when the file is really there: remembering a path that was only
-        proposed would send the next start to a file nobody created.
+        proposed would send the next start to a file nobody created. The path
+        goes into the pointer file rather than `QSettings`, so a terminal
+        command without `-c` opens the same file as the window.
         """
-        if self._controller.config_exists():
-            self._store(SETTING_CONFIG, str(self._controller.config_path))
+        if self._remember is not None and self._controller.config_exists():
+            self._remember(self._controller.config_path)
 
     def open_config(self, path: Path) -> None:
         """Switch the whole window to another existing config file."""
@@ -459,9 +493,13 @@ class MainWindow(QMainWindow):
         self._stack.setObjectName("content")
         self.setStyleSheet(theme.stylesheet(self.palette(), RESOURCES))
         self._screens = {}
+        has_config = self._controller.config_exists()
         for page in PAGES:
             screen_class, _ = SCREENS[page]
-            screen = screen_class(self, self._models[page])
+            if has_config or page in WITHOUT_CONFIG:
+                screen = screen_class(self, self._models[page])
+            else:
+                screen = NoConfigScreen(self, self._models[page], page)
             self._screens[page] = screen
             self._stack.addWidget(screen)
         row.addWidget(self._stack, stretch=1)
@@ -518,8 +556,10 @@ class MainWindow(QMainWindow):
         one" unanswered, and that question cost a whole session once.
         """
         path = self._controller.config_path
+        if path is None:
+            return self._catalog.text("statusbar.no_config")
         choice = self._config_choice
-        if choice is None or Path(choice.path) != Path(path):
+        if choice is None or choice.path is None or Path(choice.path) != Path(path):
             return self._catalog.text("statusbar.config", path=path)
         return self._catalog.text(
             "statusbar.config_from",
@@ -600,9 +640,8 @@ def launch(config: str | Path | Controller | None = None) -> int:
     """Show the window and run until it closes.
 
     Takes what ``-c`` said, or nothing: which file that becomes is
-    `locations.choose_config_path`, which needs the remembered path and
-    therefore ``QSettings``, and therefore lives here rather than in the
-    launcher. A ``Controller`` may be passed instead by a host that already
+    `locations.choose_config_path`, fed with the pointer the window keeps
+    for itself and for the command line. A ``Controller`` may be passed instead by a host that already
     built one.
 
     Reuses an existing ``QApplication`` when there is one, so a host that
@@ -615,14 +654,19 @@ def launch(config: str | Path | Controller | None = None) -> int:
     if APP_ICON.is_file():
         app.setWindowIcon(QIcon(str(APP_ICON)))
     settings = QSettings(BRAND_NAME, BRAND_NAME)
+    choice: ConfigChoice | None = None
     if isinstance(config, Controller):
         controller = config
     else:
+        # Builds before the pointer kept the path in QSettings; it is read once
+        # as a fallback and the key dropped, so the pointer is the one record.
+        remembered = read_config_pointer() or settings.value(LEGACY_SETTING_CONFIG)
+        settings.remove(LEGACY_SETTING_CONFIG)
         choice = choose_config_path(
-            config, settings.value(SETTING_CONFIG), executable_dir=frozen_executable_dir(),
+            config, remembered, executable_dir=frozen_executable_dir(),
         )
         controller = Controller(choice.path)
-    window = MainWindow(controller, settings=settings, choice=choice)
+    window = MainWindow(controller, settings=settings, choice=choice, remember=write_config_pointer)
     window.show()
     window.place_within_screen()
     return int(app.exec())

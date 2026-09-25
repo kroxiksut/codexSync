@@ -236,6 +236,10 @@ class FakeController(Controller):
             JournalInfo("op-1", "sync", "COMMITTING", "2026-09-05T10:06:30Z", 3, "snap-1", False, True, True, True, True),
         ]))
 
+    def sync_history(self, *, limit=None) -> Outcome:
+        self.calls.append(("sync_history", limit))
+        return self._answer("sync_history", Outcome(value=list(_SYNC_HISTORY)))
+
     def resume_journal(self, operation_id, *, dry_run) -> Outcome:
         self.calls.append(("resume", operation_id, dry_run))
         return Outcome(value=RecoveryOutcome(operation_id, "sync", "COMMITTING", RecoveryAction.WOULD_RECOVER if dry_run else RecoveryAction.RETRY_ALLOWED, "snap-1", 0, "detail"))
@@ -315,7 +319,7 @@ class FakeController(Controller):
 _MIGRATION_DIFF = "--- config.toml\n+++ config.toml\n-session_mode = \"last_date_only\"\n+session_mode = \"all\"\n"
 
 
-def _migration_plan(skip: tuple = (), *, current: bool = False) -> ConfigMigrationPlan:
+def _migration_plan(skip: tuple = (), *, current: bool = False, blocker: bool = True) -> ConfigMigrationPlan:
     """A plan shaped like the one a 0.1 config produces."""
     if current:
         return ConfigMigrationPlan(1, "plan-current", "sha", ())
@@ -328,9 +332,28 @@ def _migration_plan(skip: tuple = (), *, current: bool = False) -> ConfigMigrati
             "DETECTION_LIST_OUTDATED", "safety", "codex-app-server is missing",
             (ConfigEdit("append", "process_detection", "process_names", ["codex-app-server"]),),
             optional=True,
+            params={"names": "codex-app-server"},
         ),
     ]
+    if not blocker:
+        findings = findings[1:]
     return ConfigMigrationPlan(1, "plan-" + "-".join(sorted(skip)) if skip else "plan-full", "sha", tuple(findings))
+
+
+#: Past sync runs as the journals describe them: one from before the history
+#: fields existed, one that failed, one that finished.
+_SYNC_HISTORY = (
+    JournalInfo(
+        "op-new", "sync", "COMMITTED", "2026-09-24T13:36:29Z", 3, "snap-new", True, True, False, False, True,
+        counts={"to_cloud": 2, "to_local": 1, "deletions": 0}, origin="window",
+        finished_at_utc="2026-09-24T13:36:31Z",
+    ),
+    JournalInfo(
+        "op-failed", "sync", "FAILED", "2026-09-20T05:36:19Z", 4, None, True, True, False, False, None,
+        counts={"to_cloud": 4, "to_local": 0, "deletions": 0}, origin="unattended", failure="ConflictError",
+    ),
+    JournalInfo("op-old", "sync", "COMMITTED", "2026-09-19T14:28:34Z", 159, "snap-old", True, True, False, False, True),
+)
 
 
 class _Settings:
@@ -373,6 +396,15 @@ class _WindowTestCase(unittest.TestCase):
         )
         self.workspace_search = patcher.start()
         self.addCleanup(patcher.stop)
+        # Settings asks for the automation status when it is shown. With a real
+        # controller that is the real `schtasks`/`launchctl`/`systemctl`, which
+        # no test may run; `FakeController` answers it by itself.
+        scheduler = mock.patch(
+            "codexsync.gui.controller.Controller.automation",
+            return_value=Outcome(failure=Failure.CONFIGURATION, message="not in this test"),
+        )
+        scheduler.start()
+        self.addCleanup(scheduler.stop)
 
     def pump(self, until=None, *, seconds: float = 20.0) -> None:
         """Run the event loop until ``until()`` holds, or the deadline passes.
@@ -1646,7 +1678,7 @@ class ProgressTests(_WindowTestCase):
     def test_an_unlabelled_phase_falls_back_to_its_own_id(self) -> None:
         """A phase without a label is a bug the i18n test catches, not a blank line."""
         window, _ = self.make()
-        window._active["t"] = ("chats", lambda *_: None, True, 0.0)
+        window._active["t"] = ("chats", lambda *_: None, True, 0.0, window.model("chats"))
         window._progress["t"] = ("no-such-phase", 1, 2)
         self.assertIn("no-such-phase", window.progress_text("chats"))
 
@@ -1685,35 +1717,36 @@ class ConfigScreensTests(_WindowTestCase):
 
     def test_creating_a_config_remembers_where_it_is(self) -> None:
         """The next start has to find this file from anywhere, not only from here."""
-        from codexsync.gui.window import SETTING_CONFIG, MainWindow
+        from codexsync.gui.window import MainWindow
 
-        settings = _Settings({})
+        remembered: list[Path] = []
         missing = self.root / "config.toml"
         window = MainWindow(
-            Controller(missing), language="en", runner=_InlineRunner(), settings=settings,
+            Controller(missing), language="en", runner=_InlineRunner(), settings=_Settings({}),
+            remember=remembered.append,
         )
         self.addCleanup(window.deleteLater)
-        self.assertNotIn(SETTING_CONFIG, settings.stored, "a file that is not there is not remembered")
+        self.assertEqual(remembered, [], "a file that is not there is not remembered")
         screen = window.screen("first_run")
         screen.machine.setEditText("laptop")
         screen.codex.setText(str(self.root / "codex"))
         screen.workspace.setText(str(self.root / "workspace"))
         screen.create()
-        self.assertEqual(settings.stored[SETTING_CONFIG], str(missing))
+        self.assertEqual(remembered, [missing])
 
     def test_opening_another_config_switches_the_window_and_is_remembered(self) -> None:
-        from codexsync.gui.window import SETTING_CONFIG, MainWindow
+        from codexsync.gui.window import MainWindow
 
         path = self._create()
-        settings = _Settings({})
+        remembered: list[Path] = []
         window = MainWindow(
-            Controller(self.root / "absent.toml"), language="en",
-            runner=_InlineRunner(), settings=settings,
+            Controller(None), language="en",
+            runner=_InlineRunner(), settings=_Settings({}), remember=remembered.append,
         )
         self.addCleanup(window.deleteLater)
         window.open_config(path)
         self.assertEqual(window.controller.config_path, path)
-        self.assertEqual(settings.stored[SETTING_CONFIG], str(path))
+        self.assertEqual(remembered, [path])
         self.assertEqual(window.machine_id(), "laptop")
 
     def test_the_first_run_screen_offers_a_workspace_it_found(self) -> None:
@@ -1734,6 +1767,126 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertNotEqual(screen.machine.currentText(), "old-laptop", "a known name is never picked")
         self.assertGreater(screen.machine.count(), 0, "but it is offered")
 
+    def test_without_a_config_no_page_works_against_a_made_up_path(self) -> None:
+        """CS-268: every page used to run against a per-user file nobody created."""
+        from codexsync.gui.screens.no_config import NoConfigScreen
+
+        window, _ = self.make(controller=Controller(None))
+        for page in ("overview", "sync", "chats", "sessions", "projects", "guardian",
+                     "backups", "recovery", "settings"):
+            self.assertIsInstance(window.screen(page), NoConfigScreen, page)
+        self.assertNotIsInstance(window.screen("first_run"), NoConfigScreen)
+        self.assertNotIsInstance(window.screen("about"), NoConfigScreen)
+        self.assertEqual(window.statusBar().currentMessage(), window.catalog.text("statusbar.no_config"))
+        first_run = window.screen("first_run")
+        self.assertEqual(first_run.config_path.text(), "", "no location is proposed")
+        self.assertNotIn("AppData", first_run.banner.detail.text())
+
+    def test_a_placeholder_page_opens_an_existing_config_anywhere(self) -> None:
+        path = self._create()
+        window, _ = self.make(controller=Controller(None))
+        window.screen("guardian").open_existing(path)
+        self.assertEqual(window.controller.config_path, path)
+        self.assertEqual(window.machine_id(), "laptop")
+        self.assertEqual(type(window.screen("guardian")).__name__, "GuardianScreen")
+
+    def test_naming_an_existing_file_in_the_form_opens_it_and_never_overwrites(self) -> None:
+        """What the user expected on first run: pick my 0.1 config, get its machine name."""
+        path = self._create()
+        before = path.read_bytes()
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        screen.config_path.setText(str(path))
+        self.assertEqual(screen.create_button.text(), window.catalog.text("first_run.open_this"))
+        screen.machine.setEditText("something-else")
+        screen.create()
+        self.assertEqual(path.read_bytes(), before, "an existing file is opened, not replaced")
+        self.assertEqual(window.controller.config_path, path)
+        self.assertEqual(window.machine_id(), "laptop")
+
+    def test_picking_an_existing_file_with_browse_opens_it_at_once(self) -> None:
+        """The picker is not a save dialog: choosing an old config reads it, no second click."""
+        path = self._create()
+        before = path.read_bytes()
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        self.assertFalse(hasattr(screen.config_path, "_save_file"))
+        screen.config_path.take(str(path))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(window.controller.config_path, path)
+        self.assertEqual(window.machine_id(), "laptop")
+
+    def test_opening_a_config_shows_what_it_says_and_stays_on_the_page(self) -> None:
+        """The machine name came from the host name and stayed there after an open."""
+        from codexsync.gui.window import PAGES
+
+        path = self._create()
+        window, _ = self.make(controller=Controller(None))
+        window.go_to("first_run")
+        screen = window.screen("first_run")
+        screen.machine.setEditText("desktop")  # what the host name suggested
+        screen.config_path.take(str(path))
+        self.assertEqual(window._stack.currentIndex(), PAGES.index("first_run"))
+        screen = window.screen("first_run")
+        self.assertEqual(screen.machine.currentText(), "laptop")
+        self.assertEqual(Path(screen.codex.text()), self.root / "codex")
+        self.assertEqual(Path(screen.workspace.text()), self.root / "workspace")
+        self.assertEqual(screen.mirror.text(), "", "the default mirror stays the placeholder")
+        self.assertEqual(Path(screen.config_path.text()), path.resolve())
+        self.assertEqual(screen.create_button.text(), window.catalog.text("first_run.is_open"))
+        self.assertFalse(screen.create_button.isEnabled())
+
+    def test_another_config_file_starts_every_page_afresh(self) -> None:
+        first = self._create()
+        second = self.root / "other" / "config.toml"
+        second.parent.mkdir()
+        outcome = Controller(second).create_config(
+            second, machine_id="machine-a", local_state_dir=str(self.root / "codex"),
+            workspace_root_dir=str(self.root / "workspace-a"), cloud_root_dir=None,
+        )
+        self.assertTrue(outcome.ok, outcome.message)
+        window, _ = self.make(controller=Controller(first))
+        self.assertEqual(window.model("sessions").target, "laptop")
+        window.open_config(second)
+        self.assertEqual(window.machine_id(), "machine-a")
+        self.assertEqual(window.model("sessions").target, "machine-a")
+        self.assertEqual(window.model("projects").target, "machine-a")
+        self.assertEqual(window.screen("first_run").machine.currentText(), "machine-a")
+
+    def test_picking_a_new_name_with_browse_only_fills_the_field(self) -> None:
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        target = self.root / "new" / "config.toml"
+        screen.config_path.take(str(target))
+        self.assertIsNone(window.controller.config_path)
+        self.assertFalse(target.exists())
+        self.assertEqual(screen.create_button.text(), window.catalog.text("first_run.create"))
+
+    def test_creating_without_a_location_asks_for_one(self) -> None:
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        screen.create()
+        self.assertEqual(screen.status.text(), window.catalog.text("first_run.config.required"))
+        self.assertIsNone(window.controller.config_path)
+
+    def test_a_known_machine_is_offered_calmly_with_a_button(self) -> None:
+        from codexsync.gui.locations import WorkspaceCandidate
+
+        workspace = self.root / "cloud" / "codexSync"
+        self.workspace_search.return_value = Outcome(
+            value=(WorkspaceCandidate(workspace, ("guardian",), ("machine-a",)),)
+        )
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        self.assertIn("machine-a", screen.machine_warning.text())
+        self.assertIn("machine-a", screen._machine_buttons)
+        screen.use_machine("machine-a")
+        self.assertEqual(screen.machine.currentText(), "machine-a")
+        self.assertEqual(
+            screen.machine_warning.text(),
+            window.catalog.text("first_run.machine.continues", name="machine-a"),
+        )
+
     def test_the_language_is_chosen_in_the_page_header_and_not_in_a_tab(self) -> None:
         path = self._create()
         window, _ = self.make(controller=Controller(path))
@@ -1751,7 +1904,7 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertEqual(window.screen("settings").language.currentData(), "ru")
 
     def test_settings_can_open_another_config_and_the_path_is_remembered(self) -> None:
-        from codexsync.gui.window import SETTING_CONFIG, MainWindow
+        from codexsync.gui.window import MainWindow
 
         first = self._create()
         second = self.root / "other.toml"
@@ -1761,13 +1914,16 @@ class ConfigScreensTests(_WindowTestCase):
         )
         self.assertTrue(outcome.ok, outcome.message)
 
-        settings = _Settings({})
-        window = MainWindow(Controller(first), language="en", runner=_InlineRunner(), settings=settings)
+        remembered: list[Path] = []
+        window = MainWindow(
+            Controller(first), language="en", runner=_InlineRunner(), settings=_Settings({}),
+            remember=remembered.append,
+        )
         self.addCleanup(window.deleteLater)
         window.go_to("settings")
         window.screen("settings").switch_config(second)
         self.assertEqual(window.controller.config_path, second)
-        self.assertEqual(settings.stored[SETTING_CONFIG], str(second))
+        self.assertEqual(remembered, [first, second])
         self.assertEqual(window.machine_id(), "second-machine")
 
     def test_settings_save_changes_one_value_keeps_comments_and_keeps_history(self) -> None:
@@ -1914,6 +2070,29 @@ class ConfigScreensTests(_WindowTestCase):
         self.pump(lambda: load_config(path).sync.direction == "to_cloud")
         self.assertEqual(load_config(path).sync.direction, "to_cloud")
 
+    def test_the_sign_in_sync_is_a_checkbox_with_its_own_status_line(self) -> None:
+        """CS-267: the last run's exit code is read as words, e.g. "Codex was open"."""
+        from codexsync.app import AutomationView
+        from codexsync.config_edit import set_value
+        from codexsync.system_scheduler import SchedulerStatus
+
+        path = self._create()
+        path.write_text(set_value(path.read_text(encoding="utf-8"), "scheduler", "sync_at_login", True), encoding="utf-8")
+        view = AutomationView(
+            False, "guardian_snapshot", 60, True, 0, 0, ("py",), (), True, SchedulerStatus(installed=False),
+            sync_at_login=True, login_argv=("py", "sync", "--apply", "--unattended"),
+            login_status=SchedulerStatus(installed=True, last_run_utc=None, last_result=3),
+        )
+        with mock.patch("codexsync.gui.controller.Controller.automation", return_value=Outcome(value=view)):
+            window, _ = self.make(controller=Controller(path))
+            window.go_to("settings")
+        screen = window.screen("settings")
+        self.assertTrue(screen._widgets[("scheduler", "sync_at_login")].isChecked())
+        self.assertIn(window.catalog.text("automation.exit.3"), screen.login_task.text())
+        screen._widgets[("scheduler", "sync_at_login")].setChecked(False)
+        screen._render_task()
+        self.assertEqual(screen.login_task.text(), window.catalog.text("automation.login.installed_but_off"))
+
     def test_the_safety_switches_are_not_editable(self) -> None:
         path = self._create()
         window, _ = self.make(controller=Controller(path))
@@ -2056,6 +2235,46 @@ class ConfigMigrationCardTests(_WindowTestCase):
             controller.calls,
         )
 
+    def test_a_blocker_unfolds_the_findings_on_its_own(self) -> None:
+        _window, _controller, screen = self._screen()
+        self.assertFalse(screen.migration_details_box.isHidden(), "a blocker must not hide behind a click")
+
+    def test_without_a_blocker_the_card_is_one_line_until_asked(self) -> None:
+        _window, _controller, screen = self._screen(
+            answers={"config_migration": Outcome(value=(_migration_plan(blocker=False), _MIGRATION_DIFF))}
+        )
+        self.assertTrue(screen.migration_details_box.isHidden())
+        self.assertEqual(screen.migration_more.text(), load("en").text("settings.migration.details"))
+        self.assertTrue(screen.migration_apply.isEnabled(), "the update is offered folded, too")
+        screen.toggle_migration_details()
+        self.assertFalse(screen.migration_details_box.isHidden())
+        self.assertEqual(screen.migration_findings.count(), 1)
+
+    def test_findings_are_said_in_the_window_language(self) -> None:
+        window, _controller = self.make("ru")
+        window.go_to("settings")
+        screen = window.screen("settings")
+        self.pump(lambda: screen.model.migration is not None)
+        from PySide6.QtWidgets import QLabel
+
+        joined = "\n".join(label.text() for label in screen.migration_card.findChildren(QLabel))
+        self.assertIn(load("ru").text("settings.migration.finding.DETECTION_LIST_OUTDATED", names="codex-app-server"), joined)
+        self.assertNotIn("is missing", joined, "core's English must not reach a Russian window")
+
+    def test_the_tabs_keep_their_height_beside_a_long_card(self) -> None:
+        from codexsync.gui.screens.settings import TABS_MIN_HEIGHT
+        from codexsync.gui.window import MINIMUM_SIZE
+
+        window, _controller, screen = self._screen()
+        window.resize(*MINIMUM_SIZE)
+        window.show()
+        screen.toggle_migration_diff()
+        self.pump(lambda: screen.tabs.height() >= TABS_MIN_HEIGHT)
+        self.assertGreaterEqual(screen.tabs.height(), TABS_MIN_HEIGHT)
+        for widget in (screen.migration_more, screen.migration_apply, screen.reload_button, screen.switch_button):
+            self.assertGreaterEqual(widget.width(), widget.minimumSizeHint().width(), widget.text())
+        window.hide()
+
     def test_a_blocker_offers_no_way_to_keep_it(self) -> None:
         from PySide6.QtWidgets import QCheckBox
 
@@ -2063,6 +2282,89 @@ class ConfigMigrationCardTests(_WindowTestCase):
         rows = [screen.migration_findings.itemAt(i).widget() for i in range(screen.migration_findings.count())]
         boxes = [box for row_widget in rows for box in row_widget.findChildren(QCheckBox)]
         self.assertEqual(len(boxes), 1, "only the optional finding may be declined")
+
+
+class SyncHistoryTests(_WindowTestCase):
+    """Past runs, where the user looks for them (CS-272)."""
+
+    def _history(self, language: str = "en"):
+        window, controller = self.make(language)
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.show_history()
+        self.pump(lambda: screen.model.history is not None)
+        return window, controller, screen
+
+    def test_the_plan_tab_reads_no_history_until_it_is_opened(self) -> None:
+        window, controller = self.make()
+        window.go_to("sync")
+        self.assertNotIn("sync_history", [call[0] for call in controller.calls])
+
+    def test_each_run_is_one_row_newest_first_with_what_it_did(self) -> None:
+        _window, _controller, screen = self._history()
+        catalog = load("en")
+        table = screen.history_table
+        self.assertEqual(table.rowCount(), 3)
+        self.assertEqual(table.item(0, 1).text(), catalog.text("sync.history.result.COMMITTED"))
+        self.assertEqual(table.item(0, 2).text(), catalog.text("sync.history.origin.window"))
+        self.assertIn(catalog.plural("sync.count.to_cloud", 2), table.item(0, 3).text())
+        self.assertEqual(table.item(0, 4).text(), "snap-new")
+        self.assertEqual(
+            table.item(1, 1).text(),
+            catalog.text(
+                "sync.history.result.with_reason",
+                result=catalog.text("sync.history.result.FAILED"),
+                reason=catalog.text("sync.history.failure.ConflictError"),
+            ),
+        )
+        self.assertEqual(table.item(1, 2).text(), catalog.text("sync.history.origin.unattended"))
+        # A journal from before the counts existed says only its total.
+        self.assertEqual(table.item(2, 2).text(), "—")
+        self.assertEqual(table.item(2, 3).text(), catalog.plural("sync.count.files", 159))
+
+    def test_an_unknown_failure_is_named_by_its_class(self) -> None:
+        from dataclasses import replace
+
+        window, controller = self.make()
+        controller.outcomes["sync_history"] = Outcome(value=[replace(_SYNC_HISTORY[1], failure="WeirdError")])
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.show_history()
+        self.pump(lambda: screen.model.history is not None)
+        self.assertIn("WeirdError", screen.history_table.item(0, 1).text())
+
+    def test_no_runs_says_so(self) -> None:
+        window, controller = self.make()
+        controller.outcomes["sync_history"] = Outcome(value=[])
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.show_history()
+        self.pump(lambda: screen.model.history is not None)
+        self.assertEqual(screen.history_table.rowCount(), 0)
+        self.assertEqual(screen.history_empty.text(), load("en").text("sync.history.empty"))
+
+    def test_a_real_run_drops_the_history_so_it_is_read_again(self) -> None:
+        _window, controller, screen = self._history()
+        screen.start_run(dry_run=False)
+        self.assertIsNone(screen.model.history)
+
+    def test_a_dry_run_keeps_it(self) -> None:
+        _window, controller, screen = self._history()
+        screen.start_run(dry_run=True)
+        self.assertIsNotNone(screen.model.history)
+
+    def test_the_overview_names_the_last_run_and_links_to_the_history(self) -> None:
+        controller = FakeController()
+        controller.outcomes["journals"] = Outcome(value=list(_SYNC_HISTORY[1:]))
+        window, controller = self.make(controller=controller)
+        window.go_to("overview")
+        screen = window.screen("overview")
+        self.pump(lambda: screen.model.journals is not None)
+        self.assertIn(load("en").text("sync.history.result.FAILED"), screen.last_sync.text())
+        screen._open_history()
+        sync = window.screen("sync")
+        self.assertEqual(sync.model.view, "history")
+        self.assertIn("sync_history", [call[0] for call in controller.calls])
 
 
 class ArrivalDoesNotScanTests(_WindowTestCase):

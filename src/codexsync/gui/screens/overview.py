@@ -16,6 +16,7 @@ from .. import theme
 from ..controller import Outcome
 from ..widgets import Banner, Cell, button, card, fill_table, label, row, set_tone, table
 from .base import Model, Screen
+from .sync import local_time, run_result
 
 
 class OverviewModel(Model):
@@ -65,6 +66,14 @@ class OverviewScreen(Screen):
         self.body.addWidget(self.dry_run_result)
 
         automation, automation_layout = card()
+        # The last sync, from the journals this page reads anyway; the button
+        # opens the full history on the Synchronisation page.
+        self.last_sync = label("", wrap=True)
+        self.open_history = button(self.t("overview.open_history"))
+        self.open_history.clicked.connect(self._open_history)
+        last = row(self.last_sync, self.open_history, stretch_last=False, spacing=18)
+        last.setStretchFactor(self.last_sync, 1)
+        automation_layout.addLayout(last)
         self.automation_line = label("", wrap=True)
         self.automation_state = label("", "cardSummary")
         self.open_automation = button(self.t("overview.open_automation"))
@@ -125,10 +134,15 @@ class OverviewScreen(Screen):
         if "automation" in screen._tab_ids:
             screen.tabs.setCurrentIndex(screen._tab_ids.index("automation"))
 
+    def _open_history(self) -> None:
+        self.host.go_to("sync")
+        self.host.screen("sync").show_history()
+
     def _render_side(self) -> None:
         palette = self.palette_
         journals = self.model.journals
         open_ = [j for j in journals.value if not j.terminal] if journals is not None and journals.ok else []
+        self._render_last_sync()
         if open_:
             self.recovery.show_message(
                 "danger", self.p("recovery.blocked.title", len(open_)), self.t("recovery.blocked.detail"), palette
@@ -164,6 +178,29 @@ class OverviewScreen(Screen):
         else:
             self.automation_state.setText(self.t("overview.automation.state.not_applied"))
             set_tone(self.automation_state, "attention", palette)
+
+    def _render_last_sync(self) -> None:
+        journals = self.model.journals
+        if journals is None or not journals.ok:
+            self.last_sync.setText("")
+            self.last_sync.setVisible(False)
+            self.open_history.setVisible(False)
+            return
+        runs = [j for j in journals.value if j.family == "sync"]
+        latest = max(runs, key=lambda j: j.created_at_utc or "", default=None)
+        self.last_sync.setVisible(True)
+        self.open_history.setVisible(True)
+        if latest is None:
+            self.last_sync.setText(self.t("overview.last_sync.none"))
+            set_tone(self.last_sync, None, self.palette_)
+            return
+        self.last_sync.setText(self.t(
+            "overview.last_sync",
+            when=local_time(latest.created_at_utc),
+            result=run_result(self, latest),
+        ))
+        tone = None if latest.readable and latest.state == "COMMITTED" else "attention"
+        set_tone(self.last_sync, tone, self.palette_)
 
     def _show_state(self, view) -> None:
         palette = self.palette_

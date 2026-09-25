@@ -15,7 +15,7 @@ import os
 import platform
 import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from typing import Sequence
@@ -80,7 +80,14 @@ from .preflight import (
 )
 from .repair_plan import RepairActionKind, RepairPlan, build_repair_plan, load_repair_plan, save_repair_plan
 from .restore import BackupSnapshotInfo, RestoreResult, list_backup_snapshots, restore_from_backup
-from .recovery import JournalInfo, RecoveryOutcome, list_journals, resume_operation, rollback_operation
+from .recovery import (
+    JournalInfo,
+    RecoveryOutcome,
+    list_history,
+    list_journals,
+    resume_operation,
+    rollback_operation,
+)
 from .guardian_inventory import GuardianInventory, read_guardian_inventory
 from .guardian_accept import GuardianAcceptPlan, ShrinkExplanation
 from .guardian_restore import GuardianRestorePlan, build_guardian_restore_plan, verify_restore_still_valid
@@ -203,6 +210,7 @@ __all__ = [
     "JournalInfo",
     "RecoveryOutcome",
     "list_backup_snapshots",
+    "list_history",
     "list_journals",
     "read_guardian_inventory",
     "resume_operation",
@@ -301,12 +309,25 @@ def apply_config_migration(
     )
 
 
+def unattended_config(cfg: AppConfig) -> AppConfig:
+    """The config a run nobody is watching works with (`D-016`).
+
+    Nobody is there to decide a conflict, so none is decided: whatever
+    `conflict.policy` says, a conflict stops the run before any write.
+    """
+    return replace(cfg, conflict=replace(cfg.conflict, policy="manual_abort"))
+
+
 def build_context(
     config_path: Path,
     manual_terminate_confirmation_override: bool | None = None,
     enforce_safety: bool = True,
+    unattended: bool = False,
 ) -> AppContext:
     cfg = load_config(config_path)
+    if unattended:
+        # Applied before planning, because the policy shapes the plan.
+        cfg = unattended_config(cfg)
     safety_gate = _make_safety_gate(cfg)
     if enforce_safety:
         _require_mutation_compatible_config(cfg)
@@ -543,8 +564,9 @@ def commit_global_state(
         )
         backup_path = manager.backup_file(source, source.name)
         if backup_path is None or _hash_file(backup_path) != hashlib.sha256(original).hexdigest():
-            journals.transition(journal, JournalState.FAILED)
-            raise FailSafeError("Verified full backup could not be created")
+            error = FailSafeError("Verified full backup could not be created")
+            journals.transition(journal, JournalState.FAILED, failure=error)
+            raise error
         manager.finalize()
         journal = journals.transition(journal, JournalState.BACKED_UP)
         gate.require(operation, final=True)
@@ -565,9 +587,9 @@ def commit_global_state(
             journal = journals.transition(journal, JournalState.COMMITTED)
             manager.prune()
             return action_count
-        except Exception:
+        except Exception as exc:
             temp.unlink(missing_ok=True)
-            journal = journals.transition(journal, JournalState.RECOVERY_REQUIRED)
+            journal = journals.transition(journal, JournalState.RECOVERY_REQUIRED, failure=exc)
             if replaced:
                 try:
                     gate.require(operation, final=True)
@@ -1163,14 +1185,14 @@ def apply_session_transfer(
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
             _record_semantic_manifest(cfg, plan, local_by_hash, remote_by_hash)
             mgr.prune()
-        except Exception:
+        except Exception as exc:
             failure = (
                 JournalState.RECOVERY_REQUIRED
                 if current[0].state is JournalState.COMMITTING
                 else JournalState.FAILED
             )
             try:
-                current[0] = journals.transition(current[0], failure)
+                current[0] = journals.transition(current[0], failure, failure=exc)
             except Exception:
                 LOG.exception("Could not persist terminal session transfer journal state")
             raise
@@ -1445,7 +1467,21 @@ def print_plan(plan: SyncPlan, *, volatile: bool = False, direction: str = "bidi
         print(f"    skipped: {rel_path}")
 
 
-def run_sync(ctx: AppContext, dry_run: bool) -> None:
+def sync_plan_counts(plan: SyncPlan) -> dict[str, int]:
+    """What a sync journal records about its plan: numbers per direction, no paths."""
+    return {
+        "to_cloud": len(plan.to_cloud),
+        "to_local": len(plan.to_local),
+        "deletions": len(plan.deletions),
+    }
+
+
+def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> None:
+    """Apply (or dry-run) the plan in `ctx`.
+
+    `origin` -- ``window``, ``cli`` or ``unattended`` -- is written into the
+    journal so a history can say who started the run; it decides nothing.
+    """
     if ctx.plan.conflicts and ctx.config.conflict.policy == "manual_abort":
         details = ", ".join(ctx.plan.conflicts)
         if not ctx.config.conflict.report_conflicts:
@@ -1480,6 +1516,8 @@ def run_sync(ctx: AppContext, dry_run: bool) -> None:
             _plan_hash(ctx.plan),
             ctx.plan.action_count,
             backup_snapshot=mgr.snapshot_name,
+            counts=sync_plan_counts(ctx.plan),
+            origin=origin,
         )
         current = [journal]
 
@@ -1512,14 +1550,14 @@ def run_sync(ctx: AppContext, dry_run: bool) -> None:
             save_manifest(manifest, ctx.config.state.manifest_file)
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
             mgr.prune()
-        except Exception:
+        except Exception as exc:
             failure = (
                 JournalState.RECOVERY_REQUIRED
                 if current[0].state is JournalState.COMMITTING
                 else JournalState.FAILED
             )
             try:
-                current[0] = journals.transition(current[0], failure)
+                current[0] = journals.transition(current[0], failure, failure=exc)
             except Exception:
                 LOG.exception("Could not persist terminal mutation journal state")
             raise

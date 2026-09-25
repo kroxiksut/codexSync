@@ -234,7 +234,7 @@ def button(text: str, *, primary: bool = False, danger: bool = False) -> QPushBu
 class Banner(QFrame):
     """A tinted strip with a dot, a headline and a sentence underneath."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, actions_below: bool = False) -> None:
         super().__init__()
         self.setObjectName("banner")
         layout = QHBoxLayout(self)
@@ -250,7 +250,14 @@ class Banner(QFrame):
         texts.addWidget(self.detail)
         layout.addLayout(texts, stretch=1)
         self.actions = QHBoxLayout()
-        layout.addLayout(self.actions)
+        if actions_below:
+            # A long headline (a file path) keeps the full width and the
+            # buttons never get squeezed beside it in a narrow window.
+            self.actions.setContentsMargins(0, 6, 0, 0)
+            self.actions.addStretch(1)
+            texts.addLayout(self.actions)
+        else:
+            layout.addLayout(self.actions)
 
     def show_message(self, tone: str, title: str, detail: str, palette: theme.Palette) -> None:
         self.title.setText(title)
@@ -260,7 +267,9 @@ class Banner(QFrame):
         # A neutral strip is a caption, not a status: a dot would claim one.
         self.dot.setVisible(tone != "neutral" and bool(title))
         # A banner that carries a button stays, or the button would vanish with it.
-        self.setVisible(bool(title or detail) or self.actions.count() > 0)
+        self.setVisible(bool(title or detail) or any(
+            self.actions.itemAt(index).widget() is not None for index in range(self.actions.count())
+        ))
 
 
 # --- tables ----------------------------------------------------------------------
@@ -339,13 +348,23 @@ def selected_data(widget: QTableWidget, column: int = 0) -> list[Any]:
 class PathField(QWidget):
     """A path the user can type or pick. Picking never creates anything."""
 
-    def __init__(self, browse_text: str, *, directory: bool = True, save_file: bool = False) -> None:
+    def __init__(
+        self, browse_text: str, *, directory: bool = True, any_file: bool = False,
+        dialog_title: str = "", accept_text: str = "",
+    ) -> None:
         super().__init__()
         self._directory = directory
-        self._save_file = save_file
+        #: The file may exist or not yet exist. This is never a "save" dialog:
+        #: that one is titled and buttoned "Save" and asks to replace a file
+        #: that exists, when picking an existing file here means opening it.
+        self._any_file = any_file
+        self._dialog_title = dialog_title
+        self._accept_text = accept_text
         #: Turns what the dialog returned into what the field holds, e.g. a
         #: parent folder into the not-yet-existing folder inside it.
         self.picked = None
+        #: Called with the field's new text after the user picked something.
+        self.chosen = None
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -364,13 +383,29 @@ class PathField(QWidget):
     def _pick(self) -> None:  # pragma: no cover - opens a native dialog
         start = self.text()
         if self._directory:
-            chosen = QFileDialog.getExistingDirectory(self, "", start)
-        elif self._save_file:
-            chosen, _ = QFileDialog.getSaveFileName(self, "", start, "TOML (*.toml)")
+            chosen = QFileDialog.getExistingDirectory(self, self._dialog_title, start)
+        elif self._any_file:
+            dialog = QFileDialog(self, self._dialog_title, start, "TOML (*.toml)")
+            # AcceptSave is the only mode that lets a name that does not exist
+            # yet through; the overwrite question and the "Save" caption are
+            # what made picking an existing config look like replacing it.
+            dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+            dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+            dialog.setOption(QFileDialog.Option.DontConfirmOverwrite, True)
+            dialog.setDefaultSuffix("toml")
+            if self._accept_text:
+                dialog.setLabelText(QFileDialog.DialogLabel.Accept, self._accept_text)
+            chosen = dialog.selectedFiles()[0] if dialog.exec() and dialog.selectedFiles() else ""
         else:
-            chosen, _ = QFileDialog.getOpenFileName(self, "", start, "TOML (*.toml)")
+            chosen, _ = QFileDialog.getOpenFileName(self, self._dialog_title, start, "TOML (*.toml)")
         if chosen:
-            self.edit.setText(self.picked(chosen) if self.picked is not None else chosen)
+            self.take(chosen)
+
+    def take(self, chosen: str) -> None:
+        """Put what a dialog returned into the field, as if the user picked it."""
+        self.edit.setText(self.picked(chosen) if self.picked is not None else chosen)
+        if self.chosen is not None:
+            self.chosen(self.text())
 
 
 class PathTreeDialog(QDialog):

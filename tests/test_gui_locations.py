@@ -18,7 +18,6 @@ from codexsync.gui.locations import (
     choose_config_path,
     find_workspaces,
     machines_in_workspace,
-    user_config_path,
 )
 
 SANDBOX = Path(__file__).resolve().parents[1] / "test-sandbox"
@@ -53,7 +52,7 @@ class ChoosingTheConfigTests(_Sandbox):
         remembered = self.touch(f"remembered/{CONFIG_NAME}")
         here = self.root / "cwd"
         here.mkdir()
-        choice = choose_config_path(None, remembered, cwd=here, user_path=self.root / "user" / CONFIG_NAME)
+        choice = choose_config_path(None, remembered, cwd=here)
         self.assertEqual(choice.path, remembered)
         self.assertEqual(choice.source, "remembered")
 
@@ -61,10 +60,7 @@ class ChoosingTheConfigTests(_Sandbox):
         here = self.root / "cwd"
         here.mkdir()
         in_cwd = self.touch(f"cwd/{CONFIG_NAME}")
-        choice = choose_config_path(
-            None, self.root / "deleted" / CONFIG_NAME, cwd=here,
-            user_path=self.root / "user" / CONFIG_NAME,
-        )
+        choice = choose_config_path(None, self.root / "deleted" / CONFIG_NAME, cwd=here)
         self.assertEqual(choice.path, in_cwd)
         self.assertEqual(choice.source, "cwd")
 
@@ -72,35 +68,22 @@ class ChoosingTheConfigTests(_Sandbox):
         beside = self.touch(f"exe/{CONFIG_NAME}")
         empty = self.root / "elsewhere"
         empty.mkdir()
-        choice = choose_config_path(
-            None, None, cwd=empty, executable_dir=beside.parent,
-            user_path=self.root / "user" / CONFIG_NAME,
-        )
+        choice = choose_config_path(None, None, cwd=empty, executable_dir=beside.parent)
         self.assertEqual(choice.path, beside)
         self.assertEqual(choice.source, "executable")
 
-    def test_the_per_user_config_is_the_last_one_that_exists(self) -> None:
-        user = self.touch(f"user/{CONFIG_NAME}")
-        empty = self.root / "elsewhere"
-        empty.mkdir()
-        choice = choose_config_path(None, None, cwd=empty, user_path=user)
-        self.assertEqual(choice.source, "user")
+    def test_with_nothing_anywhere_there_is_no_config_and_none_is_invented(self) -> None:
+        """No per-user path is proposed any more (CS-268).
 
-    def test_with_nothing_anywhere_a_new_file_is_proposed_per_user(self) -> None:
+        The window used to answer "nothing found" with a file under %APPDATA%,
+        and every page then worked against a config nobody had created.
+        """
         empty = self.root / "elsewhere"
         empty.mkdir()
-        user = self.root / "user" / CONFIG_NAME
-        choice = choose_config_path(None, None, cwd=empty, user_path=user)
-        self.assertEqual(choice.path, user)
-        self.assertEqual(choice.source, "new")
+        choice = choose_config_path(None, None, cwd=empty)
+        self.assertIsNone(choice.path)
+        self.assertEqual(choice.source, "none")
         self.assertFalse(choice.exists)
-        self.assertFalse(user.parent.exists(), "proposing a path creates nothing")
-
-    def test_the_per_user_path_is_absolute_and_named_for_this_app(self) -> None:
-        path = user_config_path()
-        self.assertTrue(path.is_absolute())
-        self.assertEqual(path.name, CONFIG_NAME)
-        self.assertIn("odexsync", str(path).lower().replace("-", ""))
 
 
 class FindingAWorkspaceTests(_Sandbox):

@@ -8,9 +8,10 @@ Two questions live here and they are not the same one.
 
 *Which config file.* An exe started from anywhere but the checkout saw no
 `config.toml` and opened "first run", although this machine has one. So the
-choice is now a short ordered list ending in a per-user location, and the
-window remembers the answer -- **the path only**. The content of a config is
-never kept outside the file; `QSettings` gets a string that says where to look.
+choice is a short ordered list (`config_locations`), and the window remembers
+the answer -- **the path only**, in the pointer file the command line reads
+too. When the list finds nothing there is no config: the window never invents
+a location for one.
 
 *Where the workspace is.* A machine that syncs through a cloud folder already
 has one, with `guardian/`, `semantic/`, `sync/` inside it, and typing that path
@@ -42,7 +43,8 @@ from ..config_locations import (
     choose_config_path,
     frozen_executable_dir,
     is_under_temp,
-    user_config_path,
+    read_config_pointer,
+    write_config_pointer,
 )
 
 __all__ = [
@@ -53,7 +55,8 @@ __all__ = [
     "find_workspaces",
     "is_under_temp",
     "machines_in_workspace",
-    "user_config_path",
+    "read_config_pointer",
+    "write_config_pointer",
 ]
 
 #: Folders codexSync creates inside a workspace. One of them has to be there

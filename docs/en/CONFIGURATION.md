@@ -166,6 +166,7 @@ interval_seconds = 300       # at least 60
 run_at_login = true
 startup_delay_seconds = 0
 jitter_seconds = 0
+sync_at_login = false        # a separate task: sync settings once after sign-in
 ```
 
 ```powershell
@@ -175,9 +176,20 @@ codexsync -c config.toml automation remove   # remove the task; config.toml is u
 codexsync -c config.toml automation run      # run the configured job once, now
 ```
 
-- A task can run only a safe job: `guardian_snapshot`, `preflight` or
-  `sync_dry_run`. A write, a repair, a transfer, a restore or a rollback cannot be
+- The periodic task can run only a safe job: `guardian_snapshot`, `preflight` or
+  `sync_dry_run`. A repair, a transfer, a restore or a rollback cannot be
   scheduled, and a scheduled dry run is still refused while Codex is open.
+- **Sync after sign-in** (`sync_at_login = true`, the *Sync settings after
+  signing in* checkbox) is the one exception and is off by default. It installs
+  a second task that runs `sync --apply --unattended` once after you sign in,
+  after `startup_delay_seconds`, and never repeats. It goes through the same
+  checks as a manual sync: it is refused while Codex is open (exit 3), and
+  `--unattended` turns every conflict into a stop before any write (exit 2),
+  whatever `conflict.policy` says. It syncs the settings tree only — sessions
+  are never transferred by a task. If Codex starts with Windows, it will be open
+  by the time the task runs and the sync will simply be skipped; take Codex out
+  of autostart if you want this to work. The window shows the task's last run
+  and what its result meant.
 - It is a user-level task — Task Scheduler on Windows, a LaunchAgent on macOS,
   `systemd --user` on Linux — never a service.
 - `automation run` exits like the job would: `0` on success or when another

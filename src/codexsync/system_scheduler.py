@@ -5,11 +5,18 @@ This module does the registering, so a GUI can offer one switch instead of a
 how-to. It is deliberately narrow, and each limit is a safety property rather
 than a missing feature:
 
-* **Only a read-only job can be expressed.** ``ScheduledJob.mode`` is one of
-  three names and ``job_arguments`` maps each to a fixed argument list. There
-  is no way to pass ``--apply``, ``restore`` or a plan id through here, so a
-  bug or a hand-edited config cannot turn a periodic task into a periodic
+* **Only a read-only job can repeat.** A periodic ``ScheduledJob.mode`` is one
+  of three names and ``job_arguments`` maps each to a fixed argument list.
+  There is no way to pass ``--apply``, ``restore`` or a plan id through here,
+  so a bug or a hand-edited config cannot turn a periodic task into a periodic
   mutation that runs while nobody is watching.
+* **The one mutating job runs once, at sign-in, in its own task** (`D-016`).
+  ``sync_at_login`` is ``sync --apply --unattended``: never repeated, never
+  combined with a periodic mode, and installed in a separate slot
+  (``LOGIN_SYNC_SLOT``) so switching it off removes exactly that task. The
+  command itself refuses unattended what needs a person -- ``--unattended``
+  forces ``manual_abort`` on conflicts -- and the process gate refuses it
+  whenever Codex is open, so at worst it does nothing.
 * **User level only.** Task Scheduler runs the task as the current user with
   ``InteractiveToken``/``LeastPrivilege``; launchd gets a LaunchAgent, systemd
   a ``--user`` unit. Nothing asks for elevation, nothing registers as SYSTEM
@@ -59,7 +66,18 @@ _JOB_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "preflight": ("preflight", "--for", "sync"),
     "sync_dry_run": ("sync", "--dry-run"),
 }
+#: The periodic, read-only modes -- what `[scheduler] mode` may name.
 JOB_MODES: tuple[str, ...] = tuple(_JOB_SUBCOMMANDS)
+
+#: The one mutating job: a settings sync once after sign-in, opt-in through
+#: `[scheduler] sync_at_login` and never periodic (`D-016`).
+LOGIN_SYNC_MODE = "sync_at_login"
+_JOB_SUBCOMMANDS[LOGIN_SYNC_MODE] = ("sync", "--apply", "--unattended")
+
+#: Which of this user's two tasks an adapter manages.
+JOB_SLOT = "job"
+LOGIN_SYNC_SLOT = "sync-at-login"
+SLOTS = (JOB_SLOT, LOGIN_SYNC_SLOT)
 
 MIN_INTERVAL_SECONDS = 60
 
@@ -78,13 +96,25 @@ class ScheduledJob:
     """What to run and how often; validated on construction."""
 
     mode: str
-    interval_seconds: int
+    #: ``None`` only for the login sync, which runs once and never repeats.
+    interval_seconds: int | None
     run_at_login: bool
     startup_delay_seconds: int = 0
     jitter_seconds: int = 0
 
     def __post_init__(self) -> None:
-        if self.mode not in _JOB_SUBCOMMANDS:
+        if self.mode == LOGIN_SYNC_MODE:
+            # Once, at sign-in, and nothing else: a repeating or a clock-driven
+            # sync would run while nobody is watching.
+            if self.interval_seconds is not None:
+                raise ValueError("the login sync never repeats: interval_seconds must be None")
+            if self.run_at_login is not True:
+                raise ValueError("the login sync runs at sign-in only: run_at_login must be true")
+            _require_non_negative_int(self.startup_delay_seconds, "startup_delay_seconds")
+            if self.jitter_seconds != 0:
+                raise ValueError("the login sync takes no jitter")
+            return
+        if self.mode not in JOB_MODES:
             raise ValueError(f"Unsupported scheduled job mode: {self.mode!r}; expected one of {', '.join(JOB_MODES)}")
         if (
             isinstance(self.interval_seconds, bool)
@@ -325,7 +355,13 @@ def _default_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
     """
     kwargs: dict[str, Any] = {"encoding": "utf-8"}
     if sys.platform == "win32":
-        kwargs = {"encoding": "oem", "creationflags": subprocess.CREATE_NO_WINDOW}
+        kwargs = {"encoding": "oem"}
+        # The flag is asked of `subprocess`, not assumed from the platform
+        # name: it exists only in the Windows build of the module, and this
+        # module's `sys.platform` is the sort of thing a test patches.
+        no_window = getattr(subprocess, "CREATE_NO_WINDOW", None)
+        if no_window is not None:
+            kwargs["creationflags"] = no_window
     return subprocess.run(
         argv,
         capture_output=True,
@@ -409,8 +445,29 @@ def _platform_key(platform: str | None) -> str:
     raise ValueError(f"Unsupported scheduler platform: {raw}")
 
 
+def _require_slot(slot: str) -> str:
+    if slot not in SLOTS:
+        raise ValueError(f"Unknown scheduler slot: {slot!r}")
+    return slot
+
+
+def _slot_matches_job(slot: str, job: ScheduledJob) -> None:
+    """The login slot runs the login sync and nothing else, and vice versa."""
+    if (slot == LOGIN_SYNC_SLOT) != (job.mode == LOGIN_SYNC_MODE):
+        raise ValueError(f"The {slot} task cannot run the {job.mode} job")
+
+
+def _job_description(job: ScheduledJob) -> str:
+    if job.mode == LOGIN_SYNC_MODE:
+        return "codexSync settings sync once after sign-in; refused while Codex is open"
+    return f"codexSync periodic read-only job ({job.mode})"
+
+
 def system_scheduler(platform: str | None = None, **injections: Any) -> SystemScheduler:
-    """The adapter for this OS (or for ``platform``), with test injections."""
+    """The adapter for this OS (or for ``platform``), with test injections.
+
+    ``slot=LOGIN_SYNC_SLOT`` gives the adapter for the sign-in sync task.
+    """
     key = _platform_key(platform)
     if key == "windows":
         return WindowsTaskScheduler(**injections)
@@ -459,8 +516,14 @@ def task_leaf_name(user_id: str) -> str:
     return f"{LEGACY_TASK_LEAF_NAME} ({cleaned})"
 
 
-def task_name_for(user_id: str) -> str:
+def task_name_for(user_id: str, slot: str = JOB_SLOT) -> str:
+    if _require_slot(slot) == LOGIN_SYNC_SLOT:
+        cleaned = _TASK_NAME_FORBIDDEN.sub("-", user_id.strip()) or "user"
+        return f"{TASK_FOLDER}{LOGIN_SYNC_TASK_LEAF_NAME} ({cleaned})"
     return TASK_FOLDER + task_leaf_name(user_id)
+
+
+LOGIN_SYNC_TASK_LEAF_NAME = "CodexSync Sync at login"
 _TASK_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 
 #: ``SCHED_S_*`` informational values Task Scheduler puts in LastTaskResult
@@ -564,13 +627,14 @@ def render_task_xml(definition: JobDefinition, *, user_id: str, now: datetime) -
     command_text = quote_windows_argument(command)
     arguments_text = " ".join(quote_windows_argument(item) for item in arguments)
 
-    trigger_lines = [
-        "      <Enabled>true</Enabled>",
-        "      <Repetition>",
-        f"        <Interval>{task_duration(job.interval_seconds)}</Interval>",
-        "        <StopAtDurationEnd>false</StopAtDurationEnd>",
-        "      </Repetition>",
-    ]
+    trigger_lines = ["      <Enabled>true</Enabled>"]
+    if job.interval_seconds is not None:
+        trigger_lines += [
+            "      <Repetition>",
+            f"        <Interval>{task_duration(job.interval_seconds)}</Interval>",
+            "        <StopAtDurationEnd>false</StopAtDurationEnd>",
+            "      </Repetition>",
+        ]
     if job.run_at_login:
         tag = "LogonTrigger"
         trigger_lines.append(f"      <UserId>{_xml_escape(user_id)}</UserId>")
@@ -587,7 +651,7 @@ def render_task_xml(definition: JobDefinition, *, user_id: str, now: datetime) -
         '<?xml version="1.0" encoding="UTF-16"?>',
         f'<Task version="1.4" xmlns="{_TASK_NAMESPACE}">',
         "  <RegistrationInfo>",
-        f"    <Description>codexSync periodic read-only job ({_xml_escape(job.mode)}). Managed by codexSync.</Description>",
+        f"    <Description>{_xml_escape(_job_description(job))}. Managed by codexSync.</Description>",
         "  </RegistrationInfo>",
         "  <Triggers>",
         f"    <{tag}>",
@@ -871,8 +935,10 @@ class WindowsTaskScheduler:
         protected_roots: Sequence[Path] | None = None,
         schtasks: str | None = None,
         powershell: str | None = None,
+        slot: str = JOB_SLOT,
     ) -> None:
         self._run = run
+        self._slot = _require_slot(slot)
         self._user_id = user_id or _default_user_id()
         self._sid: str | None | object = _UNREAD
         self._now = now
@@ -888,7 +954,7 @@ class WindowsTaskScheduler:
     @property
     def task_name(self) -> str:
         """This account's task. Another account's task has another name."""
-        return task_name_for(self._user_id)
+        return task_name_for(self._user_id, self._slot)
 
     def current_sid(self) -> str | None:
         """This account's SID, which is what a task records as its principal.
@@ -933,6 +999,7 @@ class WindowsTaskScheduler:
         return candidate == mine or candidate.rsplit("\\", 1)[-1] == mine.rsplit("\\", 1)[-1]
 
     def install(self, job: ScheduledJob, *, command: Sequence[str], config_path: Path, log_dir: Path) -> None:
+        _slot_matches_job(self._slot, job)
         definition = JobDefinition(job, tuple(command), config_path, log_dir)
         payload = self.render(definition)["codexsync-job.xml"]
         # Before anything leaves this process: a staging directory inside the
@@ -958,8 +1025,11 @@ class WindowsTaskScheduler:
 
         Only after the new task is registered, and only when the old one is
         ours: the shared name was installed by every account before CS-257, so
-        the one sitting there may belong to someone else entirely.
+        the one sitting there may belong to someone else entirely. The legacy
+        name only ever held the periodic job.
         """
+        if self._slot != JOB_SLOT:
+            return
         installed, query = self._query_xml(LEGACY_TASK_NAME)
         if not installed:
             return
@@ -1040,6 +1110,8 @@ class WindowsTaskScheduler:
         name = self.task_name
         installed, query = self._query_xml(name)
         codes: list[str] = []
+        if not installed and self._slot != JOB_SLOT:
+            return SchedulerStatus(installed=False, detail="Scheduled task is not installed")
         if not installed:
             # A task installed before the per-account rename still runs, and
             # saying "not installed" about it would invite a second one.
@@ -1102,6 +1174,7 @@ class WindowsTaskScheduler:
 # --------------------------------------------------------------------------
 
 LAUNCHD_LABEL = "io.codexsync.job"
+LAUNCHD_LOGIN_SYNC_LABEL = "io.codexsync.sync-at-login"
 _LAST_EXIT_CODE = re.compile(r"^\s*last exit code\s*=\s*(-?\d+)", re.MULTILINE)
 
 
@@ -1127,8 +1200,11 @@ class LaunchdScheduler:
         uid: int | None = None,
         protected_roots: Sequence[Path] | None = None,
         launchctl: str = "/bin/launchctl",
+        slot: str = JOB_SLOT,
     ) -> None:
         self._run = run
+        self._slot = _require_slot(slot)
+        self.label = LAUNCHD_LOGIN_SYNC_LABEL if self._slot == LOGIN_SYNC_SLOT else LAUNCHD_LABEL
         self._home = Path.home() if home is None else Path(home)
         self._uid = uid if uid is not None else getattr(os, "getuid", lambda: 0)()
         self._protected = tuple(default_protected_roots(self._home) if protected_roots is None else protected_roots)
@@ -1136,7 +1212,7 @@ class LaunchdScheduler:
 
     @property
     def plist_path(self) -> Path:
-        return self._home / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+        return self._home / "Library" / "LaunchAgents" / f"{self.label}.plist"
 
     @property
     def _domain(self) -> str:
@@ -1144,24 +1220,28 @@ class LaunchdScheduler:
 
     @property
     def _service(self) -> str:
-        return f"{self._domain}/{LAUNCHD_LABEL}"
+        return f"{self._domain}/{self.label}"
 
     def definition(self, definition: JobDefinition) -> dict[str, Any]:
         job = definition.job
-        return {
-            "Label": LAUNCHD_LABEL,
+        stem = f"codexsync-{self._slot}"
+        values: dict[str, Any] = {
+            "Label": self.label,
             "ProgramArguments": definition.argv(),
-            "StartInterval": job.interval_seconds,
             "RunAtLoad": job.run_at_login,
-            "StandardOutPath": str(definition.log_dir / "codexsync-job.out.log"),
-            "StandardErrorPath": str(definition.log_dir / "codexsync-job.err.log"),
+            "StandardOutPath": str(definition.log_dir / f"{stem}.out.log"),
+            "StandardErrorPath": str(definition.log_dir / f"{stem}.err.log"),
             "ProcessType": "Background",
         }
+        if job.interval_seconds is not None:
+            values["StartInterval"] = job.interval_seconds
+        return values
 
     def render(self, definition: JobDefinition) -> dict[str, bytes]:
         return {self.plist_path.name: plistlib.dumps(self.definition(definition), sort_keys=True)}
 
     def install(self, job: ScheduledJob, *, command: Sequence[str], config_path: Path, log_dir: Path) -> None:
+        _slot_matches_job(self._slot, job)
         definition = JobDefinition(job, tuple(command), config_path, log_dir)
         payload = self.render(definition)[self.plist_path.name]
         _refuse_protected(self.plist_path, self._protected)
@@ -1170,6 +1250,10 @@ class LaunchdScheduler:
         definition.log_dir.mkdir(parents=True, exist_ok=True)
         _write_atomically(self.plist_path, payload)
         _invoke(self._run, [self.launchctl, "bootout", self._service])  # not loaded is fine
+        if self._slot == LOGIN_SYNC_SLOT:
+            # Loading it now would fire RunAtLoad -- a sync at install time,
+            # not at sign-in. launchd loads every LaunchAgent at the next login.
+            return
         _require_success(
             _invoke(self._run, [self.launchctl, "bootstrap", self._domain, str(self.plist_path)]),
             "Loading the LaunchAgent",
@@ -1231,6 +1315,8 @@ class LaunchdScheduler:
 
 SYSTEMD_SERVICE = "codexsync-job.service"
 SYSTEMD_TIMER = "codexsync-job.timer"
+SYSTEMD_LOGIN_SYNC_SERVICE = "codexsync-sync-at-login.service"
+SYSTEMD_LOGIN_SYNC_TIMER = "codexsync-sync-at-login.timer"
 _SYSTEMD_SAFE = re.compile(r"^[A-Za-z0-9_@+=:,./-]+$")
 
 
@@ -1328,8 +1414,13 @@ class SystemdUserScheduler:
         home: Path | None = None,
         protected_roots: Sequence[Path] | None = None,
         systemctl: str = "systemctl",
+        slot: str = JOB_SLOT,
     ) -> None:
         self._run = run
+        self._slot = _require_slot(slot)
+        login = self._slot == LOGIN_SYNC_SLOT
+        self.service = SYSTEMD_LOGIN_SYNC_SERVICE if login else SYSTEMD_SERVICE
+        self.timer = SYSTEMD_LOGIN_SYNC_TIMER if login else SYSTEMD_TIMER
         self._home = Path.home() if home is None else Path(home)
         self._protected = tuple(default_protected_roots(self._home) if protected_roots is None else protected_roots)
         self.systemctl = systemctl
@@ -1343,19 +1434,39 @@ class SystemdUserScheduler:
 
     def render(self, definition: JobDefinition) -> dict[str, bytes]:
         job = definition.job
+        stem = f"codexsync-{self._slot}"
         exec_start = " ".join(quote_systemd_argument(item) for item in definition.argv())
         service = "\n".join([
             "[Unit]",
-            f"Description=codexSync periodic read-only job ({job.mode})",
+            f"Description={_job_description(job)}",
             "",
             "[Service]",
             "Type=oneshot",
             f"ExecStart={exec_start}",
             "TimeoutStartSec=10min",
-            f"StandardOutput=append:{_systemd_path_value(definition.log_dir / 'codexsync-job.out.log')}",
-            f"StandardError=append:{_systemd_path_value(definition.log_dir / 'codexsync-job.err.log')}",
+            f"StandardOutput=append:{_systemd_path_value(definition.log_dir / f'{stem}.out.log')}",
+            f"StandardError=append:{_systemd_path_value(definition.log_dir / f'{stem}.err.log')}",
             "",
         ])
+        if job.interval_seconds is None:
+            # OnStartupSec counts from the user manager's start, i.e. sign-in,
+            # and an already elapsed one does not fire: enabling the timer now
+            # schedules the next sign-in rather than a sync at install time.
+            timer_text = "\n".join([
+                "[Unit]",
+                "Description=Run codexSync settings sync once after sign-in",
+                "",
+                "[Timer]",
+                f"OnStartupSec={max(job.startup_delay_seconds, 1)}s",
+                "AccuracySec=1s",
+                "Persistent=false",
+                f"Unit={self.service}",
+                "",
+                "[Install]",
+                "WantedBy=timers.target",
+                "",
+            ])
+            return {self.service: service.encode("utf-8"), self.timer: timer_text.encode("utf-8")}
         first_run = max(job.startup_delay_seconds, 1) if job.run_at_login else job.interval_seconds
         timer_lines = [
             "[Unit]",
@@ -1369,13 +1480,14 @@ class SystemdUserScheduler:
         ]
         if job.jitter_seconds > 0:
             timer_lines.append(f"RandomizedDelaySec={job.jitter_seconds}s")
-        timer_lines += ["Persistent=false", f"Unit={SYSTEMD_SERVICE}", "", "[Install]", "WantedBy=timers.target", ""]
+        timer_lines += ["Persistent=false", f"Unit={self.service}", "", "[Install]", "WantedBy=timers.target", ""]
         return {
-            SYSTEMD_SERVICE: service.encode("utf-8"),
-            SYSTEMD_TIMER: "\n".join(timer_lines).encode("utf-8"),
+            self.service: service.encode("utf-8"),
+            self.timer: "\n".join(timer_lines).encode("utf-8"),
         }
 
     def install(self, job: ScheduledJob, *, command: Sequence[str], config_path: Path, log_dir: Path) -> None:
+        _slot_matches_job(self._slot, job)
         definition = JobDefinition(job, tuple(command), config_path, log_dir)
         files = self.render(definition)
         _refuse_protected(self.unit_dir, self._protected)
@@ -1385,34 +1497,34 @@ class SystemdUserScheduler:
         for name, payload in files.items():
             _write_atomically(self.unit_dir / name, payload)
         _require_success(_invoke(self._run, self._ctl("daemon-reload")), "Reloading systemd user units")
-        _require_success(_invoke(self._run, self._ctl("enable", SYSTEMD_TIMER)), "Enabling the timer")
+        _require_success(_invoke(self._run, self._ctl("enable", self.timer)), "Enabling the timer")
         # restart, not start: an already running timer keeps its old schedule
         # until it is re-armed, and an update must take effect now.
-        _require_success(_invoke(self._run, self._ctl("restart", SYSTEMD_TIMER)), "Starting the timer")
+        _require_success(_invoke(self._run, self._ctl("restart", self.timer)), "Starting the timer")
 
     def remove(self) -> bool:
-        paths = [self.unit_dir / SYSTEMD_TIMER, self.unit_dir / SYSTEMD_SERVICE]
+        paths = [self.unit_dir / self.timer, self.unit_dir / self.service]
         existed = any(path.exists() for path in paths)
         if not existed:
             return False
-        _invoke(self._run, self._ctl("disable", "--now", SYSTEMD_TIMER))
+        _invoke(self._run, self._ctl("disable", "--now", self.timer))
         for path in paths:
             path.unlink(missing_ok=True)
         _require_success(_invoke(self._run, self._ctl("daemon-reload")), "Reloading systemd user units")
         return True
 
     def status(self, expected: JobDefinition | None = None) -> SchedulerStatus:
-        timer_path = self.unit_dir / SYSTEMD_TIMER
-        service_path = self.unit_dir / SYSTEMD_SERVICE
+        timer_path = self.unit_dir / self.timer
+        service_path = self.unit_dir / self.service
         if not timer_path.is_file() and not service_path.is_file():
             return SchedulerStatus(installed=False, detail="systemd user timer is not installed")
         notes: list[str] = []
         timer = _invoke(self._run, self._ctl(
-            "show", SYSTEMD_TIMER,
+            "show", self.timer,
             "--property=ActiveState,UnitFileState,LastTriggerUSec,NextElapseUSecRealtime",
         ))
         service = _invoke(self._run, self._ctl(
-            "show", SYSTEMD_SERVICE, "--property=ExecMainStatus,ExecMainExitTimestampMonotonic",
+            "show", self.service, "--property=ExecMainStatus,ExecMainExitTimestampMonotonic",
         ))
         enabled: bool | None = None
         last_run = next_run = None
@@ -1458,7 +1570,7 @@ class SystemdUserScheduler:
             last_result=last_result,
             detail="; ".join(notes),
             definition_matches=matches,
-            task_name=SYSTEMD_TIMER,
+            task_name=self.timer,
             installed_command=_unit_exec_start(service_path),
         )
         return replace(status, codes=classify_task(status, expected))
