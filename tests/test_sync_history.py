@@ -23,7 +23,10 @@ from codexsync.exceptions import ConflictError, FailSafeError
 from codexsync.mutation_journal import JournalState, JournalStore, MutationJournal
 from codexsync.recovery import list_history
 
-from tests.test_recovery import _StoppedGate, _tree, _write_config
+try:
+    from tests.test_recovery import _StoppedGate, _tree, _write_config
+except ImportError:  # collected with tests/ itself on sys.path
+    from test_recovery import _StoppedGate, _tree, _write_config
 
 
 class JournalFieldsTests(unittest.TestCase):
