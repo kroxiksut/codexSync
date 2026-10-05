@@ -175,6 +175,7 @@ macos = [
 ]
 linux = [
   "/usr/lib/chatgpt/",
+  "/@openai/codex/",
   "codex-app-server",
   "codex-linux-sandbox",
   "codex-execve-wrapper",

@@ -52,4 +52,10 @@ class NoConfigScreen(Screen):
             if not chosen:
                 return
             path = Path(chosen)
-        self.host.open_config(Path(path))
+        outcome = self.host.open_config(Path(path))
+        if not outcome.ok:
+            self.host.go_to("first_run")
+            model = self.host.model("first_run")
+            model.result = outcome
+            model.result_is_prompt = False
+            self.host.screen("first_run").render()

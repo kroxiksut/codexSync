@@ -64,6 +64,7 @@ from ..app import (
     save_config_text,
     set_value,
     validate_config_text,
+    validate_config_file,
     apply_session_transfer,
     audit_session_index,
     build_context,
@@ -419,6 +420,12 @@ class Controller:
             )
 
         return run(build)
+
+    def validate_config_candidate(self) -> Outcome:
+        """Prove the selected file is a usable CodexSync config before switching."""
+        if self._config_path is None:
+            return Outcome(failure=Failure.CONFIGURATION, message="No config file was selected")
+        return run(lambda: validate_config_file(self._config_path))
 
     def config_info(self) -> Outcome:
         def build() -> ConfigInfo:

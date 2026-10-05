@@ -13,7 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        # Ubuntu runners are pinned to the maintained runtime releases.
+        os: [windows-latest, macos-latest, ubuntu-24.04, ubuntu-26.04]
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:
@@ -42,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-24.04, ubuntu-26.04]
     env:
       QT_QPA_PLATFORM: offscreen
 
@@ -54,6 +55,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install Ubuntu GUI system dependencies
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1
 
       - name: Install dependencies
         run: |

@@ -40,6 +40,7 @@ from .config_edit import (
     save_config_text,
     set_value,
     validate_config_text,
+    validate_config_file,
 )
 from .config_migrate import (
     ConfigFinding,
@@ -241,6 +242,7 @@ __all__ = [
     "PHASES",
     "ProgressCallback",
     "preview_path",
+    "validate_config_file",
     "GuardianRestorePlan",
     "GuardianAcceptPlan",
     "ShrinkExplanation",

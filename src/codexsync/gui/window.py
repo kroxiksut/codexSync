@@ -456,9 +456,20 @@ class MainWindow(QMainWindow):
         if self._remember is not None and self._controller.config_exists():
             self._remember(self._controller.config_path)
 
-    def open_config(self, path: Path) -> None:
-        """Switch the whole window to another existing config file."""
-        self.config_changed(Path(path))
+    def open_config(self, path: Path) -> Outcome:
+        """Switch only after the selected file proves it is a CodexSync config."""
+        candidate = Controller(Path(path))
+        outcome = candidate.validate_config_candidate()
+        if not outcome.ok:
+            return outcome
+        self._controller = candidate
+        self._config_choice = None
+        self._models = {page: SCREENS[page][1]() for page in PAGES}
+        self._remember_config()
+        self._load_config_info()
+        self._build(self._stack.currentIndex())
+        self._check_config()
+        return outcome
 
     def _remembered_size(self) -> tuple[int, int]:
         """The size to open at: what was kept, never smaller than the minimum.
@@ -767,6 +778,30 @@ def _claim_taskbar_identity() -> None:
         pass
 
 
+def _startup_controller(choice: ConfigChoice) -> tuple[Controller, ConfigChoice]:
+    """Adopt an implicit config only after it proves it belongs to CodexSync.
+
+    Explicit `-c` keeps its historical behavior: the user deliberately named
+    that path, including a missing or invalid file they may want diagnosed.
+    Remembered, current-directory, and executable-adjacent files are only hints.
+    A stale pointer to Codex's own `.codex/config.toml` must never make the
+    whole window run against the wrong configuration.
+    """
+    controller = Controller(choice.path)
+    if choice.path is None or not choice.exists or choice.source == "explicit":
+        return controller, choice
+    outcome = controller.validate_config_candidate()
+    if outcome.ok:
+        return controller, choice
+    rejected = choice.path if choice.source == "remembered" else choice.rejected_remembered
+    return Controller(None), ConfigChoice(
+        path=None,
+        source="none",
+        exists=False,
+        rejected_remembered=rejected,
+    )
+
+
 def launch(config: str | Path | Controller | None = None) -> int:
     """Show the window and run until it closes.
 
@@ -796,7 +831,7 @@ def launch(config: str | Path | Controller | None = None) -> int:
         choice = choose_config_path(
             config, remembered, executable_dir=frozen_executable_dir(),
         )
-        controller = Controller(choice.path)
+        controller, choice = _startup_controller(choice)
     window = MainWindow(controller, settings=settings, choice=choice, remember=write_config_pointer)
     window.show()
     window.place_within_screen()

@@ -245,14 +245,14 @@ class OverviewScreen(Screen):
     # --- the dry run -------------------------------------------------------------
 
     def start_dry_run(self) -> None:
-        """Build and check the sync plan through the gated path; write nothing."""
+        """Build the read-only sync preview; never enter the mutation gate."""
         if self.model.dry_run_busy:
             return
         self.model.dry_run_busy = True
         self.model.dry_run = None
         self.render()
         controller = self.host.controller
-        self.run(lambda: controller.sync(dry_run=True), _apply_dry_run)
+        self.read(controller.preview_sync, _apply_dry_run)
 
     def _render_dry_run(self) -> None:
         model = self.model
@@ -264,12 +264,17 @@ class OverviewScreen(Screen):
             set_tone(self.dry_run_result, None, self.palette_)
         elif outcome.ok:
             result = outcome.value
+            action_count = len(result.to_local) + len(result.to_cloud)
+            conflict_count = len(result.conflicts)
             plan = self.join([
-                self.p("dry_run.plan.actions", result.actions),
-                self.p("dry_run.plan.conflicts", result.conflicts),
+                self.p("dry_run.plan.actions", action_count),
+                self.p("dry_run.plan.conflicts", conflict_count),
             ])
-            self.dry_run_result.setText(f"{self.t('dry_run.done')} {plan}")
-            set_tone(self.dry_run_result, "ok", self.palette_)
+            text = f"{self.t('dry_run.done')} {plan}"
+            if result.volatile:
+                text += f" {self.t('sync.volatile.title')}"
+            self.dry_run_result.setText(text)
+            set_tone(self.dry_run_result, "attention" if result.volatile else "ok", self.palette_)
         else:
             self.dry_run_result.setText(self.failure_text(outcome))
             set_tone(self.dry_run_result, "danger", self.palette_)

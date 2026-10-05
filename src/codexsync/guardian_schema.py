@@ -21,6 +21,9 @@ LEGACY_V1_SCHEMA = "legacy-v1"
 #: ``projectKind``/``projectId`` and app-server ids live in a per-host map
 #: instead of a flat ``project-id-migrations`` table.
 ELECTRON_V2_SCHEMA = "electron-v2"
+#: Observed desktop shape: Electron-style `rootPaths` project entries with
+#: direct string thread bindings. Reads are proven; writes remain unsupported.
+ROOT_PATHS_STRING_BINDINGS_SCHEMA = "root-paths-string-bindings-v1"
 #: Binding kinds this adapter understands. An unfamiliar kind makes the whole
 #: state unrecognised rather than partly understood.
 _ELECTRON_BINDING_KINDS = frozenset({"local", "app-server", "remote"})
@@ -115,6 +118,77 @@ class LegacyV1Adapter:
             ordered_project_ids=tuple(order),
             binding_project_ids=tuple(binding_ids),
             app_server_project_ids=app_server_ids,
+            has_dangling_explicit_binding=has_dangling_explicit_binding,
+        )
+
+
+class RootPathsStringBindingsAdapter:
+    """Observed desktop state with rootPaths projects and string bindings.
+
+    This shape is intentionally a separate schema instead of loosening either
+    existing adapter. It was observed on Ubuntu with every string binding
+    pointing at a current local project, no project-id migrations, and no
+    app-server id map. Recognition only enables reads and reference validation;
+    mutation helpers deliberately do not support this schema.
+    """
+
+    schema_id = ROOT_PATHS_STRING_BINDINGS_SCHEMA
+
+    def extract(self, state: dict[str, Any]) -> StateReferences | None:
+        projects = state.get("local-projects")
+        order = state.get("project-order")
+        if not isinstance(projects, dict) or not isinstance(order, list):
+            return None
+        if not all(isinstance(project_id, str) and project_id for project_id in projects):
+            return None
+        if not all(
+            isinstance(project, dict) and isinstance(project.get(_ELECTRON_ROOT_KEY), list)
+            for project in projects.values()
+        ):
+            return None
+        if not all(isinstance(project_id, str) and project_id for project_id in order):
+            return None
+
+        migrations = state.get("project-id-migrations", {})
+        if not isinstance(migrations, dict) or migrations:
+            return None
+
+        app_server_by_host = state.get("app-server-project-id-by-legacy-project-id-by-host")
+        if app_server_by_host is not None and (
+            not isinstance(app_server_by_host, dict) or app_server_by_host
+        ):
+            return None
+
+        assignments = state.get("thread-project-assignments", {})
+        if not isinstance(assignments, dict) or not all(
+            isinstance(thread_id, str) and thread_id for thread_id in assignments
+        ):
+            return None
+
+        project_ids = frozenset(projects)
+        binding_ids: list[str] = []
+        has_dangling_explicit_binding = False
+        saw_string_binding = False
+        for assigned in assignments.values():
+            if assigned is None:
+                continue
+            if not isinstance(assigned, str) or not assigned:
+                return None
+            saw_string_binding = True
+            has_dangling_explicit_binding |= assigned not in project_ids
+            binding_ids.append(assigned)
+
+        # With no string binding there is no evidence that distinguishes this
+        # from the already-supported Electron rootPaths shape.
+        if not saw_string_binding:
+            return None
+
+        return StateReferences(
+            schema_id=self.schema_id,
+            project_ids=project_ids,
+            ordered_project_ids=tuple(order),
+            binding_project_ids=tuple(binding_ids),
+            app_server_project_ids=frozenset(),
             has_dangling_explicit_binding=has_dangling_explicit_binding,
         )
 
@@ -224,7 +298,11 @@ def _electron_app_server_ids(state: dict[str, Any]) -> frozenset[str] | None:
 #: Tried in order; the first adapter that recognises the state wins and its id
 #: is recorded in the report, so a later runtime change is a new adapter rather
 #: than a loosened old one.
-_ADAPTERS = (LegacyV1Adapter(), ElectronV2Adapter())
+_ADAPTERS = (
+    LegacyV1Adapter(),
+    RootPathsStringBindingsAdapter(),
+    ElectronV2Adapter(),
+)
 
 
 def detect_state_schema(state: dict[str, Any]) -> str | None:
@@ -264,7 +342,7 @@ def project_root_paths(schema_id: str, project: dict[str, Any]) -> tuple[str, ..
         # The keys are aliases of one value. Disagreement means the entry is not
         # understood, and an entry with no readable root is safer than a coin toss.
         return (values[0],) if values and len(set(values)) == 1 else ()
-    if schema_id == ELECTRON_V2_SCHEMA:
+    if schema_id in {ELECTRON_V2_SCHEMA, ROOT_PATHS_STRING_BINDINGS_SCHEMA}:
         roots = project.get(_ELECTRON_ROOT_KEY)
         if not isinstance(roots, list):
             return ()
@@ -327,6 +405,8 @@ def binding_project_id(schema_id: str, value: Any) -> str | None:
             project_id = value.get("project_id")
             return project_id if isinstance(project_id, str) and project_id else None
         return None
+    if schema_id == ROOT_PATHS_STRING_BINDINGS_SCHEMA:
+        return value if isinstance(value, str) and value else None
     if schema_id == ELECTRON_V2_SCHEMA:
         if isinstance(value, dict):
             project_id = value.get("projectId")

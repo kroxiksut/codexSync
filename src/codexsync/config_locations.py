@@ -30,6 +30,8 @@ from pathlib import Path
 import sys
 import tempfile
 
+from .ubuntu_support import current_ubuntu_runtime
+
 CONFIG_NAME = "config.toml"
 #: The file holding the path of the config the window last opened.
 POINTER_NAME = "config-path.txt"
@@ -79,6 +81,20 @@ def pointer_path() -> Path:
     base = os.getenv("XDG_CONFIG_HOME")
     root = Path(base) if base else Path.home() / ".config"
     return root / "codexsync" / POINTER_NAME
+
+
+def suggested_new_config_path() -> Path | None:
+    """Return the safe first-run config location for maintained Ubuntu hosts.
+
+    This is a suggestion only. It never creates, opens, or remembers a file.
+    Other platforms keep their existing first-run behavior.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    runtime = current_ubuntu_runtime()
+    if not runtime.supported:
+        return None
+    return pointer_path().with_name(CONFIG_NAME)
 
 
 def cache_dir() -> Path:
@@ -196,5 +212,6 @@ __all__ = [
     "is_under_temp",
     "pointer_path",
     "read_config_pointer",
+    "suggested_new_config_path",
     "write_config_pointer",
 ]

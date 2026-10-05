@@ -28,8 +28,8 @@ Before your first contribution is accepted, you must agree to the terms in [CLA.
 ## Test and Platform Notes
 
 - Project packaging requires Python `3.11+` (see `pyproject.toml`).
-- CI currently validates on `windows-latest` and `macos-latest`.
-- Linux runtime support is currently out of MVP scope, so Linux CI is intentionally disabled.
+- CI validates on `windows-latest`, `macos-latest`, `ubuntu-24.04`, and `ubuntu-26.04`.
+- Ubuntu runtime support is intentionally limited to maintained targets 24.04 LTS and 26.04 LTS. Other Linux distributions remain out of scope.
 - Markdown files use the lowercase `.md` extension. Document names stay uppercase (`README.md`, `AI_RULES.md`); only the extension is lowercase.
 
 ## Quality and Safety Expectations

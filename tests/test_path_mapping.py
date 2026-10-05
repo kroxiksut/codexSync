@@ -15,6 +15,42 @@ class PathMappingTests(unittest.TestCase):
         self.assertEqual(result.rule_id, "nested")
         self.assertEqual(result.target_path, "/srv/team/repo")
 
+    def test_posix_to_windows_mapping(self) -> None:
+        rules = [
+            PathMappingRule(
+                "ubuntu-to-windows",
+                "ubuntu-workstation",
+                "windows-workstation",
+                "/home/developer/work",
+                "D:\\Work",
+            )
+        ]
+        result = apply_path_mapping(
+            "/home/developer/work/repo",
+            source_machine="ubuntu-workstation",
+            target_machine="windows-workstation",
+            rules=rules,
+        )
+        self.assertEqual(result.target_path, "D:\\Work\\repo")
+
+    def test_windows_to_ubuntu_mapping_is_not_host_specific(self) -> None:
+        rules = [
+            PathMappingRule(
+                "windows-to-ubuntu",
+                "windows-workstation",
+                "ubuntu-workstation",
+                "C:\\Users\\developer\\src",
+                "/home/developer/src",
+            )
+        ]
+        result = apply_path_mapping(
+            "C:\\Users\\developer\\src\\project",
+            source_machine="windows-workstation",
+            target_machine="ubuntu-workstation",
+            rules=rules,
+        )
+        self.assertEqual(result.target_path, "/home/developer/src/project")
+
     def test_boundary_collision_is_not_a_match(self) -> None:
         rules = [PathMappingRule("work", "a", "b", "D:\\Work", "E:\\Work")]
         with self.assertRaisesRegex(PathMappingError, "NO_MAPPING"):

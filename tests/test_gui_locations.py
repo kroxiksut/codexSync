@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 import uuid
 
 from codexsync.gui.locations import (
@@ -19,6 +20,8 @@ from codexsync.gui.locations import (
     find_workspaces,
     machines_in_workspace,
 )
+from codexsync.config_locations import suggested_new_config_path
+from codexsync.ubuntu_support import UbuntuRuntime
 
 SANDBOX = Path(__file__).resolve().parents[1] / "test-sandbox"
 
@@ -84,6 +87,31 @@ class ChoosingTheConfigTests(_Sandbox):
         self.assertIsNone(choice.path)
         self.assertEqual(choice.source, "none")
         self.assertFalse(choice.exists)
+
+
+class SuggestedConfigPathTests(_Sandbox):
+    def test_maintained_ubuntu_suggests_the_local_codexsync_config_path(self) -> None:
+        base = self.root / "xdg" / "codexsync" / "config-path.txt"
+        with patch("codexsync.config_locations.sys.platform", "linux"), \
+                patch(
+                    "codexsync.config_locations.current_ubuntu_runtime",
+                    return_value=UbuntuRuntime("26.04", True, "Ubuntu 26.04"),
+                ), \
+                patch("codexsync.config_locations.pointer_path", return_value=base):
+            self.assertEqual(
+                suggested_new_config_path(),
+                base.with_name(CONFIG_NAME),
+            )
+
+    def test_non_ubuntu_or_other_platform_does_not_invent_a_first_run_path(self) -> None:
+        with patch("codexsync.config_locations.sys.platform", "linux"), \
+                patch(
+                    "codexsync.config_locations.current_ubuntu_runtime",
+                    return_value=UbuntuRuntime("43", False, "Fedora"),
+                ):
+            self.assertIsNone(suggested_new_config_path())
+        with patch("codexsync.config_locations.sys.platform", "win32"):
+            self.assertIsNone(suggested_new_config_path())
 
 
 class FindingAWorkspaceTests(_Sandbox):

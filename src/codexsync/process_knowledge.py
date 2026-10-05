@@ -65,6 +65,7 @@ BACKGROUND_PROCESS_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType({
     ),
     "linux": (
         "/usr/lib/chatgpt/",
+        "/@openai/codex/",
         "codex-app-server",
         "codex-linux-sandbox",
         "codex-execve-wrapper",

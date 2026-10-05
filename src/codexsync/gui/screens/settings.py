@@ -539,7 +539,10 @@ class SettingsScreen(ConfigFormScreen):
             if not chosen:
                 return
             path = Path(chosen)
-        self.host.open_config(Path(path))
+        outcome = self.host.open_config(Path(path))
+        if not outcome.ok:
+            self.model.result = outcome
+            self.render()
 
     def _build_migration(self) -> QWidget:
         """The card that appears when the config was written by an older version.

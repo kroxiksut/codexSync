@@ -940,6 +940,20 @@ def validate_config_text(text: str, *, path: Path) -> AppConfig:
     return parse_config_text(text, base_dir=path.parent.resolve(), source=str(path))
 
 
+def validate_config_file(path: Path) -> AppConfig:
+    """Validate an existing CodexSync config before any UI switches to it.
+
+    Opening a file is not enough evidence that it is a CodexSync config: Codex
+    itself also owns `.codex/config.toml`. Parse the file first, then enforce
+    the same rule used when a config is created or saved: the config file must
+    stay outside the Codex state directory it names.
+    """
+    document = read_config_document(Path(path))
+    cfg = validate_config_text(document.text, path=Path(path))
+    _require_outside_state_dir(cfg, Path(path))
+    return cfg
+
+
 def config_diff(old: str, new: str, *, path_label: str) -> str:
     """Unified diff between two versions of a config; empty when they are equal."""
     if old == new:

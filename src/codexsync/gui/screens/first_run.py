@@ -6,11 +6,14 @@ same loader the command line uses. It does not create, touch or even look inside
 the Codex state directory, and it does not create the workspace folders: those
 appear when an operation that needs them runs.
 
-Where the file goes is the user's to say. The field starts empty -- an earlier
-version proposed a per-user path under %APPDATA% and the rest of the window
-then worked against that path although nobody had created it (CS-268). A path
-that names a file which already exists is a request to *use* that file, so the
-button turns into "open this file" rather than refusing or overwriting it.
+Where the file goes is the user's to say. On maintained Ubuntu releases the
+field suggests the local application config path, but that suggestion is never
+opened or created until the user explicitly chooses to do so. Other platforms
+keep the existing empty first-run field. An earlier version silently adopted a
+per-user path under %APPDATA% and the rest of the window then worked against
+that path although nobody had created or chosen it (CS-268). A path that names
+a file which already exists is a request to *use* that file, so the button turns
+into "open this file" rather than refusing or overwriting it.
 
 A machine name is permanent in practice. Backups, Guardian snapshots and
 session plans are all filed under it, and `[[path_mappings]]` rules on the
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ...config_locations import suggested_new_config_path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog, QFormLayout, QHBoxLayout, QLineEdit
 
@@ -75,7 +79,8 @@ class FirstRunScreen(Screen):
         # A path is only ever set without a file when it was named with `-c`,
         # which is a request to create it there; otherwise the field is empty.
         named = controller.config_path
-        opened = str(named.resolve()) if named is not None else ""
+        suggested = suggested_new_config_path()
+        opened = str(named.resolve()) if named is not None else (str(suggested) if suggested is not None else "")
         # An open file speaks for itself: the form shows what it says, never
         # this computer's host name or a guessed `.codex` beside it.
         loaded = self._loaded_values()
@@ -123,7 +128,7 @@ class FirstRunScreen(Screen):
         self.create_button = button(self.t("first_run.create"), primary=True)
         self.create_button.clicked.connect(self.create)
         self.open_button = button(self.t("first_run.open_existing"))
-        self.open_button.clicked.connect(self.open_existing)
+        self.open_button.clicked.connect(lambda: self.open_existing())
         self.status = label("", wrap=True)
         inner.addWidget(label(self.t("first_run.template"), wrap=True))
         inner.addLayout(row(self.create_button, self.open_button))
@@ -141,6 +146,13 @@ class FirstRunScreen(Screen):
         widget = {"config": self.config_path, "machine": self.machine, "codex": self.codex,
                   "workspace": self.workspace, "mirror": self.mirror}[key]
         self.model.values[key] = widget.currentText() if key == "machine" else widget.text()
+        # A result describes the previous form values. Once any input changes,
+        # keeping that message on screen makes a valid new path look refused.
+        self.model.result = None
+        self.model.result_is_prompt = False
+        if hasattr(self, "status"):
+            self.status.clear()
+            self.status.setVisible(False)
         if key == "config":
             self._render_create_button()
         elif key == "machine":
@@ -229,9 +241,13 @@ class FirstRunScreen(Screen):
             if not chosen:
                 return
             path = Path(chosen)
-        # The window stays here: the form now shows what the file says, which
-        # is the proof it was read; jumping away would hide exactly that.
-        self.host.open_config(Path(path))
+        # Validate before switching. Codex itself owns `.codex/config.toml`,
+        # so an existing TOML file is not evidence that it belongs to CodexSync.
+        outcome = self.host.open_config(Path(path))
+        if not outcome.ok:
+            self.model.result = outcome
+            self.model.result_is_prompt = False
+            self.render()
 
     def create(self) -> None:
         model = self.model

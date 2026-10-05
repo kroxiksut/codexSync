@@ -91,11 +91,28 @@ same commit.
 Do **not** add an entry because the parser looks right. An entry here is a
 statement that someone watched a live Codex and saw it detected.
 
-## Linux
+## Ubuntu
 
-Out of MVP scope (`AI_RULES` 4) and not in CI, but the adapter and the template
-entries exist so that the same procedure works there. The Linux specifics worth
-remembering while running it: `comm` is cut to fifteen characters, so
-`codex-linux-sandbox` shows as `codex-linux-san`, and the desktop preview
-installs under `/usr/lib/chatgpt/`, which is why that path is the marker rather
-than any process name.
+Ubuntu support is deliberately limited to the maintained 24.04 LTS and 26.04 LTS
+runtime targets. CI exercises both releases, but CI does not prove that a live
+Codex installation is detected correctly. Run the same closed/open/command
+procedure above on each Ubuntu release before enabling mutations for that release.
+
+Linux `comm` is cut to fifteen characters, so `codex-linux-sandbox` appears as
+`codex-linux-san`. The desktop package installs helpers under
+`/usr/lib/chatgpt/`. A Node-based Codex CLI installed from the OpenAI package is
+matched by its `/@openai/codex/` command path, never by the generic `node`
+process name.
+
+After a successful observation, add a release-specific proof entry. Do not add a
+generic `linux` entry:
+
+```python
+PROVEN_DETECTORS = {
+    "ubuntu:26.04": "Ubuntu 26.04 LTS, ChatGPT/Codex <version>, observed <date>",
+}
+```
+
+Repeat the experiment independently on Ubuntu 24.04 before adding
+`ubuntu:24.04`. A proof for one Ubuntu release must not open mutations on the
+other release.

@@ -31,7 +31,7 @@ from .session_catalog import SessionCatalog, SessionState, peek_record_formats, 
 from .session_index import SESSION_INDEX_FILE, parse_session_index
 from .sqlite_audit import PlacementStatus, audit_sqlite, read_thread_placements
 from .project_registry import PROVEN_PROJECT_REGISTRY, registry_note
-from .state_locator import locate_state_dirs
+from .state_locator import locate_local_state_dir
 from .sync_engine import STAGE_DIR_PREFIXES
 
 LOG = logging.getLogger(__name__)
@@ -74,10 +74,18 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
         return PreflightReport(checks=checks)
 
     local_dir: Path | None = None
-    cloud_dir: Path | None = None
+    cloud_dir: Path | None = cfg.paths.cloud_root_dir.expanduser()
     try:
-        local_dir, cloud_dir = locate_state_dirs(cfg)
-        checks.append(PreflightCheckResult("state_dirs", "PASS", f"local={local_dir}; cloud={cloud_dir}"))
+        local_dir = locate_local_state_dir(cfg)
+        if cloud_dir.exists() and not cloud_dir.is_dir():
+            checks.append(PreflightCheckResult(
+                "state_dirs", "FAIL", f"Cloud state path is not a directory: {cloud_dir}"
+            ))
+        else:
+            detail = f"local={local_dir}; cloud={cloud_dir}"
+            if not cloud_dir.exists():
+                detail += " (cloud state is not initialized yet)"
+            checks.append(PreflightCheckResult("state_dirs", "PASS", detail))
     except Exception as exc:
         checks.append(PreflightCheckResult("state_dirs", "FAIL", f"State directories are not ready: {exc}"))
 
@@ -208,6 +216,12 @@ def _check_path_available(name: str, directory: Path) -> PreflightCheckResult:
     """A diagnostic availability check that never creates a directory or probe."""
     try:
         if not directory.exists():
+            if name in {"cloud_root", "backup_dir", "temp_dir"}:
+                return PreflightCheckResult(
+                    name,
+                    "WARN",
+                    f"Not initialized yet; CodexSync creates this path when an operation first needs it: {directory}",
+                )
             return PreflightCheckResult(name, "WARN", f"Path does not exist yet: {directory}")
         if not directory.is_dir():
             return PreflightCheckResult(name, "FAIL", f"Path is not a directory: {directory}")

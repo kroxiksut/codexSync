@@ -693,13 +693,26 @@ class OverviewTests(_OverviewCase):
         screen.refresh()
         self.assertIsNone(screen.model.state, "no second job may start")
 
-    def test_the_dry_run_reports_the_plan_and_that_nothing_was_written(self) -> None:
+    def test_the_dry_run_reports_the_read_only_preview_and_never_calls_sync(self) -> None:
         window, controller = self.make()
         screen = window.screen("overview")
         screen.start_dry_run()
-        self.assertIn(("sync", True), controller.calls)
+        self.assertNotIn(("sync", True), controller.calls)
         self.assertIn(window.catalog.text("dry_run.done"), screen.dry_run_result.text())
         self.assertIn(window.catalog.plural("dry_run.plan.actions", 3), screen.dry_run_result.text())
+
+    def test_a_volatile_dry_run_is_shown_as_a_preview_not_a_refusal(self) -> None:
+        controller = FakeController()
+        controller.outcomes["preview_sync"] = Outcome(
+            value=SyncPreview(("a",), (), (), True)
+        )
+        window, _ = self.make(controller=controller)
+        screen = window.screen("overview")
+
+        screen.start_dry_run()
+
+        self.assertIn(window.catalog.text("dry_run.done"), screen.dry_run_result.text())
+        self.assertIn(window.catalog.text("sync.volatile.title"), screen.dry_run_result.text())
 
 
 class OverviewSideTests(_OverviewCase):
@@ -1904,6 +1917,31 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertTrue(outcome.ok, outcome.message)
         return path
 
+    def test_invalid_remembered_codex_config_is_not_adopted_at_startup(self) -> None:
+        from codexsync.config_locations import ConfigChoice
+        from codexsync.gui.window import _startup_controller
+
+        codex_config = self.root / "codex" / "config.toml"
+        codex_config.write_text('[model_providers.openai]\nname = "OpenAI"\n', encoding="utf-8")
+        controller, choice = _startup_controller(
+            ConfigChoice(codex_config, "remembered", True)
+        )
+
+        self.assertIsNone(controller.config_path)
+        self.assertIsNone(choice.path)
+        self.assertEqual(choice.rejected_remembered, codex_config)
+
+    def test_valid_remembered_codexsync_config_is_adopted_at_startup(self) -> None:
+        from codexsync.config_locations import ConfigChoice
+        from codexsync.gui.window import _startup_controller
+
+        path = self._create()
+        controller, choice = _startup_controller(ConfigChoice(path, "remembered", True))
+
+        self.assertEqual(controller.config_path, path)
+        self.assertEqual(choice.path, path)
+        self.assertIsNone(choice.rejected_remembered)
+
     def test_first_run_creates_the_config_and_switches_the_window_to_it(self) -> None:
         missing = self.root / "config.toml"
         window, _ = self.make(controller=Controller(missing))
@@ -1981,7 +2019,12 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertNotIsInstance(window.screen("about"), NoConfigScreen)
         self.assertEqual(window.statusBar().currentMessage(), window.catalog.text("statusbar.no_config"))
         first_run = window.screen("first_run")
-        self.assertEqual(first_run.config_path.text(), "", "no location is proposed")
+        from codexsync.config_locations import suggested_new_config_path
+        suggested = suggested_new_config_path()
+        self.assertEqual(
+            first_run.config_path.text(),
+            "" if suggested is None else str(suggested),
+        )
         self.assertNotIn("AppData", first_run.banner.detail.text())
 
     def test_a_placeholder_page_opens_an_existing_config_anywhere(self) -> None:
@@ -2017,6 +2060,55 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(window.controller.config_path, path)
         self.assertEqual(window.machine_id(), "laptop")
+
+    def test_open_existing_button_does_not_treat_qt_checked_state_as_a_path(self) -> None:
+        path = self._create()
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+
+        with mock.patch(
+            "codexsync.gui.screens.first_run.QFileDialog.getOpenFileName",
+            return_value=(str(path), "TOML (*.toml)"),
+        ):
+            screen.open_button.click()
+
+        self.assertEqual(window.controller.config_path, path)
+        self.assertEqual(window.machine_id(), "laptop")
+
+    def test_picking_codex_own_config_is_refused_without_switching(self) -> None:
+        codex_config = self.root / "codex" / "config.toml"
+        codex_config.write_text(
+            '[model_providers.openai]\nname = "OpenAI"\n',
+            encoding="utf-8",
+        )
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+
+        screen.open_existing(codex_config)
+
+        self.assertIsNone(window.controller.config_path)
+        self.assertFalse(window.controller.config_exists())
+        self.assertIsNotNone(screen.model.result)
+        self.assertFalse(screen.model.result.ok)
+        self.assertIn("paths.cloud_root_dir", screen.model.result.message)
+
+    def test_changing_first_run_inputs_clears_a_stale_open_error(self) -> None:
+        codex_config = self.root / "codex" / "config.toml"
+        codex_config.write_text(
+            '[model_providers.openai]\nname = "OpenAI"\n',
+            encoding="utf-8",
+        )
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        screen.open_existing(codex_config)
+        self.assertNotEqual(screen.status.text(), "")
+        self.assertFalse(screen.status.isHidden())
+
+        screen.config_path.setText(str(self.root / "codexsync-config.toml"))
+
+        self.assertIsNone(screen.model.result)
+        self.assertEqual(screen.status.text(), "")
+        self.assertTrue(screen.status.isHidden())
 
     def test_opening_a_config_shows_what_it_says_and_stays_on_the_page(self) -> None:
         """The machine name came from the host name and stayed there after an open."""
@@ -2067,6 +2159,7 @@ class ConfigScreensTests(_WindowTestCase):
     def test_creating_without_a_location_asks_for_one(self) -> None:
         window, _ = self.make(controller=Controller(None))
         screen = window.screen("first_run")
+        screen.config_path.setText("")
         screen.create()
         self.assertEqual(screen.status.text(), window.catalog.text("first_run.config.required"))
         self.assertIsNone(window.controller.config_path)

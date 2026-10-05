@@ -74,6 +74,32 @@ class PreflightTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_fresh_workspace_paths_are_expected_and_do_not_fail_preflight(self) -> None:
+        root = Path.cwd() / "test-sandbox" / f"preflight-fresh-{uuid.uuid4().hex}"
+        root.mkdir(parents=True, exist_ok=False)
+        try:
+            config_path = _write_config(root)
+            shutil.rmtree(root / "cloud")
+            shutil.rmtree(root / "backups")
+            shutil.rmtree(root / ".tmp")
+
+            report = self._stopped_preflight(config_path)
+            by_name = {item.name: item for item in report.checks}
+
+            self.assertEqual(by_name["state_dirs"].status, "PASS")
+            self.assertEqual(by_name["cloud_root"].status, "WARN")
+            self.assertEqual(by_name["backup_dir"].status, "WARN")
+            self.assertEqual(by_name["temp_dir"].status, "WARN")
+            self.assertIn("Not initialized yet", by_name["cloud_root"].details)
+            self.assertIn("Not initialized yet", by_name["backup_dir"].details)
+            self.assertIn("Not initialized yet", by_name["temp_dir"].details)
+            self.assertTrue(report.is_ok)
+            self.assertFalse((root / "cloud").exists(), "preflight must remain read-only")
+            self.assertFalse((root / "backups").exists(), "preflight must remain read-only")
+            self.assertFalse((root / ".tmp").exists(), "preflight must remain read-only")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_preflight_fails_on_manifest_version_mismatch(self) -> None:
         root = Path.cwd() / "test-sandbox" / f"preflight-manifest-{uuid.uuid4().hex}"
         root.mkdir(parents=True, exist_ok=False)

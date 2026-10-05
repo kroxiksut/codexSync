@@ -32,6 +32,7 @@ from codexsync.config_edit import (
     save_config_text,
     set_value,
     validate_config_text,
+    validate_config_file,
 )
 from codexsync.exceptions import ConfigError, ConflictError, FailSafeError
 
@@ -553,6 +554,16 @@ class SaveConfigTextTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "outside paths.local_state_dir"):
             save_config_text(inner, text, expected_sha256=None)
         self.assertEqual(list(state.iterdir()), [])
+
+    def test_existing_config_inside_the_state_directory_is_refused_before_open(self) -> None:
+        state = self.root / "codex-state"
+        state.mkdir()
+        inner = state / "config.toml"
+        text = _valid_config().replace('"workspace"', '"../workspace"').replace('"codex-state"', '"."')
+        inner.write_text(text, encoding="utf-8")
+
+        with self.assertRaisesRegex(ConfigError, "outside paths.local_state_dir"):
+            validate_config_file(inner)
 
     def test_read_config_document(self) -> None:
         with self.assertRaisesRegex(ConfigError, "Config file not found"):

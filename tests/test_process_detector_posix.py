@@ -48,6 +48,7 @@ LINUX_COMM = """\
   903 codex-execve-wr
   904 node
   905 bwrap
+  906 node
 """
 LINUX_COMMAND = """\
   900 codex --profile default
@@ -56,6 +57,7 @@ LINUX_COMMAND = """\
   903 /usr/lib/chatgpt/codex-execve-wrapper
   904 node /home/someone/project/server.js
   905 bwrap --dev-bind / /
+  906 node /home/someone/.local/lib/node_modules/@openai/codex/bin/codex.js
 """
 
 
@@ -154,12 +156,16 @@ class LinuxMatchingTests(unittest.TestCase):
 
     def test_a_shared_runtime_is_never_matched_by_name(self) -> None:
         self.assertEqual(_match_posix(self.listing, ["node", "bwrap"]), [
-            proc for proc in self.listing if proc.pid in (904, 905)
+            proc for proc in self.listing if proc.pid in (904, 905, 906)
         ], "these names are matchable, which is exactly why the template does not list them")
 
     def test_the_install_path_marker_finds_the_helpers(self) -> None:
         found = _match_posix(self.listing, ["/usr/lib/chatgpt/"])
         self.assertEqual([proc.pid for proc in found], [901, 902, 903])
+
+    def test_the_openai_codex_path_marker_finds_node_cli_without_matching_other_node(self) -> None:
+        found = _match_posix(self.listing, ["/@openai/codex/"])
+        self.assertEqual([proc.pid for proc in found], [906])
 
 
 class CapabilityTests(unittest.TestCase):
