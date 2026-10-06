@@ -10,6 +10,41 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **An interrupted run that replaced nothing no longer blocks the next one.**
+  A journal left at `PREPARED`/`BACKED_UP` by this machine is closed by the
+  next write here (history reason *Abandoned*); a run that entered the commit
+  phase, or another machine's, still waits for a person. `codexsync recover
+  list` shows what is open and what closes each; in the window a sync stopped
+  by an open journal says so in plain words and **Open Recovery** lands on
+  that journal, and the Recovery page names each journal's machine.
+- **A conflict is decided by a rule you set, everywhere** (`D-027`). A file or
+  a chat changed on both machines no longer stops every sync: `[conflict]
+  policy` keeps the newer copy by default (a chat by its last message), or
+  always this machine's, or always the cloud's — in the window, the console
+  and the sign-in task alike. The copy not kept is saved first (backup; a chat
+  whole in the conflict bundle), a choice made by hand still wins, and two chats
+  that end at the same moment are still asked about. A one-way
+  `sync.direction` decides chats too. `--conflict-policy` on `sync`,
+  `handoff sync` and `sessions scan` overrides the rule for one run; a sync
+  that stopped offers *Keep the newer copies* / *this machine's* / *the
+  cloud's* right there, with *Always decide this way*; the Sessions page
+  decides every conflict of a scan at once.
+- **Chat names travel** (`D-025`). A chat's name lives only in Codex's catalogue,
+  so a carried chat showed its first message. Each machine now publishes its
+  chat names, and a full sync sets them on chats unnamed here — never over a
+  name given here (`codexsync sessions names`).
+- **Project folders are checked against the other machine** (`D-026`). Chats
+  travel, project files do not; a full sync now says which projects here lack
+  the other machine's last commit, diverged from it, miss changes left
+  uncommitted there, or hold older files. Nothing is copied or blocked;
+  `codexsync projects files` re-checks.
+- **Chats brought from another machine show up in Codex** (`D-024`). Codex
+  lists chats from its own catalogue, which it filled from the files once; a
+  chat file written afterwards stayed invisible (197 on the laptop, every
+  project "no chats"). A full sync now asks Codex to rebuild that list from
+  the files on its next start — one status row put back to the value Codex
+  itself creates, after a verified backup — and says how many chats will
+  appear. `codexsync sessions catalogue` shows and does the same on its own.
 - **Archived chats follow the other machine** (`D-023`). A chat archived or
   taken out of the archive on one machine is moved the same way on the other:
   written where that machine keeps it, the old file removed after a verified
@@ -399,6 +434,9 @@ metadata.
   The project entry's own `rootPaths` key now settles it in both directions.
 
 ### Changed
+- **`conflict.policy` defaults to `prefer_newer_mtime`** (was `manual_abort`),
+  and an unattended run follows it instead of forcing `manual_abort`
+  (`D-027`, amends `D-016`). Set `manual_abort` to keep the old behaviour.
 - **The scheduled job runs every 30 minutes by default, and at most every 5.**
   A Guardian snapshot every minute was the default, which is far more often
   than the state is worth recording and meant a process sample and a possible
@@ -449,6 +487,31 @@ metadata.
   termination flow it belonged to.
 
 ### Fixed
+
+- **Moving a project with a deep `.git` failed with `WinError 3` and left a
+  partial copy.** The copy goes through a staging folder beside the target,
+  whose name made a 219-character path inside `.git` exceed Windows' 260-character
+  limit; and git's read-only object files then stopped the cleanup. The copy is
+  now made with extended-length paths, read-only files are cleaned up, the scan
+  warns when the finished copy would hold a path a program may not open, and a
+  copy an earlier attempt at the same move left behind is removed first.
+- **A sync failed with `WinError 5` on its own journal and then blocked every
+  later sync.** A cloud client (Yandex.Disk here) opens a file the moment it is
+  written, to upload it; replacing that file while it is held is refused on
+  Windows. Only files copied into `.codex` and the cloud mirror waited such a
+  lock out — the journal, the sync manifest, handoff and project boards,
+  Guardian, the semantic store, saved plans and `config.toml` failed on the
+  first refusal, and a journal left open that way stopped every mutation until
+  `recover` closed it. Every replace in codexSync's own folders now waits up to
+  about six seconds for such a lock; any other error still fails at once.
+- **A long chat stopped every sync as "continued differently on two
+  machines".** Codex 0.160 continues a long chat in a second file
+  (`…-<id>_<other id>.jsonl`); codexSync took it for a stale copy of the same
+  chat, compared it with the first file in the cloud and found nothing in
+  common. A chat is now the chain of its files: each is carried on its own, so
+  the first file's growth and the new part both travel. A chat continued that
+  way earlier had only its second part in the cloud copy; the first part now
+  follows.
 
 - **The sync history said "0 / 0" after a sync that carried chats and
   projects.** A full sync writes three journals — settings files, chats,

@@ -101,6 +101,43 @@ state: Codex closed, a verified backup first, and a rollback through
 keeps projects in `state_*.sqlite`, which codexSync never writes; the sidebar
 follows the JSON file.
 
+### Project folders
+
+Chats and the project list travel; the project's own files do not — they are in
+git, in a cloud folder, or only on one disk. A chat continued against an older
+copy of the code works on the wrong files, so every full sync also compares the
+project folders (`D-026`). Each machine publishes what its folders hold into
+`project-files` beside the manifest: for a git folder the commit, the branch and
+whether changes were left uncommitted; for any other folder every file with
+its size and SHA-256 (tool folders such as `node_modules` or `.venv` left out;
+files over 100 MB by size and time). Only files whose size or time moved are
+read again — the hashes are cached on each machine, outside the workspace. With
+each project goes the last time one of its chats changed there. The next
+machine compares every project — anything may change a folder — and says,
+projects whose chats went on elsewhere first:
+
+- the last commit from the other machine is not here — pull it;
+- both machines committed different work — merge it;
+- the other machine left changes uncommitted that are not here;
+- a plain folder has files that changed later on the other machine, files only
+  it has, or files it deleted that are still here — `projects files` lists them;
+- the folder does not exist here, or exists here and not there.
+
+Folders and files come and go at any time, so nothing is taken from an earlier
+check: every check reads the folders afresh and publishes this machine's side —
+a full sync, `projects files`, and the window on **every start**, which is how a
+machine that has not synced yet still tells the others what it holds. A file
+deleted on a machine is remembered in its publication for 90 days, so the next
+machine can tell "deleted there" from "added here".
+
+Nothing is copied, pulled or blocked, and work that exists only here says
+nothing. Git is used when it is installed, and only to read: it never touches
+the index. In the window, **Projects → Project folders** lists each project
+that did not fully come along with the files under it, and a full sync's result
+has a button there. `codexsync -c config.toml projects files` prints the same
+list, every file included — run it after pulling to see the warning go
+(`--all` lists every project).
+
 ## Repair after a machine handoff
 
 When a project folder moves — renamed, put on another drive, or opened on a second
@@ -165,3 +202,10 @@ unreadable files. Cloud placeholders (Yandex.Disk's, for example) are ordinary
 files, not links. If the state commit fails after the copy, the verified copy
 stays and a new scan recognises it (`copy_complete`), so a rerun only updates
 Codex.
+
+The copy is not held to Windows' 260-character path limit, so a deep `.git`
+moves even where long paths are switched off. The scan still names the longest
+path the new folder will hold when it reaches that limit on such a machine,
+because a program that is not long-path aware may fail to open it there. A copy
+left by an earlier, failed attempt at the same move is reported by the scan and
+removed before the next copy starts.

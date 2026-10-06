@@ -63,6 +63,8 @@ from typing import Any, Protocol
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape as _xml_escape
 
+from .fs_replace import replace_with_retry
+
 
 # --------------------------------------------------------------------------
 # The job: what may run
@@ -477,7 +479,7 @@ def _write_atomically(path: Path, payload: bytes) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()

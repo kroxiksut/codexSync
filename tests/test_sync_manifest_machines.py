@@ -127,9 +127,21 @@ class HandoffTests(_TwoMachines):
         # *B* last looked, which a shared cloud fingerprint could not tell.
         _touch(self.file("b"), "v1 from B", BASE_NS + 20 * SECOND)
         with self.assertRaises(ConflictError):
-            self.sync("b")
+            self.sync("b", extra='\n[conflict]\npolicy = "manual_abort"\n')
         self.assertEqual(self.file("cloud").read_text(encoding="utf-8"), "v1 from A")
         self.assertEqual(self.file("b").read_text(encoding="utf-8"), "v1 from B")
+
+    def test_by_default_the_newer_of_two_edits_wins_and_the_other_is_backed_up(self) -> None:
+        # The same handoff under the default policy (D-027): B's edit is the
+        # later one, so it reaches the cloud, and A's goes into B's backup.
+        self._agreed_start()
+        _touch(self.file("a"), "v1 from A", BASE_NS + 10 * SECOND)
+        self.sync("a")
+        _touch(self.file("b"), "v1 from B", BASE_NS + 20 * SECOND)
+        self.sync("b")
+        self.assertEqual(self.file("cloud").read_text(encoding="utf-8"), "v1 from B")
+        backups = list((self.root / "backups-b").rglob("*"))
+        self.assertTrue(any(path.is_file() for path in backups), "the overwritten copy is backed up first")
 
     def test_each_machine_keeps_its_own_baseline_in_the_one_file(self) -> None:
         self._agreed_start()

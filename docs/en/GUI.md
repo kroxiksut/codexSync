@@ -126,7 +126,10 @@ The cloud → local and local → cloud plan.
 - Search, direction and folder filters change only what is shown: a sync always
   applies the whole plan.
 - Files changed on both sides are listed as conflicts and decided by
-  [`conflict.policy`](SYNC.md#conflicts).
+  [`conflict.policy`](SYNC.md#conflicts). A sync that stopped on a conflict
+  of a file or a chat offers *Keep the newer copies*, *Keep this machine's* and
+  *Keep the cloud's* right under the message, with *Always decide this way* to
+  save the choice as the policy.
 - The **History** tab lists past runs: when, what (settings files, chats,
   projects — one full sync is three rows), result, who started them, what they
   carried and their backup. See [Synchronisation → History](SYNC.md#history).

@@ -64,8 +64,12 @@ codexsync -c config.toml sessions scan --source-machine desktop --target-machine
 
 ## 分叉
 
-分叉永远不会被自动解决 —— 不交错、不按时间戳排序、也没有「新的赢」。两个分支都原样保留，
-计划会被阻塞，直到记录下一个决定：
+分叉永远不会被合并 —— 不交错、不对记录排序。两份副本中保留一份，另一份在替换任何内容之前
+被整体放入冲突包。保留哪一份由 [`conflict.policy`](SYNC.md#冲突) 决定
+（[D-027](../dev/DECISIONS.md)，英文）：默认保留最后一条消息较晚的副本，也可以总是保留本机的
+副本，或总是保留云端的副本（单次扫描可用 `--conflict-policy`）。这样的条目带有
+`RESOLVED_BY_RULE`。在 `manual_abort` 之下，以及对于在同一时刻结束的两份副本
+（`RULE_CANNOT_DECIDE`），计划会被阻塞，直到记录下一个决定：
 
 ```powershell
 codexsync -c config.toml sessions resolve --plan sessions-plan.json --conflict <冲突标识> --choice KEEP_LOCAL --output resolutions.json
@@ -81,6 +85,12 @@ apply 之前决定的冲突。`sessions scan` 恰好在计划里含有这样的�
 一个决定被钉在两个分支的
 确切字节上：如果其中任何一侧之后发生变化，这个决定会以 `STALE_RESOLUTION` 被拒绝，
 而不会被套用到你从未见过的历史上。
+记录下的决定（包括 `DEFER`）总是优先于策略。在窗口中，“会话”页面可以按一条规则一次决定
+一次扫描中的全部冲突（**一次决定全部冲突**），也可以逐个决定。
+
+很长的聊天会由 Codex 在第二个文件 `rollout-…-<id>_<other id>.jsonl` 中继续，这个文件以同一个
+聊天标识开头，并说明它从哪里接续（`history_base`）。聊天就是这一串文件：每个文件各自传输
+（续页会显示 `HISTORY_PAGE`），第一个文件照旧继续增长，两者之间都不算冲突。
 
 记录是否相同由原始字节决定。只有在可以证明毫无歧义的地方才会参考规范化 JSON，因此两条
 不同的记录永远不可能被合并成一条。
@@ -166,10 +176,19 @@ new_chats = "same_path"   # same_path | keep_in_cloud
   `NEW_CHAT_SAME_PATH`。该路径上已有的文件永远不会被覆盖（`DESTINATION_OCCUPIED`）；
   目录把该聊天放在别处或无法读取时，写入仍会被拒绝（`BLOCKED_UNSUPPORTED_BACKEND`）。
 
-Codex 从它的线程目录列出聊天，而 codexSync 不写这个目录，所以使用 `same_path` 时，
-新聊天只有在 Codex 自己接收该文件后才会出现。这在 0.1 时观察到过，但尚未在受控运行中
-验证，因此每次都会检查：启动 Codex 之后，`doctor` 报告 `session_visibility`——这里有多少
-聊天文件不在目录中。`not_listed=0` 表示所有聊天都可见。
+Codex 从它的线程目录列出聊天。它只根据聊天文件填充一次这个目录，之后自行维护。之后才写入的
+文件——也就是来自另一台机器的每个聊天——不在目录中，Codex 也就不显示它。因此完整同步会请
+Codex 根据文件重建列表（`D-024`）：在对目录做了已验证的备份之后，codexSync 把一行状态恢复为
+Codex 创建它时的值，Codex 在下次启动时自己把所有聊天写入列表，那次启动会比平时慢。codexSync
+从不自己把聊天写入目录。`codexsync sessions catalogue` 列出 Codex 列表中没有的聊天文件，加上
+`--confirm-plan` 时单独发出同样的请求。对同一组文件只请求一次；如果 Codex 之后仍有遗漏，同步会
+如实报告，而不会每次再请求。`doctor` 在 `session_visibility` 中报告同一个数字；`not_listed=0`
+表示所有聊天都可见。
+
+聊天的**名称**也不在其文件中：Codex 只把它保存在该目录里，所以迁移过来的聊天起初显示为第一条消息。
+因此每台机器把自己聊天的名称发布到清单旁边的 `chat-names` 中，完整同步会把另一台机器的名称设置给
+本机尚无名称的聊天——绝不覆盖本机起的名称（`D-025`）。Codex 要到下次启动才列出的聊天，会在那之后的
+一次同步中获得名称。`codexsync sessions names` 显示计划，加 `--confirm-plan` 时单独执行同样的操作。
 
 聊天的工作文件夹在本机上可能位于别处。文件不会因此被修改（记录的字节就是它的身份）；
 请用 `[[path_mappings]]` 映射文件夹，或移动项目，见[项目](PROJECTS.md)。

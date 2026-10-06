@@ -1,9 +1,9 @@
 """`sync --apply --unattended`: the sign-in task's command (CS-267, `D-016`).
 
-Nobody is watching this run, so nothing that needs a person may be decided by
-it. The process gate already refuses it while Codex is open -- it goes through
-`build_context(enforce_safety=True)` like any sync -- and this pins the other
-half: a conflict stops it before a write whatever `conflict.policy` says.
+Nobody is watching this run. The process gate refuses it while Codex is open
+-- it goes through `build_context(enforce_safety=True)` like any sync -- and a
+conflict is decided by `conflict.policy`, the person's decision made in
+advance (D-027 amends D-016, which forced `manual_abort` here).
 """
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ import unittest
 from unittest import mock
 import uuid
 
-from codexsync.app import unattended_config
+from codexsync.app import build_context, with_conflict_policy
+from codexsync.exceptions import ConfigError
 from codexsync.cli import main
 from codexsync.config import load_config
 from codexsync.config_edit import create_config, set_value
@@ -39,11 +40,26 @@ class UnattendedSyncTests(unittest.TestCase):
         logging_patch.start()
         self.addCleanup(logging_patch.stop)
 
-    def test_every_conflict_policy_becomes_manual_abort(self) -> None:
+    def test_an_unattended_run_keeps_the_configured_policy(self) -> None:
+        with mock.patch("codexsync.app._make_safety_gate"),                 mock.patch("codexsync.app.locate_state_dirs", return_value=(self.root, self.root)),                 mock.patch("codexsync.app._build_indexes", return_value=({}, {})),                 mock.patch("codexsync.app.build_sync_plan") as plan:
+            ctx = build_context(self.config, enforce_safety=False, unattended=True)
+        self.assertEqual(ctx.config.conflict.policy, "prefer_local")
+        self.assertEqual(plan.call_args.kwargs["conflict_policy"], "prefer_local", "the planner decides by it")
+
+    def test_a_one_run_policy_replaces_only_the_policy(self) -> None:
         cfg = load_config(self.config)
-        self.assertEqual(cfg.conflict.policy, "prefer_local")
-        self.assertEqual(unattended_config(cfg).conflict.policy, "manual_abort")
-        self.assertEqual(unattended_config(cfg).sync, cfg.sync, "nothing else changes")
+        chosen = with_conflict_policy(cfg, "prefer_cloud")
+        self.assertEqual(chosen.conflict.policy, "prefer_cloud")
+        self.assertEqual(chosen.sync, cfg.sync, "nothing else changes")
+        self.assertIs(with_conflict_policy(cfg, None), cfg)
+        with self.assertRaises(ConfigError):
+            with_conflict_policy(cfg, "newest")
+
+    def test_the_cli_passes_a_one_run_policy(self) -> None:
+        with mock.patch("codexsync.cli.build_context") as build, mock.patch("codexsync.cli.run_sync"):
+            code = main(["-c", str(self.config), "sync", "--apply", "--conflict-policy", "prefer_cloud"])
+        self.assertEqual(code, 0)
+        self.assertEqual(build.call_args.kwargs["conflict_policy"], "prefer_cloud")
 
     def test_the_cli_flag_reaches_the_planner(self) -> None:
         with mock.patch("codexsync.cli.build_context") as build, mock.patch("codexsync.cli.run_sync"):

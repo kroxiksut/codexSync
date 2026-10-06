@@ -17,7 +17,8 @@ from .guardian_schema import (
     supports_project_creation,
 )
 from .path_mapping import PathMappingError, PathMappingRule, apply_path_mapping, mapping_digest
-from .session_catalog import SessionCatalog, SessionState
+from .session_catalog import SessionCatalog, SessionState, one_per_chat
+from .fs_replace import replace_with_retry
 
 
 class RepairActionKind(str, Enum):
@@ -84,7 +85,9 @@ def build_repair_plan(
     assignments = state.get("thread-project-assignments", {})
     actions: list[RepairAction] = []
     codes: list[str] = []
-    for session in catalog.descriptors:
+    # One file per chat: a chat continued in pages carries one cwd and needs
+    # one binding, not one per file (CS-356).
+    for session in one_per_chat(catalog.descriptors):
         if session.state in {SessionState.INVALID, SessionState.AMBIGUOUS} or not session.session_id:
             continue
         session_hash = hashlib.sha256(session.session_id.encode("utf-8")).hexdigest()
@@ -196,7 +199,7 @@ def save_repair_plan(plan: RepairPlan, path: Path) -> Path:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(temp, path)
+    replace_with_retry(temp, path)
     if os.name != "nt":
         os.chmod(path, 0o600)
     return path
@@ -342,7 +345,7 @@ def _bind_sessions_left_behind_by_a_remap(
     }
     extra: list[RepairAction] = []
     for project_id, remap in sorted(remaps.items()):
-        for session in catalog.valid:
+        for session in one_per_chat(catalog.valid):
             if not session.session_id or not _under(session.cwd, remap.source_root):
                 continue
             if (session.session_id, project_id) in bound:
@@ -400,7 +403,7 @@ def _remap_orphan_codes(
     for action in actions:
         if action.kind is not RepairActionKind.REMAP_ROOT or not action.project_id:
             continue
-        for session in catalog.valid:
+        for session in one_per_chat(catalog.valid):
             if not session.session_id or not _under(session.cwd, action.source_root):
                 continue
             if (session.session_id, action.project_id) in bound:

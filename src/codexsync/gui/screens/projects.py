@@ -19,9 +19,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from datetime import datetime
+
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QCheckBox, QComboBox, QMenu
+from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtWidgets import QCheckBox, QComboBox, QHeaderView, QMenu, QTreeWidget, QTreeWidgetItem
+
+from .. import theme
 
 from ..controller import Failure, Outcome
 from ..widgets import (
@@ -69,6 +73,9 @@ class ProjectsModel(Model):
         self.move_kind = ""
         self.move_checked: str | None = None
         self.move_result: Outcome | None = None
+        #: The last comparison of project folders with the other machines (D-026).
+        self.files: Outcome | None = None
+        self.files_busy = False
 
     def reset_plans(self) -> None:
         self.directory = None
@@ -77,6 +84,11 @@ class ProjectsModel(Model):
         self.move_scan = None
         self.move_checked = None
         self.move_result = None
+        self.files = None
+
+
+#: What a file that did not come along is, per `ProjectFilesItem` field.
+FILE_FIELDS = ("newer_there", "missing_here", "removed_there")
 
 
 class ProjectsScreen(Screen):
@@ -127,6 +139,34 @@ class ProjectsScreen(Screen):
             self.show_chats_button, self.move_here_button, self.open_folder_button,
         ))
         self.body.addWidget(frame)
+
+        # Chats travel, project folders do not (D-026): which projects and
+        # which files here hold less than another machine had.
+        self.files_summary = label()
+        files, files_inner = card(self.t("projects.files.title"), self.files_summary)
+        files_inner.addWidget(label(self.t("projects.files.caption"), "muted", wrap=True))
+        self.files_tree = QTreeWidget()
+        self.files_tree.setColumnCount(4)
+        self.files_tree.setHeaderLabels([
+            self.t("projects.files.column.what"),
+            self.t("projects.files.column.machine"),
+            self.t("projects.files.column.state"),
+            self.t("projects.files.column.as_of"),
+        ])
+        self.files_tree.setUniformRowHeights(True)
+        header = self.files_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.resizeSection(0, 420)
+        for column in (1, 3):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.files_tree.setMinimumHeight(220)
+        files_inner.addWidget(self.files_tree, stretch=1)
+        self.files_button = button(self.t("projects.files.check"))
+        self.files_button.clicked.connect(self.check_files)
+        files_inner.addLayout(row(self.files_button))
+        self.body.addWidget(files)
 
         repair, repair_inner = card(self.t("projects.repair.title"))
         repair_inner.addWidget(label(self.t("projects.repair.caption"), "muted", wrap=True))
@@ -281,6 +321,71 @@ class ProjectsScreen(Screen):
                     self.projects.blockSignals(blocked)
                 break
         self._render_actions()
+
+    def reveal(self, target: str) -> None:
+        if target == "files":
+            self.show_widget(self.files_tree)
+
+    def check_files(self) -> None:
+        """Read every project folder afresh and compare it with the others."""
+        if self.model.files_busy:
+            return
+        self.model.files_busy = True
+        self.render()
+
+        def apply(model: ProjectsModel, outcome: Outcome) -> None:
+            model.files_busy = False
+            model.files = outcome
+
+        self.read(lambda: self.host.controller.project_files(), apply)
+
+    def _render_files(self) -> None:
+        model = self.model
+        palette = self.palette_
+        self.files_button.setEnabled(not model.files_busy)
+        outcome = model.files
+        if getattr(self, "_files_drawn", None) is outcome and not model.files_busy:
+            return
+        self._files_drawn = outcome
+        self.files_tree.clear()
+        if model.files_busy:
+            self.files_summary.setText(self.t("projects.files.checking"))
+            return
+        if outcome is None:
+            self.files_summary.setText(self.t("projects.files.not_checked"))
+            return
+        if not outcome.ok:
+            self.files_summary.setText(self.failure_text(outcome))
+            set_tone(self.files_summary, "danger", palette)
+            return
+        report = outcome.value
+        warnings = report.warnings
+        if not report.items:
+            self.files_summary.setText(self.t("projects.files.none_published"))
+        elif not warnings:
+            self.files_summary.setText(self.p("projects.files.all_here", len(report.items)))
+        else:
+            self.files_summary.setText(self.p("projects.files.attention", len(warnings)))
+        set_tone(self.files_summary, "attention" if warnings else None, palette)
+        bold = self.files_tree.font()
+        bold.setBold(True)
+        attention = QColor(theme.tone_colour("attention", palette))
+        for item in warnings:
+            state = self.t(f"projects.files.verdict.{item.verdict.value}")
+            if item.chats_there_at:
+                when = datetime.fromtimestamp(item.chats_there_at).strftime("%Y-%m-%d %H:%M")
+                state += " · " + self.t("projects.files.chats_there", when=when)
+            parent = QTreeWidgetItem([item.name, item.peer, state, _local(item.peer_published_at_utc)])
+            parent.setFont(0, bold)
+            parent.setToolTip(0, item.root)
+            parent.setForeground(2, attention)
+            self.files_tree.addTopLevelItem(parent)
+            for field in FILE_FIELDS:
+                for path in getattr(item, field):
+                    child = QTreeWidgetItem([path, "", self.t(f"projects.files.file.{field}"), ""])
+                    child.setToolTip(0, path)
+                    parent.addChild(child)
+            parent.setExpanded(True)
 
     def activated(self) -> None:
         """The screen was just shown; it reads nothing by itself.
@@ -478,6 +583,11 @@ class ProjectsScreen(Screen):
             )]
             if plan.copy_complete:
                 lines.append(self.t("projects.move.copy_complete"))
+            notes = scan.notes
+            if notes is not None and notes.over_path_limit:
+                lines.append(self.t("projects.move.long_paths", length=notes.longest_path))
+            if notes is not None and notes.abandoned_stagings:
+                lines.append(self.p("projects.move.abandoned", len(notes.abandoned_stagings)))
             for code, path in plan.blocked_paths[:8]:
                 lines.append(f"  {self._move_code(code)}: {path}")
             self.move_summary.setText("\n".join(lines))
@@ -589,6 +699,7 @@ class ProjectsScreen(Screen):
             self._fill_move_projects()
             self._move_drawn = model.directory
         self._render_move()
+        self._render_files()
 
     def _fill_actions(self) -> None:
         model = self.model
@@ -672,3 +783,13 @@ class ProjectsScreen(Screen):
         self.status.setText(text)
         set_tone(self.status, tone, palette)
         self.status.setVisible(bool(text))
+
+
+def _local(iso: str) -> str:
+    """A UTC stamp in this machine's time, or a dash."""
+    if not iso:
+        return "—"
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return iso

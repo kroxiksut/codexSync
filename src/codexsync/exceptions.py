@@ -52,9 +52,11 @@ class ChatDecisionsNeeded(ConflictError):
         self.collisions = collisions
         total = format_migrations + held_migrations + divergences + collisions
         super().__init__(
-            f"{total} chat(s) need a decision (`sessions scan --source-machine {source} "
-            f"--target-machine {target}` shows which; {format_migrations} are only a newer record "
-            f"format, decided at once by `sessions resolve --format-migrations`); nothing was written"
+            f"{total} chat(s) need a decision; nothing was written. Decide them all by one rule for "
+            f"this run with `handoff sync --conflict-policy prefer_newer_mtime` (or prefer_local, "
+            f"prefer_cloud), or for every run with `[conflict] policy`; the copy not kept is saved "
+            f"whole in the conflict bundle. To decide one by one: `sessions scan --source-machine "
+            f"{source} --target-machine {target}`"
         )
 
     @property
@@ -80,3 +82,31 @@ class GuardianBusyError(FailSafeError):
 
 class OperationBusyError(FailSafeError):
     """Another mutation operation owns the same local Codex state root."""
+
+
+class RecoveryPendingError(FailSafeError):
+    """An earlier operation's journal is still open, so no mutation may start.
+
+    Still exit 5. The subclass exists so a window can say it in its own
+    language and open its recovery page on that journal, instead of quoting
+    the English text. ``begin`` raises it only after closing this machine's
+    journals that provably replaced nothing, so what is left needs a person.
+    """
+
+    code = "RECOVERY_PENDING"
+
+    def __init__(
+        self, message: str, *, operation_id: str, family: str, state: str, machine: str | None,
+    ) -> None:
+        super().__init__(message)
+        self.operation_id = operation_id
+        self.family = family
+        self.state = state
+        self.machine = machine
+
+    @property
+    def details(self) -> dict[str, object]:
+        return {
+            "operation_id": self.operation_id, "family": self.family,
+            "state": self.state, "machine": self.machine,
+        }

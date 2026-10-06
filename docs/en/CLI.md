@@ -41,20 +41,24 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `state-backup create` | **yes** | Take one verified copy of `.codex`; `--wait` waits for Codex to close | [Configuration](CONFIGURATION.md#copies-of-codex) |
 | `state-backup list` | no | List the copies in `[state_backup] root_dir` | [Configuration](CONFIGURATION.md#copies-of-codex) |
 | `handoff status` | no | Which machine is working, what each handed off, what arrived here | [Synchronisation](SYNC.md#handing-work-over) |
-| `handoff sync` | **yes** | Load what other machines handed off, then hand off this one; stops on any conflict | [Synchronisation](SYNC.md#handing-work-over) |
+| `handoff sync` | **yes** | Load what other machines handed off, then hand off this one; conflicts decided by `conflict.policy` (`--conflict-policy` for one run) | [Synchronisation](SYNC.md#handing-work-over) |
 | `handoff watch` | **yes** | The watcher the task at sign-in runs: loads at start, hands off when Codex closes | [Synchronisation](SYNC.md#handing-work-over) |
 | `sessions scan` | no | Classify every session branch on both sides | [Sessions](SESSIONS.md) |
 | `sessions resolve` | no | Record one decision about a divergence | [Sessions](SESSIONS.md#divergences) |
 | `sessions apply` | **yes** | Transfer whole branches under one confirmed plan | [Sessions](SESSIONS.md#applying-a-plan) |
 | `sessions index` | no | Report what each `session_index.jsonl` holds | [Sessions](SESSIONS.md#the-session-index) |
+| `sessions names` | **yes** | Chat names other machines show; with `--confirm-plan`, set them on chats unnamed here | [Sessions](SESSIONS.md#writing-into-codex) |
+| `sessions catalogue` | **yes** | List chat files Codex does not show; with `--confirm-plan`, ask Codex to rebuild its chat list | [Sessions](SESSIONS.md#writing-into-codex) |
 | `chats list` / `chats tree` | no | Find chats and see which project each is in | [Projects](PROJECTS.md#chats) |
 | `chats move` | **yes** | Put chosen chats under one project | [Projects](PROJECTS.md#moving-chats-to-a-project) |
 | `projects sync` | **yes** | Merge other machines' project lists into this one, then publish this one's (preview without `--confirm-plan`) | [Projects](PROJECTS.md#projects-between-machines) |
+| `projects files` | no | Whether this machine's project folders hold what other machines last had | [Projects](PROJECTS.md#project-folders) |
 | `repair-projects scan` | no | Build an immutable, hashed repair plan | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `repair-projects apply` | **yes** | Apply one exact plan, quoted by its id | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `project-move scan` | no | Hash a project and plan copying it to a new folder | [Projects](PROJECTS.md#moving-a-projects-files) |
 | `project-move apply` | **yes** | Copy, verify, then point Codex at the new folder | [Projects](PROJECTS.md#moving-a-projects-files) |
 | `history` | no | List past writes of every kind (or one kind) from their journals | [Sync](SYNC.md#history) |
+| `recover list` | no | List open mutation journals and what closes each (`--all`, `--json`) | [Recovery](RECOVERY.md#interrupted-mutations) |
 | `recover inspect` | no | Read one mutation journal without side effects | [Recovery](RECOVERY.md#interrupted-mutations) |
 | `recover resume` / `rollback` | **yes** | Close an interrupted mutation | [Recovery](RECOVERY.md#interrupted-mutations) |
 

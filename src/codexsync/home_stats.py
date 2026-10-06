@@ -42,6 +42,7 @@ from .runtime import sample_process_state
 from .safety_gate import ProcessState
 from .session_catalog import SessionState
 from .state_backup import list_state_backups
+from .fs_replace import replace_with_retry
 
 __all__ = [
     "HomeSummary",
@@ -248,7 +249,7 @@ def write_state_stats(config_path: Path, stats: StateStats, *, cache_root: Path 
         target.parent.mkdir(parents=True, exist_ok=True)
         staged = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         staged.write_text(json.dumps({"format": CACHE_FORMAT, **asdict(stats)}, indent=2) + "\n", encoding="utf-8")
-        os.replace(staged, target)
+        replace_with_retry(staged, target)
     except OSError:
         return False
     return True

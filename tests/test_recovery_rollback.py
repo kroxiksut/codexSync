@@ -152,6 +152,47 @@ class CommitGlobalStateFailureTests(_Sandbox):
         self.assertEqual(self._only_journal().state, JournalState.FAILED)
         self.assertEqual(self.journals.non_terminal(), [])
 
+    def _locked_state_file(self, failures: int | None, during_wait=None):
+        """`os.replace` onto the state file is refused the way a held handle refuses it."""
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def replace(src, dst):
+            if Path(dst) != self.state_file:
+                return real_replace(src, dst)
+            calls["n"] += 1
+            if failures is None or calls["n"] <= failures:
+                if during_wait is not None:
+                    during_wait()
+                exc = PermissionError(13, "Access is denied")
+                exc.winerror = 5
+                raise exc
+            return real_replace(src, dst)
+
+        return patch("os.replace", side_effect=replace), calls
+
+    def test_a_lock_on_the_state_file_is_waited_out(self) -> None:
+        locked, calls = self._locked_state_file(failures=2)
+        with locked, patch("time.sleep"):
+            self._commit(_StoppedGate())
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(self.state_file.read_bytes(), self.candidate)
+        self.assertEqual(self._only_journal().state, JournalState.COMMITTED)
+
+    def test_a_state_that_moves_while_a_lock_is_waited_out_is_never_overwritten(self) -> None:
+        moved = _state(self.root.as_posix(), order=["p-alpha"])
+
+        def codex_writes() -> None:
+            self.state_file.write_bytes(moved)
+
+        locked, calls = self._locked_state_file(failures=None, during_wait=codex_writes)
+        with locked, patch("time.sleep"):
+            with self.assertRaises(FailSafeError):
+                self._commit(_StoppedGate())
+        self.assertEqual(calls["n"], 1, "the retry re-reads the file before trying again")
+        self.assertEqual(self.state_file.read_bytes(), moved, "the newer state survives")
+        self.assertEqual(self.journals.non_terminal(), [])
+
 
 class GlobalStateRollbackTests(_Sandbox):
     """CS-292: the global state goes back through `commit_global_state`."""

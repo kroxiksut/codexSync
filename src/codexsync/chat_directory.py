@@ -53,6 +53,7 @@ from .session_catalog import (
     SessionCatalog,
     SessionDescriptor,
     SessionState,
+    one_per_chat,
     scan_sessions,
 )
 
@@ -200,9 +201,12 @@ def build_chat_directory(
     # The second pass: every descriptor's file is opened again for its meta
     # record and its title, which is why this phase is reported separately
     # from the hashing that produced the catalogue.
-    total = len(catalog.descriptors)
+    # A chat continued in pages is one chat, listed by the file it began in
+    # (CS-356); every page opens with the same `session_meta`.
+    listed = one_per_chat(catalog.descriptors)
+    total = len(listed)
     report(progress, "chats", 0, total)
-    for done, descriptor in enumerate(catalog.descriptors, start=1):
+    for done, descriptor in enumerate(listed, start=1):
         report(progress, "chats", done, total)
         if not descriptor.session_id:
             continue

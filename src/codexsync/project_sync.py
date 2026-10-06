@@ -60,6 +60,7 @@ from .guardian_schema import (
     project_root_paths,
 )
 from .version import PRODUCER_VERSION
+from .fs_replace import replace_with_retry
 
 LOG = logging.getLogger(__name__)
 
@@ -393,7 +394,7 @@ def write_publication(root: Path, publication: Publication) -> Path:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(staging, target)
+        replace_with_retry(staging, target)
     finally:
         if staging.exists():
             try:

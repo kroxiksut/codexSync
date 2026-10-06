@@ -30,6 +30,8 @@ from pathlib import Path
 import sys
 import tempfile
 
+from .fs_replace import replace_with_retry
+
 CONFIG_NAME = "config.toml"
 #: The file holding the path of the config the window last opened.
 POINTER_NAME = "config-path.txt"
@@ -136,7 +138,7 @@ def write_config_pointer(config: Path, pointer: Path | None = None) -> bool:
         target.parent.mkdir(parents=True, exist_ok=True)
         staged = target.with_name(f".{target.name}.{os.getpid()}.tmp")
         staged.write_text(value + "\n", encoding="utf-8")
-        os.replace(staged, target)
+        replace_with_retry(staged, target)
     except OSError:
         return False
     return True

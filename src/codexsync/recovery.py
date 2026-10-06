@@ -42,7 +42,14 @@ from .exceptions import ConfigError, FailSafeError
 from .guardian_models import ValidationStatus
 from .guardian_schema import validate_global_state_references
 from .models import AppConfig, SyncPlan
-from .mutation_journal import TERMINAL, JournalState, JournalStore, MutationJournal
+from .mutation_journal import (
+    BEFORE_COMMIT,
+    TERMINAL,
+    JournalState,
+    JournalStore,
+    MutationJournal,
+    owned_by,
+)
 from .operation_lock import OperationLock
 from .restore import (
     _backup_manifest_path,
@@ -112,6 +119,14 @@ class JournalInfo:
     #: Why ``recover rollback`` would refuse this journal; ``None`` when it
     #: would not (or when the journal cannot be read at all).
     rollback_refusal: str | None = None
+    #: The machine the journal records; ``None`` for journals of older builds.
+    machine_id: str | None = None
+    #: Whether this machine ran it (``mutation_journal.owned_by``).
+    own: bool = False
+    #: Whether the next mutation here closes it by itself: this machine's, and
+    #: stopped before the commit phase, so nothing was replaced. Anything else
+    #: still open waits for ``recover resume`` or ``recover rollback``.
+    closes_itself: bool = False
 
 
 def list_journals(config_path: Path) -> list[JournalInfo]:
@@ -130,8 +145,9 @@ def list_journals(config_path: Path) -> list[JournalInfo]:
     store = JournalStore(cfg.paths.temp_dir)
     if not store.root.is_dir():
         return []
+    machine = cfg.identity.machine_id or platform.node()
     result = [
-        _describe_journal(store, path, cfg.paths.backup_dir)
+        _describe_journal(store, path, cfg.paths.backup_dir, machine)
         for path in store.root.glob("*.json")
         if path.is_file()
     ]
@@ -159,7 +175,7 @@ def list_history(
     return items if limit is None else items[:max(limit, 0)]
 
 
-def _describe_journal(store: JournalStore, path: Path, backup_root: Path) -> JournalInfo:
+def _describe_journal(store: JournalStore, path: Path, backup_root: Path, machine: str) -> JournalInfo:
     operation_id = path.stem
     try:
         journal: MutationJournal | None = store.load(operation_id)
@@ -168,6 +184,7 @@ def _describe_journal(store: JournalStore, path: Path, backup_root: Path) -> Jou
     if journal is not None and journal.operation_id == operation_id:
         terminal = journal.state in TERMINAL
         refusal = None if terminal else _rollback_refusal(journal, backup_root)
+        own = owned_by(journal, machine)
         return JournalInfo(
             operation_id=operation_id,
             family=journal.family,
@@ -185,6 +202,9 @@ def _describe_journal(store: JournalStore, path: Path, backup_root: Path) -> Jou
             finished_at_utc=journal.finished_at_utc,
             failure=journal.failure,
             rollback_refusal=refusal,
+            machine_id=journal.machine_id,
+            own=own,
+            closes_itself=own and journal.state in BEFORE_COMMIT,
         )
     # Unreadable, or it claims another operation's identity, which
     # ``_load_recoverable`` refuses. Salvage correctly typed fields for display.
@@ -355,7 +375,7 @@ def rollback_operation(
 
 
 #: Journal states that prove the commit phase was never entered.
-_BEFORE_COMMIT = frozenset({JournalState.PREPARED, JournalState.BACKED_UP})
+_BEFORE_COMMIT = BEFORE_COMMIT
 #: Families whose only write is `.codex-global-state.json`, through
 #: `app.commit_global_state`; they are rolled back through it too.
 _GLOBAL_STATE_FAMILIES = frozenset({"repair", "chats", "guardian-restore", "project-move", "project-sync"})

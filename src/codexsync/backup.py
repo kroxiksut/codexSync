@@ -6,7 +6,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import re
 import shutil
 import time
 from uuid import uuid4
@@ -14,7 +13,8 @@ import zipfile
 
 from .exceptions import FailSafeError
 from .guardian_models import normalize_machine_id
-from .mutation_journal import JournalStore
+from .mutation_journal import JournalStore, snapshot_belongs_to
+from .fs_replace import replace_with_retry
 
 LOG = logging.getLogger(__name__)
 
@@ -37,9 +37,7 @@ class BackupManager:
         self._max_backups = max_backups
         self._compression = compression
         safe_machine = normalize_machine_id(machine_id) or "unknown-machine"
-        self._own_snapshot = re.compile(
-            rf"^{re.escape(safe_machine)}-\d{{8}}T\d{{6}}Z-[0-9a-f]{{12}}(\.zip)?$"
-        )
+        self._machine_id = machine_id
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         operation_suffix = uuid4().hex[:12]
         self._snapshot_path = (
@@ -104,7 +102,7 @@ class BackupManager:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, manifest_path)
+        replace_with_retry(temp, manifest_path)
         return manifest_path
 
     def prune(self) -> None:
@@ -142,7 +140,7 @@ class BackupManager:
         snapshots = [
             path
             for path in self._backup_root.iterdir()
-            if self._own_snapshot.match(path.name)
+            if snapshot_belongs_to(path.name, self._machine_id)
             and path.name not in protected
             and (path.is_dir() if path.suffix.lower() != ".zip" else _is_snapshot_zip(path))
         ]

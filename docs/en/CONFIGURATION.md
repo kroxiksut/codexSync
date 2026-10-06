@@ -57,7 +57,7 @@ owner that removes files from it on its own schedule. A path written with the
 | `[sync]` | Comparison, direction, deletions, dry run by default | [Synchronisation](SYNC.md) |
 | `[targets]` | `include_roots`: what under `.codex` takes part in `sync` | [Synchronisation](SYNC.md#what-is-synced) |
 | `[filters]` | `exclude_globs`: what is never copied | [Synchronisation](SYNC.md#what-is-synced) |
-| `[conflict]` | `policy` for a file changed on both sides | [Synchronisation](SYNC.md#conflicts) |
+| `[conflict]` | `policy` for a file or chat changed on both sides (default: keep the newer) | [Synchronisation](SYNC.md#conflicts) |
 | `[backup]` | Retention and format of backups | [Recovery](RECOVERY.md#backups) |
 | `[guardian]` | Snapshot store, polling, shrink thresholds, retention | [Guardian](GUARDIAN.md#settings) |
 | `[semantic]` | Conflict bundles, mirror compression | [Sessions](SESSIONS.md#the-cloud-mirror) |
@@ -193,9 +193,9 @@ codexsync -c config.toml automation run      # run the configured job once, now
   signing in* checkbox) is the one exception and is off by default. It installs
   a second task that runs `sync --apply --unattended` once after you sign in,
   after `startup_delay_seconds`, and never repeats. It goes through the same
-  checks as a manual sync: it is refused while Codex is open (exit 3), and
-  `--unattended` turns every conflict into a stop before any write (exit 2),
-  whatever `conflict.policy` says. It syncs the settings tree only — sessions
+  checks as a manual sync: it is refused while Codex is open (exit 3), and a
+  conflict is decided by `conflict.policy` as in any run; one the policy leaves
+  open stops it before any write (exit 2). It syncs the settings tree only — sessions
   are never transferred by a task. If Codex starts with Windows, it will be open
   by the time the task runs and the sync will simply be skipped; take Codex out
   of autostart if you want this to work. The window shows the task's last run

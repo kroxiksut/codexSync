@@ -86,7 +86,7 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("sync", "compare", "choice", "mtime", ("mtime", "mtime_hash_fallback")),
         Field("sync", "time_tolerance_seconds", "int", 0, maximum=3600),
         Field("sync", "equal_mtime_action", "choice", "skip", ("skip", "prefer_local", "prefer_cloud", "manual_abort")),
-        Field("conflict", "policy", "choice", "manual_abort", ("manual_abort", "prefer_cloud", "prefer_local", "prefer_newer_mtime")),
+        Field("conflict", "policy", "choice", "prefer_newer_mtime", ("prefer_newer_mtime", "prefer_local", "prefer_cloud", "manual_abort")),
         Field("conflict", "report_conflicts", "bool", True),
         Field("sync", "dry_run_default", "bool", True),
         Field("targets", "include_roots", "lines", []),

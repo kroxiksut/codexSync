@@ -102,14 +102,35 @@ differ:
 
 ## Conflicts
 
-A file changed on both sides since the last run is a conflict. `conflict.policy`:
+A file or a chat changed on both sides since the last run is a conflict. One
+rule decides both, in every run — the window, the console and the task at
+sign-in ([D-027](../dev/DECISIONS.md)). `conflict.policy`:
 
 | Policy | What happens |
 |---|---|
-| `manual_abort` (default) | Report the conflict and stop before anything is written (exit code `2`) |
-| `prefer_cloud` | Take the cloud version |
-| `prefer_local` | Take the local version |
-| `prefer_newer_mtime` | Take the side with the newer modification time |
+| `prefer_newer_mtime` (default) | Keep the newer copy: a file by its modification time, a chat by the time of its last message |
+| `prefer_local` | Keep this machine's copy |
+| `prefer_cloud` | Keep the cloud's copy |
+| `manual_abort` | Report the conflict and stop before anything is written (exit code `2`) |
+
+The copy not kept is never lost: a file goes into the verified backup before it
+is overwritten, and a chat goes whole into the conflict bundle under
+`semantic.root_dir` (see [Sessions](SESSIONS.md#applying-a-plan)). A chat is
+never merged: one of the two copies is kept. Two chats that end at the same
+moment cannot be ordered by time, so `prefer_newer_mtime` still asks about
+them, and a choice you recorded on the Sessions page for a chat always outranks
+the rule.
+
+For one run, `--conflict-policy` on `sync`, `handoff sync` and `sessions scan`
+replaces the setting:
+
+```powershell
+codexsync -c config.toml handoff sync --conflict-policy prefer_local
+```
+
+In the window, a sync that stopped on a conflict offers the same choice where
+it stopped — *Keep the newer copies*, *Keep this machine's*, *Keep the cloud's*
+— and *Always decide this way* saves it as `conflict.policy`.
 
 A conflict the policy does not decide — equal times with
 `equal_mtime_action = "manual_abort"`, a disputed deletion — stops the run
@@ -128,8 +149,12 @@ case-insensitive volume stores as one file.
 A one-way run does **not** record the side it skipped as synchronised: the
 manifest keeps the previous entry for every path it did not act on, so the next
 bidirectional run still sees the difference instead of concluding that the two
-sides agreed. A conflict stays a conflict and is decided by `conflict.policy`.
-`validate`, `doctor` and the plan report state the direction.
+sides agreed. A file conflict stays a conflict and is decided by
+`conflict.policy`. For chats a one-way direction is the decision as well:
+`to_cloud` keeps this machine's copy of a chat changed on both machines and
+writes nothing into `.codex`, `to_local` keeps the cloud's and writes nothing
+into the cloud copy. `validate`, `doctor` and the plan report state the
+direction.
 
 ## Deletions
 
@@ -178,9 +203,10 @@ codexsync -c config.toml handoff watch                    # what the task at sig
 
 A handoff is one full sync with nobody deciding anything: settings as
 `sync --apply --unattended` does them, then chats as `sessions apply` does
-them, with the chat plan checked first. **Any conflict — of a file or of a
-chat — stops it before the first write**, and a chat is never merged. Only
-when both halves finished does the machine record the handoff.
+them, with the chat plan checked first. Conflicts — of files and of chats —
+are decided by [`conflict.policy`](#conflicts); **a conflict the policy leaves
+open stops it before the first write**, and a chat is never merged. Only when
+both halves finished does the machine record the handoff.
 
 Each machine keeps one small file in `root_dir`: whether it is *working*
 (Codex was seen running) or has *handed off*, the id of its last handoff, a
@@ -245,6 +271,6 @@ backup it made. A journal written before these fields were recorded shows only
 its total.
 
 Not listed: a dry run, which writes nothing, and a run that stopped before its
-first write — Codex open, or a conflict under `manual_abort`. The window shows
+first write — Codex open, or a conflict the policy left open. The window shows
 the same list on the **History** tab of *Synchronisation*, and the last run on
 *Overview*.

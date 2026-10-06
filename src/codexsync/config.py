@@ -301,7 +301,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         listed="include_roots" in targets_raw,
     )
     conflict = ConflictConfig(
-        policy=conflict_raw.get("policy", "manual_abort"),
+        policy=conflict_raw.get("policy", "prefer_newer_mtime"),
         report_conflicts=_bool_value(conflict_raw, "report_conflicts", True, "conflict.report_conflicts"),
     )
     state = StateConfig(

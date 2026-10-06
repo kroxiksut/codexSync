@@ -284,6 +284,11 @@ class FormatMigrationApplyTests(_Sandbox):
 
             [state]
             manifest_file = "{(self.root / 'state' / 'manifest.json').as_posix()}"
+
+            [conflict]
+            # These tests decide by hand; the default decides by time (D-027),
+            # which `test_conflict_rules` covers.
+            policy = "manual_abort"
             """).strip() + "\n", encoding="utf-8")
         self.plan_path = self.root / "plan.json"
         self.resolutions = self.root / "resolutions.json"

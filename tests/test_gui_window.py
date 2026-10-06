@@ -166,8 +166,11 @@ class FakeController(Controller):
         written = 0 if kwargs.get("confirm_plan") is None else 1
         return self._answer("move_chats", Outcome(value=(_move_plan(), written)))
 
-    def scan_sessions(self, *, source_machine, target_machine, progress=None) -> Outcome:
-        self.calls.append(("scan_sessions", source_machine, target_machine))
+    def scan_sessions(self, *, source_machine, target_machine, progress=None, conflict_policy=None) -> Outcome:
+        self.calls.append(
+            ("scan_sessions", source_machine, target_machine)
+            + ((conflict_policy,) if conflict_policy is not None else ())
+        )
         return self._answer("scan_sessions", Outcome(value=SessionScan(_transfer_plan(conflict=False), Path("C:/p/s.json"), Path("C:/p/r.json"), False)))
 
     def resolve_session_conflict(self, scan, *, conflict_id, choice) -> Outcome:
@@ -334,9 +337,21 @@ class FakeController(Controller):
     def handoff(self) -> Outcome:
         return self._answer("handoff", Outcome(failure=Failure.CONFIGURATION, message="not in this test"))
 
-    def handoff_now(self, *, progress=None) -> Outcome:
-        self.calls.append(("handoff_now",))
+    def handoff_now(self, *, progress=None, conflict_policy=None) -> Outcome:
+        self.calls.append(("handoff_now",) + ((conflict_policy,) if conflict_policy is not None else ()))
         return self._answer("handoff_now", Outcome(failure=Failure.CODEX_NOT_STOPPED, message="open"))
+
+    def remember_conflict_policy(self, policy) -> Outcome:
+        self.calls.append(("remember_conflict_policy", policy))
+        return self._answer("remember_conflict_policy", Outcome(value=True))
+
+    def project_files(self) -> Outcome:
+        # The real one reads every project folder and publishes into the
+        # workspace of whatever config.toml sits in the working directory.
+        self.calls.append(("project_files",))
+        from codexsync.app import ProjectFilesReport
+
+        return self._answer("project_files", Outcome(value=ProjectFilesReport("laptop")))
 
 
 
@@ -729,14 +744,75 @@ class OverviewSideTests(_OverviewCase):
         self.assertIn(window.catalog.plural("common.minutes", 15), screen.automation_line.text())
 
 
-def _full_sync_result(*, added: int = 0, missing: int = 0, not_loaded: int = 0, new_in_cloud: int = 0):
+def _full_sync_result(
+    *, added: int = 0, missing: int = 0, not_loaded: int = 0, new_in_cloud: int = 0,
+    will_list: int = 0, ignored: int = 0,
+):
     from types import SimpleNamespace
 
     return SimpleNamespace(
         sync_actions=2, session_actions=1, projects_added=added, projects_missing_folders=missing,
         chats_not_loaded=not_loaded, new_chats_kept_in_cloud=new_in_cloud,
+        chats_codex_will_list=will_list, chats_codex_ignores=ignored,
+        chat_names_set=0, chat_names_kept=0, chat_names_waiting=0, project_files_behind=(),
         machine="laptop", source="machine-a",
     )
+
+
+def _files_report():
+    from codexsync.app import ProjectFilesItem, ProjectFilesReport
+    from codexsync.project_files import Verdict
+
+    return ProjectFilesReport("laptop", (
+        ProjectFilesItem(
+            "p1", "book", "D:/w/book", "desktop", Verdict.FILES_CHANGED_THERE, "2026-10-04T06:00:00Z",
+            ("ch2.md",), ("ch3.md",), ("old.md",), 1775000000,
+        ),
+        ProjectFilesItem("p2", "site", "D:/w/site", "desktop", Verdict.IN_STEP, "2026-10-04T06:00:00Z"),
+    ), True)
+
+
+class ProjectFilesTests(_WindowTestCase):
+    """D-026: which projects and which files did not come along."""
+
+    def test_every_start_checks_the_folders_once(self) -> None:
+        window, controller = self.make()
+        self.pump(lambda: ("project_files",) in controller.calls, seconds=5)
+        self.assertEqual(controller.calls.count(("project_files",)), 1)
+
+    def test_the_tree_names_each_project_and_file_that_did_not_come_along(self) -> None:
+        controller = FakeController()
+        controller.outcomes["project_files"] = Outcome(value=_files_report())
+        window, _ = self.make(controller=controller)
+        self.pump(lambda: window.model("projects").files is not None, seconds=5)
+        window.go_to("projects")
+        tree = window.screen("projects").files_tree
+        self.assertEqual(tree.topLevelItemCount(), 1, "a project in step is not listed")
+        project = tree.topLevelItem(0)
+        self.assertEqual(project.text(0), "book")
+        self.assertIn(window.catalog.text("projects.files.verdict.FILES_CHANGED_THERE"), project.text(2))
+        self.assertEqual(
+            [(project.child(i).text(0), project.child(i).text(2)) for i in range(project.childCount())],
+            [
+                ("ch2.md", window.catalog.text("projects.files.file.newer_there")),
+                ("ch3.md", window.catalog.text("projects.files.file.missing_here")),
+                ("old.md", window.catalog.text("projects.files.file.removed_there")),
+            ],
+        )
+
+    def test_a_full_sync_leads_to_the_files(self) -> None:
+        window, controller = self.make()
+        result = _full_sync_result()
+        result.project_files_behind = _files_report().warnings
+        controller.outcomes["handoff_now"] = Outcome(value=result)
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        self.assertTrue(screen.links.files.isVisibleTo(window))
+        before = controller.calls.count(("project_files",))
+        screen.links.files.click()
+        self.assertIs(window._stack.currentWidget(), window.screen("projects"))
+        self.assertEqual(controller.calls.count(("project_files",)), before + 1)
 
 
 class SyncTests(_WindowTestCase):
@@ -748,6 +824,15 @@ class SyncTests(_WindowTestCase):
         text = full_sync_result(window.screen("sync"), _full_sync_result(not_loaded=191, new_in_cloud=190))
         self.assertIn(window.catalog.plural("sync.note.new_chats_in_cloud", 190), text)
         self.assertIn(window.catalog.plural("sync.note.chats_not_loaded", 1), text)
+
+    def test_written_chats_are_not_called_visible_before_codex_lists_them(self) -> None:
+        # D-024: "197 chats" while every project in Codex said "no chats".
+        from codexsync.gui.screens.sync import full_sync_result
+
+        window, _ = self.make()
+        text = full_sync_result(window.screen("sync"), _full_sync_result(will_list=197, ignored=2))
+        self.assertIn(window.catalog.plural("sync.note.codex_will_list", 197), text)
+        self.assertIn(window.catalog.plural("sync.note.codex_ignores", 2), text)
 
     def test_every_note_comes_with_a_button_to_the_place_it_names(self) -> None:
         # 2026-10-03: "Settings -> New chats from another machine" sent the
@@ -842,6 +927,54 @@ class SyncTests(_WindowTestCase):
         self.assertIs(window._stack.currentWidget(), sessions)
         self.assertEqual(sessions._pair(), ("machine-a", "laptop"))
         self.assertTrue(any(call[0] == "scan_sessions" for call in controller.calls))
+        self.assertEqual(sessions.model.category, "decide", "straight to the chats that stopped it")
+
+    def _stopped(self):
+        window, controller = self.make()
+        controller.outcomes["handoff_now"] = Outcome(
+            failure=Failure.NEEDS_A_DECISION, message="1 chat(s) need a decision",
+            code="CHAT_DECISIONS_NEEDED",
+            details={"source": "machine-a", "target": "laptop", "format_migrations": 0,
+                     "held_migrations": 0, "divergences": 1, "collisions": 0},
+        )
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        return window, controller, screen
+
+    def test_a_stopped_sync_is_answered_where_it_stopped(self) -> None:
+        # The owner found "needs a decision" and no button to decide (D-027).
+        window, controller, screen = self._stopped()
+        for policy in ("prefer_newer_mtime", "prefer_local", "prefer_cloud"):
+            self.assertTrue(screen.decide_buttons[policy].isVisibleTo(window))
+        self.assertTrue(screen.remember.isVisibleTo(window))
+        screen.decide_buttons["prefer_newer_mtime"].click()
+        self.assertEqual(controller.calls[-1], ("handoff_now", "prefer_newer_mtime"))
+        self.assertNotIn("remember_conflict_policy", [call[0] for call in controller.calls])
+
+    def test_always_this_way_saves_the_rule_before_the_run(self) -> None:
+        window, controller, screen = self._stopped()
+        screen.remember.setChecked(True)
+        screen.decide_buttons["prefer_local"].click()
+        names = [call[0] for call in controller.calls]
+        self.assertLess(names.index("remember_conflict_policy"), len(names) - 1)
+        self.assertIn(("remember_conflict_policy", "prefer_local"), controller.calls)
+        self.assertEqual(controller.calls[-1], ("handoff_now", "prefer_local"))
+
+    def test_a_rule_that_cannot_be_saved_stops_before_the_sync(self) -> None:
+        window, controller, screen = self._stopped()
+        controller.outcomes["remember_conflict_policy"] = Outcome(failure=Failure.CONFIGURATION, message="moved")
+        before = sum(1 for call in controller.calls if call[0] == "handoff_now")
+        screen.remember.setChecked(True)
+        screen.decide_buttons["prefer_cloud"].click()
+        self.assertEqual(sum(1 for call in controller.calls if call[0] == "handoff_now"), before)
+
+    def test_the_answers_hide_after_a_finished_sync(self) -> None:
+        window, _ = self.make()
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        self.assertFalse(screen.decide_buttons["prefer_local"].isVisibleTo(window))
 
     def test_a_dry_run_never_asks(self) -> None:
         window, controller = self.make(confirm=False)
@@ -1150,6 +1283,28 @@ class SessionsTests(_WindowTestCase):
         self.assertIn(("resolve", "k" * 64, "KEEP_REMOTE"), controller.calls)
         self.assertEqual(sum(1 for call in controller.calls if call[0] == "scan_sessions"), 2)
 
+    def test_every_conflict_can_be_decided_at_once_by_one_rule(self) -> None:
+        # D-027: no row to select first; the scan is repeated under the rule.
+        controller = FakeController()
+        controller.outcomes["scan_sessions"] = Outcome(value=SessionScan(_transfer_plan(conflict=True), Path("C:/p/s.json"), Path("C:/p/r.json"), False))
+        window, _ = self.make(controller=controller)
+        window.go_to("sessions")
+        screen = window.screen("sessions")
+        screen.scan()
+        button = screen.rule_buttons["prefer_newer_mtime"]
+        self.assertTrue(button.isVisibleTo(window))
+        button.click()
+        self.assertEqual(controller.calls[-1][-1], "prefer_newer_mtime")
+        self.assertEqual(window.screen("sessions").model.rule, "prefer_newer_mtime")
+
+    def test_the_rule_buttons_are_absent_without_a_conflict(self) -> None:
+        window, _ = self.make()
+        window.go_to("sessions")
+        screen = window.screen("sessions")
+        screen.scan()
+        self.assertFalse(screen.rule_buttons["prefer_local"].isVisibleTo(window))
+        self.assertTrue(screen.choice.isVisibleTo(window), "the page itself is shown")
+
 
 class ProjectsTests(_WindowTestCase):
     def test_an_ambiguous_plan_cannot_be_applied(self) -> None:
@@ -1218,6 +1373,48 @@ class RecoveryTests(_WindowTestCase):
         self.assertTrue(screen.rollback_apply.isEnabled())
         screen.act("rollback", dry_run=False)
         self.assertIn(("rollback", "op-1", "local", False), controller.calls)
+
+    def test_a_sync_stopped_by_an_open_journal_leads_to_that_journal(self) -> None:
+        # 2026-10-06: the window said only "Something went wrong" and nothing
+        # led to the journal that blocked the sync.
+        window, controller = self.make()
+        controller.outcomes["journals"] = Outcome(value=[
+            JournalInfo("op-0", "sync", "COMMITTED", "2026-09-05T09:00:00Z", 1, "snap-0", True, True, False, False, True),
+            JournalInfo(
+                "op-1", "sessions", "COMMITTING", "2026-09-05T10:06:30Z", 3, "snap-1", False, True, True, True, True,
+                machine_id="laptop",
+            ),
+        ])
+        controller.outcomes["handoff_now"] = Outcome(
+            failure=Failure.STOPPED_SAFELY, message="Recovery is required",
+            code="RECOVERY_PENDING",
+            details={"operation_id": "op-1", "family": "sessions", "state": "COMMITTING", "machine": "laptop"},
+        )
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        self.assertIn(window.catalog.text("failure.code.RECOVERY_PENDING"), screen.result.text())
+        self.assertTrue(screen.links.recovery.isVisibleTo(window))
+        screen.links.recovery.click()
+        recovery = window.screen("recovery")
+        self.assertIs(window._stack.currentWidget(), recovery)
+        self.assertEqual(recovery._selected().operation_id, "op-1")
+        self.assertIn("laptop", recovery.evidence.text())
+
+    def test_journals_that_close_themselves_do_not_alarm(self) -> None:
+        window, controller = self.make()
+        controller.outcomes["journals"] = Outcome(value=[
+            JournalInfo(
+                "op-2", "sessions", "PREPARED", "2026-10-06T00:34:12Z", 11, "snap-2", False, True, True, True, True,
+                machine_id="machine-a", own=True, closes_itself=True,
+            ),
+        ])
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        self.assertEqual(screen.banner.title.text(), window.catalog.plural("recovery.self_closing.title", 1))
+        screen.table.selectRow(0)
+        self.assertIn(window.catalog.text("recovery.evidence.closes_itself"), screen.evidence.text())
+        self.assertTrue(screen.resume_dry.isEnabled(), "it can still be closed by hand")
 
 
 class GuardianRestoreScreenTests(_WindowTestCase):

@@ -47,6 +47,7 @@ from .models import AppConfig
 from .runtime import SECRET_NAMES
 from .scanner import scan_tree
 from .version import PRODUCER_VERSION
+from .fs_replace import replace_with_retry
 
 LOG = logging.getLogger(__name__)
 
@@ -257,7 +258,7 @@ def write_record(root: Path, record: HandoffRecord) -> Path:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(staging, target)
+        replace_with_retry(staging, target)
     finally:
         if staging.exists():
             try:

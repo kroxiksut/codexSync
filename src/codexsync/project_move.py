@@ -41,6 +41,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 from typing import Any, Callable, Iterable, Sequence
 
 from .exceptions import ConfigError, ConflictError, FailSafeError
@@ -56,6 +57,7 @@ from .guardian_schema import (
     validate_global_state_references,
 )
 from .repair_plan import _under
+from .fs_replace import replace_with_retry
 
 
 LOG = logging.getLogger(__name__)
@@ -393,7 +395,7 @@ def save_project_move_plan(plan: ProjectMovePlan, path: Path) -> Path:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(temp, path)
+    replace_with_retry(temp, path)
     if os.name != "nt":
         os.chmod(path, 0o600)
     return path
@@ -585,27 +587,36 @@ def _copy_into_place(plan: ProjectMovePlan, require_stopped: Callable[[], None])
     if _contains(norm_old, norm_staging) or _contains(norm_staging, norm_old):
         raise FailSafeError("The staging directory would overlap the project folder")
     _clear_own_staging(staging, plan.plan_id)
+    _clear_abandoned_stagings(plan.new_root, keep=staging)
 
     LOG.info(
         "project move: copying %d file(s) (%d bytes) from %s into staging %s",
         plan.file_count, plan.total_bytes, plan.old_root, staging,
     )
-    os.mkdir(staging)
+    # Every path below the two roots goes through `_fs`: the staging name adds
+    # some forty characters to each path, which put a 219-character path
+    # inside `.git` past Windows' 260-character limit (2026-10-06).
+    staging_fs = _fs(staging)
+    old_root_fs = _fs(plan.old_root)
+    os.mkdir(staging_fs)
     try:
-        marker_path = os.path.join(staging, STAGING_MARKER_NAME)
+        marker_path = os.path.join(staging_fs, STAGING_MARKER_NAME)
         with open(marker_path, "x", encoding="utf-8", newline="\n") as handle:
-            json.dump({"format": _MARKER_FORMAT, "plan_id": plan.plan_id}, handle, sort_keys=True)
+            json.dump(
+                {"format": _MARKER_FORMAT, "plan_id": plan.plan_id, "new_root": plan.new_root},
+                handle, sort_keys=True,
+            )
             handle.flush()
             os.fsync(handle.fileno())
 
         source_mtimes: dict[str, int] = {}
         for entry in plan.inventory:
             parts = entry.relative_path.split("/")
-            destination = os.path.join(staging, *parts)
+            destination = os.path.join(staging_fs, *parts)
             if entry.size == DIRECTORY_SIZE:
                 os.makedirs(destination, exist_ok=True)
                 continue
-            source = os.path.join(plan.old_root, *parts)
+            source = os.path.join(old_root_fs, *parts)
             os.makedirs(os.path.dirname(destination), exist_ok=True)
             try:
                 source_mtimes[entry.relative_path] = os.stat(source).st_mtime_ns
@@ -628,7 +639,7 @@ def _copy_into_place(plan: ProjectMovePlan, require_stopped: Callable[[], None])
             raise FailSafeError(f"{plan.new_root} appeared during the copy; nothing was moved")
         _write_resume_marker(plan)
         try:
-            os.replace(staging, plan.new_root)
+            replace_with_retry(staging, plan.new_root)
         except BaseException:
             if os.path.lexists(staging):
                 # The rename did not happen, so the marker names no copy.
@@ -680,7 +691,7 @@ def _require_source_unchanged(plan: ProjectMovePlan, source_mtimes: dict[str, in
         raise FailSafeError("Files were added to or removed from the project during the copy; nothing was moved")
     for relative_path, mtime_ns in source_mtimes.items():
         try:
-            current = os.stat(os.path.join(plan.old_root, *relative_path.split("/"))).st_mtime_ns
+            current = os.stat(os.path.join(_fs(plan.old_root), *relative_path.split("/"))).st_mtime_ns
         except OSError as exc:
             raise FailSafeError(f"{relative_path} disappeared during the copy; nothing was moved") from exc
         if current != mtime_ns:
@@ -701,22 +712,82 @@ def _clear_own_staging(staging: str, plan_id: str) -> None:
     )
     if not _is_plain_directory(staging):
         raise occupied
-    try:
-        with open(os.path.join(staging, STAGING_MARKER_NAME), encoding="utf-8") as handle:
-            marker = json.load(handle)
-    except (OSError, ValueError):
-        raise occupied from None
-    if not isinstance(marker, dict) or marker.get("format") != _MARKER_FORMAT or marker.get("plan_id") != plan_id:
+    marker = _read_staging_marker(staging)
+    if marker is None or marker.get("plan_id") != plan_id:
         raise occupied
     LOG.warning("project move: removing the interrupted staging directory %s of this plan", staging)
-    shutil.rmtree(staging)
+    _remove_tree(staging)
+
+
+def _read_staging_marker(staging: str) -> dict[str, Any] | None:
+    try:
+        with open(os.path.join(_fs(staging), STAGING_MARKER_NAME), encoding="utf-8") as handle:
+            marker = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(marker, dict) or marker.get("format") != _MARKER_FORMAT:
+        return None
+    return marker
+
+
+def _abandoned_stagings(new_root: str, *, keep: str | None = None) -> list[str]:
+    """Staging directories an earlier attempt at this same move left beside the target.
+
+    The name comes from the plan id, so a rebuilt plan stages elsewhere and an
+    earlier attempt's directory would stay for good. It is this move's only
+    when its marker says so -- this module's format and this very target --
+    and it is a plain directory; anything else beside the target is left alone.
+    """
+    parent = os.path.dirname(new_root)
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return []
+    found = []
+    norm_new = _norm(new_root)
+    norm_keep = _norm(keep) if keep else ""
+    for name in sorted(names):
+        if not (name.startswith(_STAGING_PREFIX) and name.endswith(_STAGING_SUFFIX)):
+            continue
+        path = os.path.join(parent, name)
+        if _norm(path) == norm_keep or not _is_plain_directory(path):
+            continue
+        marker = _read_staging_marker(path)
+        if marker is not None and isinstance(marker.get("new_root"), str) and _norm(marker["new_root"]) == norm_new:
+            found.append(path)
+    return found
+
+
+def _clear_abandoned_stagings(new_root: str, *, keep: str) -> None:
+    for path in _abandoned_stagings(new_root, keep=keep):
+        LOG.warning("project move: removing %s, left by an earlier attempt at this move", path)
+        _remove_tree(path)
+
+
+def _remove_tree(path: str) -> None:
+    """Remove a staging directory, read-only files included.
+
+    `copy2` carries the read-only attribute across, and git keeps its object
+    files read-only, so on Windows a plain `rmtree` of a copied repository
+    stopped at the first object and left the partial copy behind (2026-10-06).
+    Called only for a directory this module proved it created.
+    """
+
+    def clear_read_only(function, name, _error) -> None:
+        os.chmod(name, stat.S_IWRITE)
+        function(name)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(_fs(path), onexc=clear_read_only)
+    else:  # `onexc` is 3.12+; `onerror` is deprecated there
+        shutil.rmtree(_fs(path), onerror=clear_read_only)
 
 
 def _remove_staging_created_here(staging: str) -> None:
     if not os.path.lexists(staging):
         return
     try:
-        shutil.rmtree(staging)
+        _remove_tree(staging)
         LOG.warning("project move: removed the partial staging directory %s", staging)
     except OSError as exc:
         LOG.error("project move: could not remove the staging directory %s: %s", staging, exc)
@@ -739,7 +810,7 @@ def _write_resume_marker(plan: ProjectMovePlan) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, marker)
+        replace_with_retry(temp, marker)
     except OSError as exc:
         raise FailSafeError(
             f"The resume marker for {plan.new_root} could not be written, so the verified copy "
@@ -774,8 +845,12 @@ def _resume_marker_path(new_root: str) -> str:
     return os.path.join(os.path.dirname(new_root), f".codexsync-move-{name_hash}.json")
 
 
+_STAGING_PREFIX = ".codexsync-move-"
+_STAGING_SUFFIX = ".partial"
+
+
 def _staging_path(new_root: str, plan_id: str) -> str:
-    return os.path.join(os.path.dirname(new_root), f".codexsync-move-{plan_id[:16]}.partial")
+    return os.path.join(os.path.dirname(new_root), f"{_STAGING_PREFIX}{plan_id[:16]}{_STAGING_SUFFIX}")
 
 
 # ------------------------------------------------------------------ verification
@@ -849,6 +924,7 @@ def _walk(root: str, *, hash_files: bool) -> _Walk:
     """
     entries: list[MoveInventoryEntry] = []
     problems: list[tuple[str, str]] = []
+    root = _fs(root)
     try:
         root_stat = os.lstat(root)
     except OSError:
@@ -899,7 +975,7 @@ def _walk(root: str, *, hash_files: bool) -> _Walk:
 def _sha256_file(path: str) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
-    with open(path, "rb") as handle:
+    with open(_fs(path), "rb") as handle:
         while chunk := handle.read(_READ_CHUNK):
             digest.update(chunk)
             size += len(chunk)
@@ -922,6 +998,7 @@ def _is_link(path: str, info: os.stat_result) -> bool:
 
 
 def _is_plain_directory(path: str) -> bool:
+    path = _fs(path)
     try:
         info = os.lstat(path)
     except OSError:
@@ -930,6 +1007,80 @@ def _is_plain_directory(path: str) -> bool:
 
 
 # ------------------------------------------------------------------------ paths
+
+
+#: Windows refuses a path of this many characters or more unless long paths
+#: are switched on for the whole machine or the path is given as ``\\?\``.
+WINDOWS_MAX_PATH = 260
+
+
+def _fs(path: str) -> str:
+    """``path`` as the file system is asked for it.
+
+    On Windows that is the extended-length form (``\\\\?\\`` before the
+    absolute path), which is
+    not held to ``WINDOWS_MAX_PATH`` whatever the machine's setting. It is
+    used for every path under a project root; the roots themselves, which go
+    into messages, plans and the Codex state, stay as they were given.
+    """
+    if os.name != "nt" or path.startswith("\\\\?\\"):
+        return path
+    full = os.path.abspath(path)
+    if full.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + full[2:]
+    return "\\\\?\\" + full
+
+
+def longest_target_path(plan: "ProjectMovePlan") -> int:
+    """Characters in the longest path the finished copy will hold.
+
+    The copy itself is not limited (``_fs``), but a program that is not
+    long-path aware cannot open a path of ``WINDOWS_MAX_PATH`` or more, so a
+    screen warns before the move rather than after.
+    """
+    root = os.path.abspath(plan.new_root) if plan.new_root else ""
+    longest = len(root)
+    for entry in plan.inventory:
+        longest = max(longest, len(root) + 1 + len(entry.relative_path))
+    return longest
+
+
+@dataclass(frozen=True, slots=True)
+class MoveNotes:
+    """What a person should know about a move plan that does not block it."""
+
+    #: Characters in the longest path the finished copy will hold.
+    longest_path: int
+    #: True when that path reaches ``WINDOWS_MAX_PATH`` on a machine that still
+    #: holds programs to it: the move works, a program may not open the file.
+    over_path_limit: bool
+    #: Directories an earlier attempt at this move left beside the target;
+    #: the apply removes them before it copies.
+    abandoned_stagings: tuple[str, ...]
+
+
+def move_notes(plan: "ProjectMovePlan") -> MoveNotes:
+    """Read-only: computed from the plan and a listing of the target's parent."""
+    longest = longest_target_path(plan)
+    return MoveNotes(
+        longest_path=longest,
+        over_path_limit=longest >= WINDOWS_MAX_PATH and long_paths_limited(),
+        abandoned_stagings=tuple(_abandoned_stagings(plan.new_root)) if plan.new_root else (),
+    )
+
+
+def long_paths_limited() -> bool:
+    """Whether this machine still holds programs to ``WINDOWS_MAX_PATH``."""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            value, _kind = winreg.QueryValueEx(key, "LongPathsEnabled")
+    except OSError:
+        return True
+    return value != 1
 
 
 def _norm(path: str) -> str:

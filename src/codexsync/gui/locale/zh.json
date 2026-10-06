@@ -1,6 +1,7 @@
 {
   "language.native_name": "中文",
   "transfer.action.OUT_OF_SCOPE": "不在工作集内",
+  "transfer.action.HELD_BY_DIRECTION": "因同步方向而未写入",
   "sessions.scope.title": "工作集",
   "sessions.scope.caption": "选择这台机器要带走的内容。只有写入 .codex 的范围会被收窄：云端镜像始终接收全部会话，因此备份永远不会是残缺的。",
   "sessions.scope.all": "全部（不设工作集）",
@@ -94,6 +95,7 @@
   "failure.unexpected": "发生了本不该发生的错误",
   "failure.code.CONFIG_OUTDATED": "此配置由旧版 codexSync 写入。请在「设置」中点击「更新配置」进行更新：你的值和注释都会保留。",
   "failure.code.CHAT_DECISIONS_NEEDED": "有些聊天在两台电脑上版本不同，需要你来决定；没有写入任何内容。请在「会话」页面做出选择，然后再次同步。",
+  "failure.code.RECOVERY_PENDING": "之前的一个操作中途停止，它的日志仍未关闭，因此没有做任何改动。需要在「恢复」页面做出决定。",
   "banner.config.outdated": "此配置由旧版 codexSync 写入，使用它时同步、聊天传输和恢复都不会写入任何内容。请更新它：你的值和注释会保留，旧文件会进入配置历史。",
   "banner.config.differs": "此配置中的某些设置，本版本的写法不同。查看将要更改的内容并更新它。",
   "banner.config.open": "查看并更新",
@@ -208,6 +210,8 @@
   "sync.history.family.repair": "项目修复",
   "sync.history.family.chats": "对话归属",
   "sync.history.family.project-sync": "项目",
+  "sync.history.family.thread-catalogue": "Codex 聊天列表",
+  "sync.history.family.chat-names": "聊天名称",
   "sync.history.family.sessions": "聊天",
   "sync.history.family.sync": "设置文件",
   "sync.history.column.kind": "内容",
@@ -221,6 +225,7 @@
   "sync.history.result.unreadable": "日志已损坏",
   "sync.history.result.with_reason": "{result}：{reason}",
   "sync.history.failure.ConflictError": "冲突",
+  "sync.history.failure.Abandoned": "在替换任何文件之前中断；已由下一次运行关闭",
   "sync.history.failure.SafetyPreconditionError": "Codex 处于打开状态",
   "sync.history.failure.FailSafeError": "被安全检查阻止",
   "sync.history.failure.OperationBusyError": "另一个操作正在进行",
@@ -246,8 +251,17 @@
   "overview.open_history": "历史",
   "sync.done.apply": "同步完成。",
   "sync.decisions.title": "同步在写入任何内容之前停止了：有些聊天在两台电脑上版本不同，保留哪个只能由你决定。",
-  "sync.decisions.next": "打开「会话」：那里列出这些聊天，每个都可以选择，新格式也可以一次性全部接受。然后再次点击「同步」。",
+  "sync.decisions.next": "在下方选择保留哪些版本，一次决定全部：未保留的版本会先被完整保存。或者打开“会话”逐个决定。",
   "sync.decisions.open": "打开「会话」",
+  "sync.decide.prefer_newer_mtime": "保留较新的版本",
+  "sync.decide.prefer_local": "保留本机的版本",
+  "sync.decide.prefer_cloud": "保留云端的版本",
+  "sync.decide.remember": "以后都这样决定（保存为“设置”中的冲突策略）",
+  "sync.decide.confirm.title": "再次同步",
+  "sync.decide.confirm.prefer_newer_mtime": "再次同步，保留较新的版本：对话按最后一条消息，设置文件按修改时间。Codex 必须关闭。未保留的版本会先保存：对话完整进入冲突包，文件进入备份。在同一时刻结束的对话仍会询问。",
+  "sync.decide.confirm.prefer_local": "再次同步，凡两台机器上都改过的内容都保留本机的版本。Codex 必须关闭。云端的版本会先保存：对话完整进入冲突包，文件进入备份。",
+  "sync.decide.confirm.prefer_cloud": "再次同步，凡两台机器上都改过的内容都保留云端的版本。Codex 必须关闭。本机的版本会先保存：对话完整进入冲突包，文件进入备份。",
+  "sync.decide.confirm.remember": "该规则也会保存为冲突策略，以后每次同步（窗口、控制台、登录任务）都会这样决定。",
   "sync.decisions.format_migrations": {
     "other": "{count} 个聊天只是被 Codex 改写成了新格式——可以放心一次性接受"
   },
@@ -272,11 +286,36 @@
   "sync.note.chats_not_loaded": {
     "other": "有 {count} 个聊天只留在云端副本中；原因见「会话」页面。"
   },
+  "sync.note.codex_will_list": {
+    "other": "Codex 下次启动后将显示 {count} 个聊天：它会根据文件重建聊天列表，因此那次启动会慢一些。"
+  },
+  "sync.note.decided_by_rule": {
+    "other": "有 {count} 个聊天在两台机器上都改过，已按冲突策略决定；未保留的版本完整保存在冲突包中。"
+  },
+  "sync.note.names_set": {
+    "other": "有 {count} 个聊天从另一台机器获得了名称。"
+  },
+  "sync.note.names_waiting": {
+    "other": "有 {count} 个聊天将在 Codex 把它们列入列表后的下一次同步中获得名称。"
+  },
+  "sync.note.names_kept": {
+    "other": "有 {count} 个聊天在另一台机器上的名称不同；保留了本机的名称。"
+  },
+  "sync.note.files.BEHIND": "项目 {project}：来自 {machine} 的最新提交不在本机。继续该项目的聊天之前请先拉取。",
+  "sync.note.files.DIVERGED": "项目 {project}：本机和 {machine} 上分别有不同的提交。继续该项目的聊天之前请先合并。",
+  "sync.note.files.UNCOMMITTED_THERE": "项目 {project}：{machine} 上有未提交的更改，本机没有。",
+  "sync.note.files.FILES_CHANGED_THERE": "项目 {project}：{machine} 上较晚修改的文件 {newer} 个，只有那边才有的 {missing} 个，那边已删除的 {removed} 个。继续该项目的聊天之前请先把它们带过来。",
+  "sync.note.files.chats_there": "该项目的聊天在那里一直持续到 {when}。",
+  "sync.note.files.MISSING_HERE": "项目 {project}：本机上没有它的文件夹。",
+  "sync.note.codex_ignores": {
+    "other": "重建聊天列表后，Codex 仍未列出 {count} 个聊天文件。文件都在，没有丢失任何内容。"
+  },
   "sync.note.new_chats_in_cloud": {
     "other": "有 {count} 个对本机而言是新的聊天留在了云端副本中：加载新对话已关闭（「设置」→「同步」→「来自另一台机器的新对话」）。"
   },
   "sync.link.new_chats": "打开该设置",
   "sync.link.mappings": "添加路径映射",
+  "sync.link.recovery": "打开恢复页面",
   "association.BOUND": "已固定",
   "association.DERIVED": "按路径",
   "association.DERIVED_VIA_MAPPING": "仅按规则",
@@ -368,7 +407,7 @@
   "sessions.decide.title": {
     "other": "{count} 个分支需要你来决定"
   },
-  "sessions.decide.detail": "分叉永远不会被合并，也不会按日期决定。选中它，选择保留哪一侧，扫描会带着你的决定重新进行。",
+  "sessions.decide.detail": "分叉永远不会被合并。可以用一条规则一次决定全部，也可以选中一个并选择保留哪一侧；扫描会带着你的决定重新进行。",
   "sessions.clean.title": "没有需要决定的内容",
   "sessions.partial.title": "并非全部都会转移",
   "sessions.open_settings": "打开该设置",
@@ -387,7 +426,17 @@
   "sessions.note.stale": {
     "other": "有 {count} 个对话在本机存在两个文件：转移 Codex 指向的那个，另一个保持不动。"
   },
+  "sessions.note.decided": {
+    "other": "{count} 个在两台机器上都改过的对话已按冲突规则决定；未保留的版本完整保存在冲突包中。"
+  },
+  "sessions.note.direction": {
+    "other": "{count} 个对话未写入：同步方向是单向的。"
+  },
   "sessions.choice.label": "对所选冲突的决定",
+  "sessions.rule.label": "一次决定全部冲突：",
+  "sessions.rule.prefer_newer_mtime": "保留较新的",
+  "sessions.rule.prefer_local": "保留本机的",
+  "sessions.rule.prefer_cloud": "保留云端的",
   "sessions.choice.KEEP_LOCAL": "保留本机的分支",
   "sessions.choice.KEEP_REMOTE": "保留云端的分支",
   "sessions.choice.DEFER": "稍后再定",
@@ -409,6 +458,9 @@
   "sessions.apply": "执行计划",
   "sessions.confirm.title": "执行这份会话计划？",
   "sessions.confirm.body": "将按计划 {plan_id} 写入 {count} 个分支。Codex 必须关闭。计划会先重新构建，若标识不再匹配则拒绝执行；一切被替换的内容都会先备份。",
+  "sessions.confirm.decided": {
+    "other": "其中 {count} 个在两台机器上都改过；未保留的版本会先完整保存到冲突包中。"
+  },
   "sessions.working": "正在执行…",
   "sessions.done.dry": {
     "other": "试运行结束：将写入 {count} 个分支。实际未写入任何内容。"
@@ -449,6 +501,37 @@
   },
   "projects.lost.detail": "可在「对话归属」中固定它们，或构建下面的修复计划。",
   "projects.lost.open": "打开「对话归属」",
+  "sync.link.files": "显示文件",
+  "sync.note.files.MISSING_THERE": "项目 {project}：本机有它的文件夹，{machine} 上没有。",
+  "projects.files.title": "项目文件夹",
+  "projects.files.caption": "对话会在机器之间迁移，项目文件夹不会。每次启动、完整同步和检查都会重新读取文件夹，并与其他机器最近发布的内容比较。不会复制或修改任何东西。",
+  "projects.files.column.what": "项目 / 文件",
+  "projects.files.column.machine": "机器",
+  "projects.files.column.state": "情况",
+  "projects.files.column.as_of": "对方状态时间",
+  "projects.files.check": "检查文件夹",
+  "projects.files.checking": "正在读取项目文件夹…",
+  "projects.files.not_checked": "尚未检查。",
+  "projects.files.none_published": "其他机器还没有发布它们的项目文件夹；它们会在下次启动或同步时发布。",
+  "projects.files.chats_there": "那边的聊天一直持续到 {when}",
+  "projects.files.file.newer_there": "那边较晚修改",
+  "projects.files.file.missing_here": "只有那边有",
+  "projects.files.file.removed_there": "那边已删除，本机仍有",
+  "projects.files.verdict.IN_STEP": "两台机器上相同",
+  "projects.files.verdict.AHEAD_HERE": "本机比那边多",
+  "projects.files.verdict.BEHIND": "那边的最新提交不在本机",
+  "projects.files.verdict.DIVERGED": "两台机器上的提交不同",
+  "projects.files.verdict.UNCOMMITTED_THERE": "那边有未提交的更改",
+  "projects.files.verdict.FILES_CHANGED_THERE": "那边的文件有变化",
+  "projects.files.verdict.MISSING_HERE": "本机没有文件夹",
+  "projects.files.verdict.MISSING_THERE": "那边没有文件夹",
+  "projects.files.verdict.NOT_COMPARED": "未比较",
+  "projects.files.all_here": {
+    "other": "全部 {count} 个项目文件夹都包含其他机器上的内容。"
+  },
+  "projects.files.attention": {
+    "other": "有 {count} 个项目没有完整迁移过来。"
+  },
   "projects.repair.title": "换机之后的修复",
   "projects.repair.caption": "会话记录的文件夹会经过 [[path_mappings]] 转换。计划会固定对话，或为搬走的项目重新指定根目录 —— 重新指定时总会同时固定仍在旧根目录下的每个对话，因此不会有对话消失。",
   "projects.repair.scan": "构建修复计划",
@@ -571,10 +654,15 @@
     "other": "{count} 个未完成的操作阻止了一切改动"
   },
   "recovery.blocked.detail": "先查看证据，然后或者继续（关闭日志并重新执行该命令），或者回滚到你明确选择的目标。",
+  "recovery.self_closing.title": {
+    "other": "{count} 个被中断的操作会自动关闭"
+  },
+  "recovery.self_closing.detail": "它们在替换任何文件之前就停止了。本机的下一次同步会关闭它们；你也可以现在在这里关闭。",
   "recovery.clear.title": "没有被中断的操作",
   "recovery.clear.detail": "没有任何东西阻止新的改动。",
   "recovery.list.title": "写操作日志",
   "recovery.column.state": "状态",
+  "recovery.column.machine": "电脑",
   "recovery.column.family": "操作",
   "recovery.column.created": "开始时间",
   "recovery.column.actions": "动作数",
@@ -586,11 +674,15 @@
   "recovery.state.unreadable": "无法读取",
   "recovery.backup.missing": "{name}（已缺失）",
   "recovery.backup.none": "未记录",
+  "recovery.machine.this": "{machine}（本机）",
+  "recovery.machine.unknown": "未记录",
   "recovery.actions.title": "可以做什么",
   "recovery.select": "选择一条日志以查看它的证据。",
   "recovery.evidence.closed": "这条日志已关闭（{state}），没有需要恢复的内容。",
   "recovery.evidence.unreadable": "这条日志无法读取。它仍会阻止改动；决定之前请用命令行检查它。",
   "recovery.evidence.open": "操作：{family} · 状态：{state} · 计划动作数：{actions} · 备份：{backup}",
+  "recovery.evidence.closes_itself": "该操作在替换任何文件之前就停止了；本机的下一次同步会自动关闭这个日志。",
+  "recovery.evidence.other_machine": "这是电脑 {machine} 的操作。请在那台电脑上关闭；只有确定那个操作已经结束时才在这里关闭。",
   "recovery.resume.label": "继续",
   "recovery.resume.dry": "检查「继续」",
   "recovery.resume.apply": "继续",
@@ -622,6 +714,8 @@
   "journal.family.chats": "对话移动",
   "journal.family.guardian-restore": "快照还原",
   "journal.family.project-move": "项目搬移",
+  "journal.family.thread-catalogue": "重建 Codex 聊天列表",
+  "journal.family.chat-names": "聊天名称",
   "first_run.missing.title": "尚未打开配置",
   "first_run.missing.detail": "打开一个已有的 config.toml（位置不限），或在您自己选择的文件夹中新建一个。.codex 里不会创建也不会改动任何东西。",
   "first_run.exists.title": "config.toml 已存在",
@@ -775,7 +869,7 @@
   "settings.reason.safety.require_codex_stopped": "始终开启：在 Codex 运行时同步，正是这个工具存在的意义所在要防止的事故（AI_RULES 2）。",
   "settings.reason.backup.backup_before_overwrite": "始终开启：同步替换的每个文件都会先备份并校验，以便 recover 能把它放回去。",
   "settings.reason.safety.fail_on_unknown": "始终开启：状态不确定时，codexSync 不写入任何内容直接退出（AI_RULES 3）。",
-  "settings.hint.sync.direction": "单向运行不会碰另一侧，也不会记录关于它的任何事：被跳过的内容仍是未同步的，因此之后的双向运行依然会看到差异。",
+  "settings.hint.sync.direction": "单向运行不会碰另一侧，也不会记录关于它的任何事：被跳过的内容仍是未同步的，因此之后的双向运行依然会看到差异。它也决定两台机器上都改过的对话：“只写入云端文件夹”保留本机的版本，“只写入 .codex”保留云端的。",
   "settings.field.sync.direction": "方向",
   "settings.field.guardian.staging_retention_hours": "未完成快照保留小时数",
   "settings.field.guardian.max_state_bytes": "接受的最大状态（字节）",
@@ -818,10 +912,11 @@
   "settings.choice.sync.equal_mtime_action.prefer_local": "优先本地",
   "settings.choice.sync.equal_mtime_action.prefer_cloud": "优先云端",
   "settings.choice.sync.equal_mtime_action.manual_abort": "停下来询问",
-  "settings.choice.conflict.policy.manual_abort": "停下来询问（推荐）",
-  "settings.choice.conflict.policy.prefer_cloud": "优先云端",
-  "settings.choice.conflict.policy.prefer_local": "优先本地",
-  "settings.choice.conflict.policy.prefer_newer_mtime": "优先较新的",
+  "settings.choice.conflict.policy.manual_abort": "停下来询问",
+  "settings.choice.conflict.policy.prefer_cloud": "保留云端的版本",
+  "settings.choice.conflict.policy.prefer_local": "保留本机的版本",
+  "settings.choice.conflict.policy.prefer_newer_mtime": "保留较新的版本（推荐）",
+  "settings.hint.conflict.policy": "设置文件和对话共用一条规则，适用于每次运行：窗口、控制台和登录任务。文件按修改时间判断新旧，对话按最后一条消息；在同一时刻结束的两个对话仍会询问。未保留的版本会先保存：文件进入备份，对话完整进入冲突包。",
   "settings.choice.scheduler.mode.guardian_snapshot": "守护快照",
   "settings.choice.scheduler.mode.preflight": "环境检查",
   "settings.choice.scheduler.mode.sync_dry_run": "试运行 —— 推荐",
@@ -913,6 +1008,10 @@
   "projects.move.apply": "搬移项目",
   "projects.move.summary": "{old} → {new}：{files} 个文件，{size}；需要固定的对话：{chats}。旧文件夹会保留。",
   "projects.move.copy_complete": "已经存在一份校验过的副本：这次搬移只会更新 Codex。",
+  "projects.move.long_paths": "副本中最长的路径将有 {length} 个字符。本机没有开启长路径支持，不支持长路径的程序可能无法打开新文件夹中的这类文件；搬迁本身不受影响。",
+  "projects.move.abandoned": {
+    "other": "之前对这次搬迁的尝试在目标旁边留下了 {count} 个未完成的副本；搬迁会先删除它们。"
+  },
   "projects.move.volatile": "Codex 正在运行：这份计划只是预览。请关闭 Codex 后重新构建。",
   "projects.move.dry_first": "请先做试运行；通过之后「搬移」才会解锁。",
   "projects.move.working.scan": "正在读取并计算项目中每个文件的哈希…",
@@ -1060,6 +1159,9 @@
   "progress.phase.sync_settings": "正在同步设置",
   "progress.phase.sync_chats": "正在同步聊天",
   "progress.phase.sync_projects": "正在同步项目",
+  "progress.phase.sync_chat_names": "正在同步聊天名称",
+  "progress.phase.refresh_catalogue": "正在检查 Codex 聊天列表",
+  "progress.phase.check_project_files": "正在检查项目文件夹",
   "home.codex.running": "Codex 已打开",
   "home.codex.stopped": "Codex 已关闭",
   "home.codex.unknown": "无法确定 Codex 是否打开",

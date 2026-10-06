@@ -265,6 +265,25 @@ class DemoController(Controller):
             for stamp, size in stamps
         ])
 
+    def project_files(self) -> Outcome:
+        """Invented folders; the real check reads this machine's projects."""
+        from codexsync.app import ProjectFilesItem, ProjectFilesReport
+        from codexsync.project_files import Verdict
+
+        return Outcome(value=ProjectFilesReport(MACHINE, (
+            ProjectFilesItem(
+                "p-novel", "novel", f"{HOME}/Documents/novel", "desktop", Verdict.FILES_CHANGED_THERE,
+                "2026-09-17T07:58:41Z", ("chapters/03.md",), ("chapters/04.md", "notes/plot.md"), (),
+                1789624500,
+            ),
+            ProjectFilesItem(
+                "p-site", "site", f"{HOME}/Projects/site", "desktop", Verdict.BEHIND, "2026-09-17T07:58:41Z",
+            ),
+            ProjectFilesItem(
+                "p-tools", "tools", f"{HOME}/Projects/tools", "desktop", Verdict.IN_STEP, "2026-09-17T07:58:41Z",
+            ),
+        ), True))
+
     def home(self) -> Outcome:
         last = JournalInfo(
             "9a3e1c70-5b2d-4e8f-a164-0c7d2b9e3f51", "sync", "COMMITTED", "2026-09-17T08:02:10Z", 5,

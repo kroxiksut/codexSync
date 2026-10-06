@@ -66,6 +66,17 @@ INVALID_CODES = frozenset({
 })
 #: The code that makes a branch `AMBIGUOUS`: one session id in two files.
 DUPLICATE_SESSION_ID = "DUPLICATE_SESSION_ID"
+#: A file that continues a chat begun in another file (CS-356). Codex 0.160
+#: writes a long chat's history in pages: the new file opens with the same
+#: `session_meta` id plus `history_base` -- the thread and the record the page
+#: carries on from -- and is named `rollout-<time>-<id>_<other id>.jsonl`. The
+#: chat is the chain of files, so a page is a branch of its own and never a
+#: duplicate of the file it continues.
+HISTORY_PAGE = "HISTORY_PAGE"
+#: A `history_base` that names this thread but not in the shape read above.
+#: The file is then an ordinary branch, so a second file with its id stays a
+#: duplicate rather than a page whose position is guessed.
+UNREADABLE_HISTORY_BASE = "UNREADABLE_HISTORY_BASE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +99,21 @@ class SessionDescriptor:
     record_format: str | None = None
     #: The latest `timestamp` any record carries, as written (ISO 8601 UTC).
     last_record_at: str | None = None
+    #: For a page of a paginated chat (`HISTORY_PAGE`), where it carries on:
+    #: ``page-<first ordinal>``. ``None`` for the file a chat begins in.
+    page: str | None = None
+
+    @property
+    def branch_key(self) -> str | None:
+        """What identifies this file's history: the session id, plus its page.
+
+        Everything that pairs a branch with its copy on the other side -- the
+        transfer plan, the semantic manifest, conflict ids -- uses this, so the
+        first file of a chat keeps the identity it always had.
+        """
+        if self.session_id is None or self.page is None:
+            return self.session_id
+        return f"{self.session_id}#{self.page}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,19 +190,21 @@ def scan_sessions(
             report(progress, phase, done, total)
     descriptors.extend(item for item in results if item is not None)
 
-    by_id: dict[str, list[SessionDescriptor]] = {}
+    # A duplicate is two files for one history; a chat continued in a page is
+    # one history per file, keyed apart by `branch_key`.
+    by_key: dict[str, list[SessionDescriptor]] = {}
     for item in descriptors:
-        if item.session_id:
-            by_id.setdefault(item.session_id, []).append(item)
+        if item.branch_key:
+            by_key.setdefault(item.branch_key, []).append(item)
     branches = {
-        session_id: SessionBranch(session_id, tuple(items))
-        for session_id, items in by_id.items()
+        key: SessionBranch(items[0].session_id or key, tuple(items))
+        for key, items in by_key.items()
         if len(items) > 1
     }
     if branches:
         descriptors = [
             _with_code(item, SessionState.AMBIGUOUS, DUPLICATE_SESSION_ID)
-            if item.session_id in branches else item
+            if item.branch_key in branches else item
             for item in descriptors
         ]
 
@@ -231,7 +259,7 @@ def _scan_jsonl(
     digest = hashlib.sha256()
     byte_count = 0
     line_count = 0
-    session_id = cwd = timestamp = parent_id = None
+    session_id = cwd = timestamp = parent_id = page = None
     codes: list[str] = []
     complete_tail = True
     numbered = unnumbered = 0
@@ -290,6 +318,9 @@ def _scan_jsonl(
                     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
                     timestamp = payload.get("timestamp") if isinstance(payload.get("timestamp"), str) else None
                     parent_id = payload.get("parent_thread_id") if isinstance(payload.get("parent_thread_id"), str) else None
+                    page, page_code = _history_page(payload, session_id)
+                    if page_code:
+                        codes.append(page_code)
                 elif record.get("type") == "session_meta":
                     # A second `session_meta` is how the runtime records that
                     # the session was resumed, not damage: on the machine this
@@ -341,7 +372,63 @@ def _scan_jsonl(
         file_id=_file_id(after),
         record_format=_record_format(numbered, unnumbered),
         last_record_at=last_record_at,
+        page=page,
     )
+
+
+def _history_page(payload: dict, session_id: str | None) -> tuple[str | None, str | None]:
+    """Where a page of a paginated chat carries on, and the code saying so.
+
+    Observed on Codex 0.160: ``history_mode = "paginated"`` on every new file,
+    and on a page ``history_base = {thread_id, end_ordinal_exclusive,
+    end_byte_offset}`` -- the thread is this file's own id, and the page holds
+    the records from that ordinal on. A base naming another thread is not a
+    page of this chat (the file has an id of its own then), and a base in any
+    other shape is reported rather than read.
+    """
+    base = payload.get("history_base")
+    if base is None or session_id is None:
+        return None, None
+    if not isinstance(base, dict) or base.get("thread_id") != session_id:
+        return None, (UNREADABLE_HISTORY_BASE if isinstance(base, dict) and base.get("thread_id") is None else None)
+    start = base.get("end_ordinal_exclusive")
+    if not isinstance(start, int) or isinstance(start, bool) or start < 0:
+        return None, UNREADABLE_HISTORY_BASE
+    return f"page-{start}", HISTORY_PAGE
+
+
+def one_per_chat(descriptors: list[SessionDescriptor]) -> list[SessionDescriptor]:
+    """One file per chat, in the order given: the file it begins in, else its first page.
+
+    For whatever asks about chats rather than files -- the chat list, project
+    bindings, `doctor`. A chat continued in pages is one chat, and each of its
+    files carries the same `session_meta`.
+    """
+    chosen: dict[str, SessionDescriptor] = {}
+    for item in descriptors:
+        if not item.session_id:
+            continue
+        held = chosen.get(item.session_id)
+        if held is None or _page_order(item) < _page_order(held):
+            chosen[item.session_id] = item
+    keep = {id(item) for item in chosen.values()}
+    return [item for item in descriptors if not item.session_id or id(item) in keep]
+
+
+def latest_page(descriptors: list[SessionDescriptor]) -> dict[str, SessionDescriptor]:
+    """Per chat, the file its history currently ends in: the furthest page."""
+    latest: dict[str, SessionDescriptor] = {}
+    for item in descriptors:
+        if not item.session_id:
+            continue
+        held = latest.get(item.session_id)
+        if held is None or _page_order(item) > _page_order(held):
+            latest[item.session_id] = item
+    return latest
+
+
+def _page_order(item: SessionDescriptor) -> int:
+    return -1 if item.page is None else int(item.page.removeprefix("page-"))
 
 
 def peek_record_formats(state_root: Path, *, max_line_bytes: int = DEFAULT_MAX_JSONL_LINE_BYTES) -> dict[str, str]:

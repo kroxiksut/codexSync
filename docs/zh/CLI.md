@@ -40,20 +40,24 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `state-backup create` | **是** | 制作一个经过校验的 `.codex` 副本；`--wait` 会等待 Codex 关闭 | [配置](CONFIGURATION.md#codex-副本) |
 | `state-backup list` | 否 | 列出 `[state_backup] root_dir` 中的副本 | [配置](CONFIGURATION.md#codex-副本) |
 | `handoff status` | 否 | 哪台电脑在工作、各自交接了什么、什么已到达本机 | [同步](SYNC.md#在电脑之间交接工作) |
-| `handoff sync` | **是** | 载入其他电脑交接的内容，再交接本机；遇到任何冲突即停止 | [同步](SYNC.md#在电脑之间交接工作) |
+| `handoff sync` | **是** | 载入其他电脑交接的内容，再交接本机；冲突由 `conflict.policy` 裁决（单次运行可用 `--conflict-policy`） | [同步](SYNC.md#在电脑之间交接工作) |
 | `handoff watch` | **是** | 登录任务运行的监视器：启动时载入，Codex 关闭时交接 | [同步](SYNC.md#在电脑之间交接工作) |
 | `sessions scan` | 否 | 对两侧的每个会话分支分类 | [会话](SESSIONS.md) |
 | `sessions resolve` | 否 | 为一处分叉记录一个决定 | [会话](SESSIONS.md#分叉) |
 | `sessions apply` | **是** | 按一份已确认的计划整体传输分支 | [会话](SESSIONS.md#执行计划) |
 | `sessions index` | 否 | 报告两边的 `session_index.jsonl` 各有什么 | [会话](SESSIONS.md#会话索引) |
+| `sessions names` | **是** | 其他机器显示的聊天名称；加 `--confirm-plan` 时给本机没有名称的聊天设置名称 | [会话](SESSIONS.md#写入-codex) |
+| `sessions catalogue` | **是** | 列出 Codex 不显示的聊天文件；加 `--confirm-plan` 时请 Codex 重建聊天列表 | [会话](SESSIONS.md#写入-codex) |
 | `chats list` / `chats tree` | 否 | 查找对话，看每个对话属于哪个项目 | [项目](PROJECTS.md#对话) |
 | `chats move` | **是** | 把选定的对话放到一个项目下 | [项目](PROJECTS.md#把对话移到某个项目) |
 | `projects sync` | **是** | 把其他电脑的项目列表合并到本机，再发布本机的列表（不带 `--confirm-plan` 时只是预览） | [项目](PROJECTS.md#机器之间的项目) |
+| `projects files` | 否 | 本机的项目文件夹是否包含其他机器上次的内容 | [项目](PROJECTS.md#项目文件夹) |
 | `repair-projects scan` | 否 | 构建一份不可变的、带哈希的修复计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `repair-projects apply` | **是** | 按标识执行某一份确切的计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `project-move scan` | 否 | 为项目计算哈希，并规划复制到新文件夹 | [项目](PROJECTS.md#搬移项目的文件) |
 | `project-move apply` | **是** | 复制、校验，然后让 Codex 指向新文件夹 | [项目](PROJECTS.md#搬移项目的文件) |
 | `history` | 否 | 根据日志列出过去的各类写操作（或某一类） | [同步](SYNC.md#历史) |
+| `recover list` | 否 | 列出未关闭的写操作日志以及各自怎样收尾（`--all`、`--json`） | [恢复](RECOVERY.md#被中断的写操作) |
 | `recover inspect` | 否 | 无副作用地读取一条写操作日志 | [恢复](RECOVERY.md#被中断的写操作) |
 | `recover resume` / `rollback` | **是** | 收尾一个被中断的写操作 | [恢复](RECOVERY.md#被中断的写操作) |
 

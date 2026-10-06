@@ -36,6 +36,9 @@ PHASES: tuple[str, ...] = (
     "sync_settings",
     "sync_chats",
     "sync_projects",
+    "sync_chat_names",
+    "refresh_catalogue",
+    "check_project_files",
 )
 
 

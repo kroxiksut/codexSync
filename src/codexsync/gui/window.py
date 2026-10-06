@@ -211,6 +211,12 @@ class MainWindow(QMainWindow):
             start = stored_page if stored_page in PAGES else "home"
         self._build(PAGES.index(start))
         self._check_config()
+        # Project folders change at any time and a machine that never ran a
+        # full sync with this version has told nobody what it holds, so every
+        # start compares and publishes once (D-026). It reads folders, not
+        # `.codex`, and runs in the background like any read.
+        if controller.config_exists():
+            QTimer.singleShot(0, lambda: self.screen("projects").check_files())
 
         hints = QGuiApplication.styleHints()
         if hasattr(hints, "colorSchemeChanged"):

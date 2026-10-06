@@ -43,6 +43,7 @@ from ..app import (
     accept_guardian_baseline,
     apply_project_move_plan,
     restore_global_state,
+    project_move_notes,
     save_project_move_plan,
     scan_project_move,
     apply_automation,
@@ -113,6 +114,7 @@ from ..app import (
     MAX_HANDOFF_DELIVERY_WAIT_MINUTES,
     handoff_status,
     run_handoff,
+    check_project_files,
 )
 from ..exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .locations import find_workspaces as find_workspace_candidates
@@ -212,7 +214,10 @@ def run(call: Callable[[], T]) -> Outcome:
             code=getattr(exc, "code", None), details=getattr(exc, "details", None),
         )
     except FailSafeError as exc:
-        return Outcome(failure=Failure.STOPPED_SAFELY, message=str(exc))
+        return Outcome(
+            failure=Failure.STOPPED_SAFELY, message=str(exc),
+            code=getattr(exc, "code", None), details=getattr(exc, "details", None),
+        )
     except Exception as exc:  # noqa: BLE001 - reported as a bug, never swallowed
         return Outcome(failure=Failure.UNEXPECTED, message=f"{type(exc).__name__}: {exc}")
 
@@ -286,6 +291,8 @@ class OpenedConfig:
 class MoveScan:
     plan: Any
     plan_path: Path
+    #: `app.project_move_notes` for the plan: warnings that block nothing.
+    notes: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,7 +541,7 @@ class Controller:
 
     def scan_sessions(
         self, *, source_machine: str, target_machine: str,
-        progress: ProgressCallback | None = None,
+        progress: ProgressCallback | None = None, conflict_policy: str | None = None,
     ) -> Outcome:
         """Scan both sides and keep the plan on disk so it can be applied by id.
 
@@ -560,6 +567,7 @@ class Controller:
                 scope=None if scope.is_empty else build_working_set(
                     self._config_path, projects=scope.projects, chats=scope.chats,
                 ),
+                conflict_policy=conflict_policy,
             )
             plan_path = plans / f"sessions-plan-{pair}.json"
             save_transfer_plan(plan, plan_path)
@@ -844,16 +852,50 @@ class Controller:
         """Every machine's handoff as this one sees it. Reads only."""
         return run(lambda: handoff_status(self._config_path))
 
-    def handoff_now(self, *, progress: ProgressCallback | None = None) -> Outcome:
+    def handoff_now(
+        self, *, progress: ProgressCallback | None = None, conflict_policy: str | None = None,
+    ) -> Outcome:
         """Load what others handed off, then hand off this machine.
 
         The window never waits for the cloud: a handoff that has not arrived
         is refused at once with how much of it has, and the watcher is the
-        one that waits.
+        one that waits. ``conflict_policy`` decides this run's conflicts by
+        one rule instead of `[conflict] policy` -- the buttons a stopped sync
+        offers (D-027).
         """
         return run(lambda: run_handoff(
             self._config_path, origin="window", wait_seconds=0, progress=progress,
+            conflict_policy=conflict_policy,
         ))
+
+    def remember_conflict_policy(self, policy: str) -> Outcome:
+        """Write `[conflict] policy` into the open config, as Settings would.
+
+        The same path the Settings page takes -- a comment-preserving edit,
+        the CLI's own validation, a refused save if the file moved under it,
+        the replaced file kept in `config-history/` -- in one call, for the
+        "always do this" box beside a stopped sync's buttons.
+        """
+
+        def go() -> bool:
+            document = read_config_document(self._config_path)
+            current = tomllib.loads(document.text).get("conflict", {}).get("policy")
+            if current == policy:
+                return False
+            text = set_value(document.text, "conflict", "policy", policy)
+            validate_config_text(text, path=self._config_path)
+            save_config_text(self._config_path, text, expected_sha256=document.sha256)
+            return True
+
+        return run(go)
+
+    def project_files(self) -> Outcome:
+        """Compare this machine's project folders with the others and publish them (D-026).
+
+        Writes only this machine's own file in the workspace, never a project
+        or `.codex`; reads every folder afresh, since they change at any time.
+        """
+        return run(lambda: check_project_files(self._config_path, publish=True))
 
     # --- guardian restore and project move ------------------------------------
 
@@ -882,7 +924,7 @@ class Controller:
             plan = scan_project_move(self._config_path, project_id=project_id, new_root=Path(new_root))
             path = self._plans_dir(cfg) / f"project-move-{_file_safe(plan.project_id)}.json"
             save_project_move_plan(plan, path)
-            return MoveScan(plan, path)
+            return MoveScan(plan, path, project_move_notes(plan))
 
         return run(go)
 

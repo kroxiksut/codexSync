@@ -225,7 +225,8 @@ What was decided (2026-09-23, by the owner):
   not depend on a person. Sessions, restore, repair and moves keep their
   confirmation and are never scheduled.
 - `--unattended` forces `manual_abort` on conflicts before planning, whatever
-  `conflict.policy` says: nobody is there to decide one.
+  `conflict.policy` says: nobody is there to decide one. (Amended by D-027:
+  the configured rule is a decision made in advance and applies here too.)
 - The process gate is not relaxed. A Codex that starts with the session makes
   the run a refusal (exit 3) rather than a race, and the window reports the
   task's last result in words.
@@ -303,7 +304,8 @@ What was decided:
   saved and applied by its own id in one process, so the freshness check that
   `--confirm-plan` gives is kept. Anything that needs a person stops the whole
   handoff before its first write — the chat plan is checked before the
-  settings sync runs. Recorded resolutions and the working set for the pair of
+  settings sync runs. (Amended by D-027: a conflict the configured rule
+  decides no longer needs a person.) Recorded resolutions and the working set for the pair of
   machines are used, because each is already a decision the person made.
 - **The handoff record is written only after both halves finished.** A new id
   and fingerprint only when this machine wrote to the cloud copy; a run that
@@ -541,3 +543,157 @@ catalogue, or one naming neither copy, leaves the duplicate blocked as before.
 Checked against the laptop's plan of 2026-10-02: the 11 transitions carry no
 own entry, so all follow the mirror into `archived_sessions/`, and 10 of them
 are byte-identical.
+
+## D-024: Codex is asked to rebuild its chat list; one SQLite row is written
+The worry recorded in D-020 came true on 2026-10-04. A full sync on the laptop
+wrote 197 chats into `.codex`, every project in Codex said "no chats", and
+`doctor` reported `not_listed=197 listed_at_another_path=11` with Codex
+running. Codex lists a chat from `threads` in `state_5.sqlite`, fills that
+table from the files only while `backfill_state.status` is not `complete`, and
+had marked it complete on 2026-03-09. The 11 are the D-023 archive moves: the
+row still names the old file.
+
+Read from Codex's own binary (desktop 26.930.3930.0, `codex.exe`): the
+migration inserts `backfill_state` as `(1, 'pending', NULL, NULL, now)`;
+startup runs the backfill while the status is anything but `complete` and
+waits for it; the backfill upserts each rollout file into `threads`
+(`archived` and the path included); and Codex's own diagnostic advises
+starting with no state database so that the backfill rebuilds it.
+
+What was decided (owner, 2026-10-04: "let's write the code right away"):
+
+- **codexSync writes one row, never a thread.** `thread_catalogue.reset_backfill`
+  puts `backfill_state` back to the row the migration creates — `pending`,
+  watermark and last success cleared — in one transaction that re-reads the
+  status under a write lock and refuses unless it is still `complete`. Codex
+  then writes every thread row itself, by its own rules. Writing rows was
+  rejected: some forty columns whose meaning only Codex knows.
+- **Only when a chat file is not reachable through the catalogue**: an id the
+  catalogue lacks, or a catalogued file that is gone (a moved chat). Codex's
+  own leftover copy of a catalogued thread does not count. The check lists file
+  names only (the id is in `rollout-<time>-<id>.jsonl`), so it costs no scan.
+- **Not repeated for the same files.** A digest of what was asked for is kept
+  in `temp_dir/thread-catalogue/<machine>.json`; the same set again is
+  `ALREADY_ASKED`, reported as files Codex does not list, never re-asked on
+  every sync.
+- **The usual envelope.** Plan id over the catalogue's bytes, the files and the
+  status; Codex closed (`SESSION_APPLY`, the gate the transfer already uses);
+  operation lock; journal family `thread-catalogue`; a verified backup of the
+  database and its sidecars; the plan rebuilt right before the write. Rollback
+  through `recover` is not offered: the write is one SQLite transaction, and
+  the database is in the snapshot.
+- Part of every full sync (`run_handoff`, after projects) and
+  `codexsync sessions catalogue` on its own. The first Codex start after it
+  takes longer.
+
+This amends "codexSync never writes SQLite" for exactly this one row. Thread
+rows, `session_index.jsonl` and the project registry stay unwritten and gated.
+
+## D-025: Chat names travel; `threads.name` is set only where it is unset
+Right after D-024 made the carried chats appear on the laptop (2026-10-04),
+each showed its first message instead of its name. The name lives only in
+`threads.name` (286 of 289 rows on the reference machine; `title` is the first
+message), never in the chat file, so a row Codex builds from the file has
+none. `session_index.jsonl` mirrors 164 of them and is not proven to feed the
+list (`PROVEN_CONTRACTS` is still empty), so it is not used.
+
+Decided (owner, 2026-10-04): each machine publishes the names it shows —
+never the first-message fallback — in `chat-names/<machine>.json` beside the
+manifest (`peer_board`, self-verifying, written only by its machine). A full
+sync sets a peer's name on a chat whose name here is unset (`NULL`, empty, or
+equal to its title) with the statement Codex itself uses to rename a thread
+(`UPDATE threads SET name = ? WHERE id = ?`, from `codex.exe` 26.930), guarded
+by the value the plan saw, in one transaction, in the catalogue envelope of
+D-024 (journal family `chat-names`). A name given here is never replaced
+(`kept`); two peers disagreeing leave the chat alone (`ambiguous`); a chat
+Codex has no row for yet waits for the next sync (`waiting`). This is the
+second, and last, SQLite write; thread rows are still never created.
+
+## D-026: Project folders are compared, never carried
+Owner, 2026-10-04: chats travel, so a chat can continue on a machine whose
+copy of the code is older. On the reference machine 8 of 19 project folders
+are outside the cloud folder and 4 are not git repositories. Each full sync
+publishes, per project, what the folder holds (`project-files/<machine>.json`):
+for git the commit, branch, and a digest of uncommitted changes; otherwise
+every file with its size, SHA-256 and change time (owner: "a list of files with
+hashes"), tool folders excluded, files over 100 MB by size and time, hashes
+cached locally per machine (`HashCache`, `config_locations.cache_dir()`) so
+only moved files are read. With each project goes the last time one of its
+chats changed there (`threads.cwd`/`updated_at`); owner: chats show where work
+happened, but every project is compared because anything may change a folder,
+so chat activity only orders and labels the warnings. The receiving machine
+warns on a missing commit, a divergence, changes left uncommitted there, plain
+files changed later there or only there (listed), or a missing folder. The
+publication is rewritten only when its content changes.
+
+Amended the same day (owner): "run the check on first launch, on the other
+machine too; folders and files appear and disappear at any time; mark in the
+window which files and projects did not come along, the same in the console".
+So every check reads afresh and publishes — a full sync, `projects files`, and
+the window on every start (a machine that never synced still publishes); a
+plain folder's publication carries the files it lost since its previous one
+(`removed`, kept 90 days), so "deleted there, still here" is told apart from
+"added here"; a folder present here and absent there is `MISSING_THERE`; the
+window lists projects and their files in Projects → Project folders, and the
+console prints every file. Nothing is
+copied or blocked. Git is optional and only read (`GIT_OPTIONAL_LOCKS=0`, so a
+status never rewrites the index); a folder an enclosing repository ignores is
+read as plain files. A failed check is logged and never fails the sync.
+`projects files` re-checks without syncing.
+
+## D-027: A conflict is decided by the configured rule; a chat continued in pages is one chat
+On 2026-10-05 a full sync on the reference machine stopped on "1 chat
+continued differently on the two machines", and the Sessions page offered no
+visible way to decide it. Two things were wrong.
+
+The conflict was not real (CS-356). Codex 0.160 carries a long chat on in a
+second file, `rollout-<time>-<id>_<other id>.jsonl`, whose `session_meta` has
+the same id and `history_base = {thread_id, end_ordinal_exclusive,
+end_byte_offset}`. CS-348 had read this as "Codex moved the chat and abandoned
+the old file", kept the file the catalogue names (the page) and compared it
+with the first file in the mirror: no common records. The first file here had
+in fact only grown (its first 7448 lines were byte-identical to the mirror's),
+and a second chat, paged in August, had never had its first 1203 records
+mirrored at all. Decided: a page is a branch of its own, keyed `<id>#page-<first
+ordinal>` (`SessionDescriptor.branch_key`); the first file keeps the session's
+own hash, so earlier plans, manifest entries and resolutions still apply. The
+catalogue's row places the whole chain, since Codex reaches the other files
+through `history_base`; readers that count chats (`chats`, `repair-projects`,
+project moves) take one file per chat, and `doctor` counts a chat whose row
+names an earlier part as listed elsewhere. A `history_base` in another shape is
+reported (`UNREADABLE_HISTORY_BASE`) and the duplicate rule applies as before.
+
+And a real conflict could only be decided by hand (CS-357…360). Owner: "if a
+newer version is clear, let it win; put the rules in the settings so the
+console works the same without the window". Decided:
+
+- **One rule for files and chats**: `[conflict] policy`, now
+  `prefer_newer_mtime` by default (was `manual_abort`). For a chat "newer" is
+  the time of its last record, parsed as a moment, never the file's mtime,
+  which Codex kept through its September rewrite. Two chats that end at the
+  same moment, or one without a time, still ask (`RULE_CANNOT_DECIDE`), except
+  a pure format rewrite, where the newer format is kept. `prefer_local` /
+  `prefer_cloud` always decide; `manual_abort` blocks as before.
+- **The loser is never lost**: a chat decided by the rule goes through the same
+  path as one decided by a person — the losing branch whole into the conflict
+  bundle before anything is replaced (`RESOLVED_BY_RULE`, `RULE_<NAME>`) — and
+  a file goes into the verified backup first, as every overwrite always did.
+- **A person's choice outranks the rule**: a recorded resolution about exactly
+  these bytes, `DEFER` included, is applied as before.
+- **A one-way `sync.direction` decides too**: `to_cloud` keeps this machine's
+  copy and never writes `.codex`, `to_local` the reverse; a write the direction
+  does not go is `HELD_BY_DIRECTION`, which blocks nothing.
+- **The rule is frozen into the plan** (`TransferPlan.conflict_rule`,
+  `direction`, left out of the id material at their defaults) and an apply
+  rebuilds under it, like the mirror codec: the id the user confirmed decides.
+- **It applies in every run.** Amends D-016: `--unattended` no longer forces
+  `manual_abort`; the configured rule is the person's decision made in
+  advance. Amends D-018: a handoff stops only on what the rule leaves open.
+- **One-run override**: `--conflict-policy` on `sync`, `handoff sync` and
+  `sessions scan`; in the window, a stopped sync offers *Keep the newer
+  copies* / *this machine's* / *the cloud's* where it stopped, with *Always
+  decide this way* writing `[conflict] policy` through the Settings save path;
+  the Sessions page decides all conflicts of a scan by one rule.
+
+This amends `AI_RULES.md` §6 ("conflict: no writes, manual resolution"): that
+remains the behaviour of `manual_abort`, which is still one setting away.

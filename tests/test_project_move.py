@@ -34,9 +34,9 @@ from codexsync.project_move import (
 )
 
 try:
-    from tests.test_guardian_state_isolation import forbid_writes_under
+    from tests.test_guardian_state_isolation import forbid_writes_under, plain_path
 except ImportError:  # collected with tests/ itself on sys.path
-    from test_guardian_state_isolation import forbid_writes_under
+    from test_guardian_state_isolation import forbid_writes_under, plain_path
 
 
 SANDBOX = Path(__file__).resolve().parent.parent / "test-sandbox"
@@ -46,7 +46,9 @@ LARGE_SIZE = 3 * 1024 * 1024 + 17
 
 
 def _norm(path) -> str:
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    # The module works in `\\?\` form on Windows; a delete aimed at the old
+    # folder in that form must still count as aimed at it.
+    return os.path.normcase(os.path.abspath(plain_path(os.fspath(path))))
 
 
 def _inside(path, root) -> bool:
@@ -784,6 +786,108 @@ class NoDeletionOutsideStagingTests(ProjectMoveTestCase):
         self.assertTrue(any(_inside(path, self.work) for path in recorded), "the staging copy was removed")
         self._assert_source_never_targeted(recorded, source_after_edit)
         self.assertEqual((self.source / "data" / "blob.bin").read_bytes(), b"edited")
+
+
+class LongPathTests(ProjectMoveTestCase):
+    """2026-10-06: a 219-character path inside `.git` fitted under the old and
+    the new root but not under the staging directory, whose name adds about
+    forty characters, and the move failed with `WinError 3`."""
+
+    def _deep_file(self) -> str:
+        """A file whose path fits the 260 limit at the source, not in staging."""
+        room = 255 - len(str(self.source)) - 1
+        segments, used = [], 0
+        while used + 41 < room - 12:
+            segments.append("d" * 40)
+            used += 41
+        name = "f" * (room - used)
+        relative = "/".join([*segments, name])
+        target = self.source.joinpath(*segments)
+        target.mkdir(parents=True)
+        (target / name).write_bytes(b"deep")
+        staging = project_move._staging_path(str(self.target), "0" * 64)
+        self.assertGreaterEqual(len(staging) + 1 + len(relative), 260, "the case this test is about")
+        return relative
+
+    def test_a_path_that_only_overflows_in_staging_is_still_copied(self) -> None:
+        relative = self._deep_file()
+        plan = self.plan()
+        self.assertEqual(plan.codes, ())
+        result = self.apply(plan)
+        self.assertEqual(result.copied_files, plan.file_count)
+        self.assertEqual((self.target / relative).read_bytes(), b"deep")
+        self.assertEqual(self.move_artifacts(), [], "no staging directory is left behind")
+
+    def test_a_failed_copy_of_a_deep_tree_leaves_no_staging_behind(self) -> None:
+        self._deep_file()
+        # Git keeps its objects read-only and `copy2` carries that across: the
+        # partial copy of a repository used to survive its own cleanup.
+        read_only = self.source / "aaa-object"
+        read_only.write_bytes(b"blob")
+        read_only.chmod(stat.S_IREAD)
+        self.addCleanup(lambda: read_only.chmod(stat.S_IWRITE | stat.S_IREAD))
+        plan = self.plan()
+        real_copy2 = shutil.copy2
+
+        def fail_late(src, dst, *args, **kwargs):
+            if os.path.basename(src).startswith("f" * 10):
+                raise OSError("disk full")
+            return real_copy2(src, dst, *args, **kwargs)
+
+        with patch("shutil.copy2", side_effect=fail_late):
+            with self.assertRaises(FailSafeError):
+                self.apply(plan)
+        self.assertEqual(self.move_artifacts(), [])
+        self.assertFalse(self.target.exists())
+
+    def test_the_longest_path_is_reported_and_warned_about_only_where_it_matters(self) -> None:
+        relative = self._deep_file()
+        plan = self.plan()
+        longest = len(os.path.abspath(plan.new_root)) + 1 + len(relative)
+        self.assertEqual(project_move.longest_target_path(plan), longest)
+        with patch.object(project_move, "long_paths_limited", return_value=True), \
+                patch.object(project_move, "WINDOWS_MAX_PATH", longest):
+            self.assertTrue(project_move.move_notes(plan).over_path_limit)
+        with patch.object(project_move, "long_paths_limited", return_value=False), \
+                patch.object(project_move, "WINDOWS_MAX_PATH", longest):
+            self.assertFalse(project_move.move_notes(plan).over_path_limit)
+        with patch.object(project_move, "long_paths_limited", return_value=True):
+            self.assertFalse(project_move.move_notes(plan).over_path_limit, "under the limit: nothing to say")
+
+
+class AbandonedStagingTests(ProjectMoveTestCase):
+    """A rebuilt plan stages under a new name, so an earlier attempt's partial
+    copy used to stay beside the target for good."""
+
+    def _staging(self, name: str, marker: dict | None) -> Path:
+        path = self.work / name
+        (path / "some" / "dir").mkdir(parents=True)
+        (path / "some" / "dir" / "file.txt").write_text("partial", encoding="utf-8")
+        if marker is not None:
+            (path / STAGING_MARKER_NAME).write_text(json.dumps(marker), encoding="utf-8")
+        return path
+
+    def test_an_earlier_attempt_at_this_move_is_reported_then_removed(self) -> None:
+        mine = self._staging(
+            ".codexsync-move-1111111111111111.partial",
+            {"format": project_move._MARKER_FORMAT, "plan_id": "1" * 64, "new_root": str(self.target)},
+        )
+        elsewhere = self._staging(
+            ".codexsync-move-2222222222222222.partial",
+            {"format": project_move._MARKER_FORMAT, "plan_id": "2" * 64, "new_root": str(self.work / "other")},
+        )
+        older_build = self._staging(
+            ".codexsync-move-3333333333333333.partial",
+            {"format": project_move._MARKER_FORMAT, "plan_id": "3" * 64},
+        )
+        unmarked = self._staging(".codexsync-move-4444444444444444.partial", None)
+        plan = self.plan()
+        self.assertEqual(project_move.move_notes(plan).abandoned_stagings, (str(mine),))
+        self.apply(plan)
+        self.assertFalse(mine.exists())
+        for kept in (elsewhere, older_build, unmarked):
+            self.assertTrue(kept.exists(), f"{kept.name} is not provably this move's")
+        self.assertTrue((self.target / "README.md").is_file())
 
 
 class PlanFileTests(ProjectMoveTestCase):

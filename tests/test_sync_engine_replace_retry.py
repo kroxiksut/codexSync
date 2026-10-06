@@ -10,6 +10,7 @@ import uuid
 
 from codexsync.backup import BackupManager
 from codexsync.exceptions import SafetyPreconditionError
+from codexsync.fs_replace import REPLACE_ATTEMPTS
 from codexsync.models import CopyAction, SyncPlan
 from codexsync.sync_engine import SyncEngine
 
@@ -97,7 +98,7 @@ class ReplaceRetryTests(unittest.TestCase):
             with patch("codexsync.sync_engine.time.sleep"):
                 with self.assertRaises(OSError):
                     self._engine().execute(self.plan, dry_run=False)
-        self.assertEqual(locked.calls, 5, "the retry must stay bounded")
+        self.assertEqual(locked.calls, REPLACE_ATTEMPTS, "the retry must stay bounded")
         self.assertEqual(self.dst.read_text(encoding="utf-8"), "old-data")
 
     def test_non_transient_error_is_not_retried(self) -> None:

@@ -55,6 +55,7 @@ from .jsonl_codec import JSONL_READ_ERRORS, JsonlCodec, codec_of, open_jsonl, tr
 
 from .exceptions import FailSafeError
 from .semantic_transfer import conflict_id_for
+from .fs_replace import replace_with_retry
 
 
 SEMANTIC_MANIFEST_FORMAT = "codexsync-semantic-manifest-v1"
@@ -312,7 +313,7 @@ class SemanticStore:
             # and this one has just been verified.
             shutil.rmtree(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(stage, destination)
+        replace_with_retry(stage, destination)
         _write_json(destination / "COMMITTED", {"sha256": sha256})
         return destination
 
@@ -379,7 +380,7 @@ class SemanticStore:
             "common_records": common_records,
         })
         destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(stage, destination)
+        replace_with_retry(stage, destination)
         _write_json(destination / "COMMITTED", {"conflict_id": conflict_id})
         return destination
 
@@ -497,7 +498,7 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
         written = json.loads(stage.read_text(encoding="utf-8"))
         if written != payload:
             raise FailSafeError("Semantic manifest entry failed verification before commit")
-        os.replace(stage, path)
+        replace_with_retry(stage, path)
     except Exception:
         stage.unlink(missing_ok=True)
         raise

@@ -84,8 +84,12 @@ class _Workspace(unittest.TestCase):
         patcher = mock.patch("codexsync.app._make_safety_gate", side_effect=lambda cfg: self.gate)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Project file hashes are cached per machine; never in the real one here.
+        cache = mock.patch("codexsync.app._project_hash_cache_root", return_value=self.root / "hash-cache")
+        cache.start()
+        self.addCleanup(cache.stop)
 
-    def machine(self, name: str, **handoff: object) -> tuple[Path, Path]:
+    def machine(self, name: str, *, conflict_policy: str | None = None, **handoff: object) -> tuple[Path, Path]:
         """A `.codex` and a config for machine ``name`` in the shared workspace."""
         local = self.root / name / "codex"
         local.mkdir(parents=True, exist_ok=True)
@@ -121,6 +125,9 @@ class _Workspace(unittest.TestCase):
 
             [state]
             manifest_file = "{(self.workspace / 'manifest.json').as_posix()}"
+
+            [conflict]
+            policy = "{conflict_policy or 'prefer_newer_mtime'}"
         """).strip() + f"""
 
 [handoff]
@@ -420,7 +427,7 @@ class RunHandoffTests(_Workspace):
 
     def test_a_conflict_stops_the_handoff_before_any_write(self) -> None:
         desktop, desktop_codex = self.machine("desktop")
-        laptop, laptop_codex = self.machine("laptop")
+        laptop, laptop_codex = self.machine("laptop", conflict_policy="manual_abort")
         self.write(desktop_codex / "skills" / "tool.md", "base")
         run_handoff(desktop)
         run_handoff(laptop)

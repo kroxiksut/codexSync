@@ -4,12 +4,17 @@ import argparse
 import logging
 import json
 import sys
+import time
 from pathlib import Path
 
 from .app import (
+    CONFLICT_POLICIES,
     HandoffStatus,
     ProjectSyncResult,
     sync_projects,
+    refresh_thread_catalogue,
+    sync_chat_names,
+    check_project_files,
     handoff_status,
     run_handoff,
     watch_handoff,
@@ -29,6 +34,8 @@ from .app import (
     collect_process_snapshot,
     inspect_recovery,
     list_history,
+    list_journals,
+    project_move_notes,
     move_chats,
     print_preflight_report,
     record_branch_resolution,
@@ -445,6 +452,16 @@ class _ArgumentParser(argparse.ArgumentParser):
         self.exit(int(ExitCode.BAD_INPUT), f"{self.prog}: error: {message}\n")
 
 
+def _conflict_policy_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--conflict-policy", choices=CONFLICT_POLICIES, default=None,
+        help="For this run, decide conflicts of settings files and chats by this rule instead of "
+        "[conflict] policy: prefer_newer_mtime keeps the newer copy (a chat: its later last "
+        "record), prefer_local this machine's, prefer_cloud the cloud's, manual_abort stops. "
+        "The copy not kept is backed up first (a chat: whole, in the conflict bundle)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="codexsync", description="codexSync CLI")
     parser.add_argument(
@@ -570,11 +587,9 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument(
         "--unattended",
         action="store_true",
-        help=(
-            "Nobody is watching (the sign-in task): any conflict stops the run before "
-            "a write, whatever conflict.policy says"
-        ),
+        help="Nobody is watching (the sign-in task); recorded as the run's origin",
     )
+    _conflict_policy_argument(sync)
 
     restore = sub.add_parser("restore", help="Restore files from backup snapshot")
     restore.add_argument("--from", dest="snapshot", default=None, help="Snapshot directory name in backup_dir")
@@ -722,6 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--save-scope", action="store_true",
         help="Remember this working set for this pair of machines",
     )
+    _conflict_policy_argument(sessions_scan)
     sessions_sub.add_parser(
         "index",
         help="Report what each side's session_index.jsonl contains; writes nothing",
@@ -739,6 +755,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep the newer record format for every conflict that is only a format rewrite",
     )
     sessions_resolve.add_argument("--output", required=True, help="Resolutions file to create or extend")
+    sessions_catalogue = sessions_sub.add_parser(
+        "catalogue",
+        help="Chat files Codex does not list; with --confirm-plan, ask Codex to rebuild its chat list",
+    )
+    sessions_catalogue.add_argument(
+        "--confirm-plan", default=None, help="Plan id from the preview; Codex must be closed"
+    )
+    sessions_catalogue.add_argument(
+        "--dry-run", action="store_true", help="Run every check without writing"
+    )
+    sessions_catalogue.add_argument("--json", dest="as_json", action="store_true")
+    sessions_names = sessions_sub.add_parser(
+        "names",
+        help="Chat names other machines show; with --confirm-plan, set them on chats unnamed here",
+    )
+    sessions_names.add_argument(
+        "--confirm-plan", default=None, help="Plan id from the preview; Codex must be closed"
+    )
+    sessions_names.add_argument("--dry-run", action="store_true", help="Run every check without writing")
+    sessions_names.add_argument("--json", dest="as_json", action="store_true")
     sessions_apply = sessions_sub.add_parser(
         "apply", help="Apply one exact cold session transfer plan"
     )
@@ -812,6 +848,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --confirm-plan: run every check, including the process gate, and write nothing",
     )
     projects_sync.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+    projects_files = projects_sub.add_parser(
+        "files",
+        help="Whether this machine's project folders hold what other machines last had; writes nothing",
+    )
+    projects_files.add_argument("--all", action="store_true", help="List every project, not only warnings")
+    projects_files.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
 
     state_backup = sub.add_parser(
         "state-backup",
@@ -844,8 +886,9 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_sync = handoff_sub.add_parser(
         "sync",
         help="Load what other machines handed off, then hand off this one: settings and chats, "
-        "stopping on any conflict. Codex must be closed",
+        "conflicts decided by [conflict] policy. Codex must be closed",
     )
+    _conflict_policy_argument(handoff_sync)
     handoff_sync.add_argument(
         "--wait-minutes", type=int, default=None,
         help="Minutes to wait for another machine's handoff to arrive (default: handoff.delivery_wait_minutes)",
@@ -874,6 +917,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     recover = sub.add_parser("recover", help="Inspect and clear interrupted mutation evidence")
     recover_sub = recover.add_subparsers(dest="recover_command", required=True)
+    recover_list = recover_sub.add_parser(
+        "list", help="List mutation journals still open (they block every sync), without side effects"
+    )
+    recover_list.add_argument("--all", action="store_true", help="Include finished journals too")
+    recover_list.add_argument("--json", action="store_true", dest="as_json", help="Print JSON")
     recover_inspect = recover_sub.add_parser("inspect", help="Read one mutation journal without side effects")
     recover_inspect.add_argument("operation_id")
     recover_resume = recover_sub.add_parser(
@@ -1094,6 +1142,50 @@ def _print_history(runs) -> None:
         )
 
 
+def _print_journals(journals, *, as_json: bool, include_finished: bool) -> None:
+    """Open journals first, each with what it takes to close it."""
+    if as_json:
+        print(json.dumps([
+            {
+                **_history_record(item),
+                "terminal": item.terminal,
+                "machine_id": item.machine_id,
+                "own": item.own,
+                "closes_itself": item.closes_itself,
+                "can_resume": item.can_resume,
+                "can_rollback": item.can_rollback,
+                "rollback_refusal": item.rollback_refusal,
+            }
+            for item in journals
+        ], sort_keys=True, indent=2))
+        return
+    if not journals:
+        print("No journals recorded." if include_finished else "No open journals: nothing blocks a sync.")
+        return
+    for item in journals:
+        state = item.state if item.readable and item.state else "UNREADABLE"
+        if item.failure:
+            state = f"{state} ({item.failure})"
+        machine = item.machine_id or ("this machine" if item.own else "not recorded")
+        print(
+            f"{item.operation_id}  {item.created_at_utc or '?'}  {item.family or '?'}  {state}  "
+            f"machine={machine}  backup={item.backup_snapshot or '-'}"
+        )
+        if item.terminal:
+            continue
+        if item.closes_itself:
+            print("    stopped before replacing anything; the next sync on this machine closes it by itself")
+        elif not item.readable:
+            print("    cannot be read; inspect the file in the journals folder before anything else")
+        elif not item.own:
+            print("    another machine's run; close it there, or here with `recover resume` once that run is over")
+        else:
+            exits = ["`recover resume`"] + (["`recover rollback`"] if item.can_rollback else [])
+            print(f"    entered the commit phase; close it with {' or '.join(exits)}")
+            if item.rollback_refusal:
+                print(f"    rollback: {item.rollback_refusal}")
+
+
 def _handoff_record_json(record) -> dict | None:
     if record is None:
         return None
@@ -1210,6 +1302,29 @@ def _print_handoff_status(status: HandoffStatus) -> None:
 #: Commands a scheduled task runs besides `sync`, which also log to
 #: `logging.file` (`system_scheduler._JOB_SUBCOMMANDS`).
 _FILE_LOGGED_ONLY = frozenset({"guardian", "preflight", "state-backup", "handoff"})
+
+
+_FILE_LABELS = (
+    ("newer_there", "changed later there"),
+    ("missing_here", "only there"),
+    ("removed_there", "deleted there, still here"),
+)
+
+
+def _print_project_files(items, *, limit: int | None, indent: str = "  ") -> None:
+    """One line per project and one per file that did not come along (D-026)."""
+    for item in items:
+        print(f"{indent}{item.verdict.value:<20} {item.name}  ({item.root}) against {item.peer}, "
+              f"as of {item.peer_published_at_utc or '?'}")
+        if item.chats_there_at:
+            print(f"{indent}    chats of this project went on there until "
+                  f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(item.chats_there_at))}")
+        for field, label in _FILE_LABELS:
+            paths = getattr(item, field)
+            for path in paths if limit is None else paths[:limit]:
+                print(f"{indent}    {label}: {path}")
+            if limit is not None and len(paths) > limit:
+                print(f"{indent}    ... and {len(paths) - limit} more {label}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1436,6 +1551,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  code: {code}")
             for code, path in plan.blocked_paths:
                 print(f"    {code}: {path}")
+            notes = project_move_notes(plan)
+            if notes.over_path_limit:
+                print(
+                    f"  WARNING: the longest path in the copy will be {notes.longest_path} characters; "
+                    "long paths are off on this machine, so a program that is not long-path aware "
+                    "may fail to open such files there. The move itself is not affected."
+                )
+            for path in notes.abandoned_stagings:
+                print(f"  left by an earlier attempt, removed by apply: {path}")
             if args.save_plan:
                 save_project_move_plan(plan, Path(args.save_plan).expanduser().resolve())
             return int(ExitCode.CONFLICT_DETECTED if plan.codes else ExitCode.OK)
@@ -1533,6 +1657,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_machine=args.target_machine,
                 resolutions_path=Path(args.resolutions).expanduser().resolve() if args.resolutions else None,
                 scope=scope,
+                conflict_policy=args.conflict_policy,
             )
             counts: dict[str, int] = {}
             for item in plan.items:
@@ -1628,6 +1753,79 @@ def main(argv: list[str] | None = None) -> int:
             print("  Re-run `sessions scan --resolutions <file>` to rebuild the plan with it.")
             return int(ExitCode.OK)
 
+        if args.command == "sessions" and args.sessions_command == "catalogue":
+            refresh = refresh_thread_catalogue(
+                config_path, confirm_plan=args.confirm_plan, dry_run=args.dry_run, origin="cli",
+            )
+            plan = refresh.plan
+            if args.as_json:
+                print(json.dumps({
+                    "plan_id": plan.plan_id,
+                    "status": plan.status.value,
+                    "database": plan.database,
+                    "backfill": plan.backfill,
+                    "unnamed": list(plan.unnamed),
+                    "codes": list(plan.codes),
+                    "refreshed": refresh.refreshed,
+                    "volatile": refresh.volatile,
+                }, sort_keys=True, indent=2))
+                return int(ExitCode.OK)
+            print(f"Codex chat list: {plan.status.value} (catalogue {plan.database or '-'}, "
+                  f"backfill {plan.backfill or '-'})")
+            if plan.codes:
+                print(f"  codes: {', '.join(plan.codes)}")
+            print(f"  chat files Codex does not list: {len(plan.unnamed)}")
+            for path in plan.unnamed:
+                print(f"    {path}")
+            if refresh.volatile:
+                print("  Codex is running: this reading is only an indication")
+            if refresh.refreshed:
+                print("Asked Codex to rebuild its chat list; it does so on its next start.")
+            elif args.confirm_plan is None and plan.writes:
+                print(f"  plan id: {plan.plan_id}")
+                print("  Close Codex and run again with --confirm-plan <plan id> to ask it to rebuild its chat list.")
+            return int(ExitCode.OK)
+
+        if args.command == "sessions" and args.sessions_command == "names":
+            named = sync_chat_names(
+                config_path, confirm_plan=args.confirm_plan, dry_run=args.dry_run, origin="cli",
+            )
+            plan = named.plan
+            if args.as_json:
+                # Ids and counts only: the names themselves are the user's.
+                print(json.dumps({
+                    "plan_id": plan.plan_id,
+                    "database": plan.database,
+                    "to_set": [item.thread_id for item in plan.changes],
+                    "kept": plan.kept,
+                    "ambiguous": plan.ambiguous,
+                    "waiting": plan.waiting,
+                    "codes": list(plan.codes),
+                    "written": named.written,
+                    "published": named.published,
+                    "volatile": named.volatile,
+                }, sort_keys=True, indent=2))
+                return int(ExitCode.OK)
+            print(f"Chat names from other machines: {len(plan.changes)} to set here")
+            if plan.codes:
+                print(f"  codes: {', '.join(plan.codes)}")
+            if plan.kept:
+                print(f"  named differently here, kept: {plan.kept}")
+            if plan.ambiguous:
+                print(f"  named differently by two machines, left alone: {plan.ambiguous}")
+            if plan.waiting:
+                print(f"  waiting for Codex to list the chat here: {plan.waiting}")
+            if named.volatile:
+                print("  Codex is running: this reading is only an indication")
+            if args.confirm_plan is None:
+                if plan.writes:
+                    print(f"  plan id: {plan.plan_id}")
+                    print("  Close Codex and run again with --confirm-plan <plan id> to set them.")
+            elif not args.dry_run:
+                print(f"Set {named.written} name(s); this machine's names "
+                      + ("published." if named.published else "unchanged."))
+            return int(ExitCode.OK)
+
         if args.command == "sessions" and args.sessions_command == "apply":
             written = apply_session_transfer(
                 config_path,
@@ -1639,6 +1837,33 @@ def main(argv: list[str] | None = None) -> int:
             )
             label = "Session transfer dry-run finished" if args.dry_run else "Session transfer finished"
             print(f"{label}. branches={written}")
+            return int(ExitCode.OK)
+
+        if args.command == "projects" and args.projects_command == "files":
+            # Every check reads the folders afresh and publishes this machine's
+            # side, so the other machines compare against today (D-026).
+            report = check_project_files(config_path, publish=True)
+            shown = report.items if args.all else report.warnings
+            if args.as_json:
+                print(json.dumps([
+                    {
+                        "project": item.name, "root": item.root, "peer": item.peer,
+                        "verdict": item.verdict.value, "peer_published_at_utc": item.peer_published_at_utc,
+                        "newer_there": list(item.newer_there), "missing_here": list(item.missing_here),
+                        "removed_there": list(item.removed_there),
+                        "chats_there_at": item.chats_there_at or None,
+                    }
+                    for item in shown
+                ], sort_keys=True, indent=2, ensure_ascii=False))
+                return int(ExitCode.OK)
+            if report.published:
+                print("This machine's project folders were published for the other machines.")
+            if not report.items:
+                print("No other machine has published its project folders yet (it does on its next check).")
+                return int(ExitCode.OK)
+            print(f"Project folders compared with other machines: {len(report.items)}, "
+                  f"needing attention: {len(report.warnings)}")
+            _print_project_files(shown, limit=None)
             return int(ExitCode.OK)
 
         if args.command == "projects":
@@ -1693,6 +1918,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return int(ExitCode.OK)
 
+        if args.command == "recover" and args.recover_command == "list":
+            journals = list_journals(config_path)
+            if not args.all:
+                journals = [item for item in journals if not item.terminal]
+            _print_journals(journals, as_json=args.as_json, include_finished=args.all)
+            return int(ExitCode.OK)
+
         if args.command == "recover" and args.recover_command == "inspect":
             journal = inspect_recovery(config_path, args.operation_id)
             print(json.dumps({
@@ -1706,6 +1938,7 @@ def main(argv: list[str] | None = None) -> int:
                 "origin": journal.origin,
                 "finished_at_utc": journal.finished_at_utc,
                 "failure": journal.failure,
+                "machine_id": journal.machine_id,
             }, sort_keys=True, indent=2))
             return int(ExitCode.OK)
 
@@ -1754,10 +1987,16 @@ def main(argv: list[str] | None = None) -> int:
                         "Waiting for the cloud: "
                         + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
                     ),
+                    conflict_policy=args.conflict_policy,
                 )
                 print(f"Handoff finished on {result.machine}.")
                 print(f"  loaded from: {', '.join(result.taken) or 'nothing new'}")
                 print(f"  files written: {result.sync_actions}, chats written: {result.session_actions}")
+                if result.chats_decided_by_rule:
+                    print(
+                        f"  chats changed on both machines, decided by [conflict] policy: "
+                        f"{result.chats_decided_by_rule} (the copy not kept is in the conflict bundle)"
+                    )
                 if result.new_chats_written:
                     print(
                         f"  chats new to this machine written into Codex: {result.new_chats_written} "
@@ -1781,6 +2020,25 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         f"  added projects whose folder does not exist here: {result.projects_missing_folders} "
                         "(create the folder, or add a [[path_mappings]] rule)"
+                    )
+                if result.chat_names_set or result.chat_names_kept or result.chat_names_waiting:
+                    print(
+                        f"  chat names taken from other machines: {result.chat_names_set}"
+                        f" (named differently here, kept: {result.chat_names_kept};"
+                        f" waiting for Codex to list the chat: {result.chat_names_waiting})"
+                    )
+                if result.project_files_behind:
+                    print("  project folders that did not come along (`projects files` lists every file):")
+                    _print_project_files(result.project_files_behind, limit=20, indent="    ")
+                if result.chats_codex_will_list:
+                    print(
+                        f"  chats Codex lists after its next start: {result.chats_codex_will_list} "
+                        "(it rebuilds its chat list from the files; that start takes longer)"
+                    )
+                if result.chats_codex_ignores:
+                    print(
+                        f"  chat files Codex still does not list after rebuilding: {result.chats_codex_ignores} "
+                        "(the files are in place; `sessions catalogue` lists them)"
                     )
                 print(
                     "  handed off: " + (result.record.handoff_id if result.handed_off else "nothing new")
@@ -1825,6 +2083,7 @@ def main(argv: list[str] | None = None) -> int:
                 manual_terminate_confirmation_override=args.manual_terminate_confirmation_override,
                 enforce_safety=True,
                 unattended=args.unattended,
+                conflict_policy=args.conflict_policy,
             )
             dry_run = ctx.config.sync.dry_run_default
             if args.dry_run:

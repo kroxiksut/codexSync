@@ -1,10 +1,11 @@
 """Sessions: how every branch compares across two machines, and applying a plan.
 
 The screen groups branches the way a person decides about them: identical,
-transferable, needing a decision, not supported. A divergence is never merged,
-sorted or newer-wins -- it is shown with its conflict id and a choice that is
-recorded against the exact bytes of both branches, after which the scan is
-repeated so the plan reflects the choice.
+transferable, needing a decision, not supported. A divergence is never merged.
+It is decided by `[conflict] policy` (D-027) when the rule can tell, and what
+is left is shown with its conflict id and a choice recorded against the exact
+bytes of both branches -- one at a time, or all at once by one rule for this
+scan -- after which the scan is repeated so the plan reflects the choice.
 
 Apply always quotes a saved plan and its exact id, and the core rebuilds the
 plan from the current state and refuses if the id moved. The window saves the
@@ -22,6 +23,7 @@ from .base import Model, Screen
 
 CATEGORIES = {
     "OUT_OF_SCOPE": "out_of_scope",
+    "HELD_BY_DIRECTION": "out_of_scope",
     "NOOP": "same",
     "FAST_FORWARD_LOCAL": "transfer",
     "FAST_FORWARD_REMOTE": "transfer",
@@ -38,6 +40,8 @@ CATEGORY_TONES = {
     "out_of_scope": None, "same": None,
 }
 CHOICES = ("KEEP_LOCAL", "KEEP_REMOTE", "DEFER")
+#: One rule for every conflict of a scan, in button order (`[conflict] policy`).
+RULES = ("prefer_newer_mtime", "prefer_local", "prefer_cloud")
 
 
 class SessionsModel(Model):
@@ -67,8 +71,12 @@ class SessionsModel(Model):
         #: The chat directory the tree of projects is drawn from.
         self.directory: Outcome | None = None
         self.directory_busy = False
+        #: A rule chosen on this page for every conflict of the next scans of
+        #: this pair, instead of `[conflict] policy`. ``None`` follows the config.
+        self.rule: str | None = None
 
     def reset_plans(self) -> None:
+        self.rule = None
         self.scan = None
         self.action_result = None
         self.scope = None
@@ -150,6 +158,15 @@ class SessionsScreen(Screen):
         self.resolution_hint = label("", "muted", wrap=True)
         inner.addLayout(row(label(self.t("sessions.choice.label")), self.choice, self.resolve_button))
         inner.addWidget(self.resolution_hint)
+        # Every conflict at once by one rule: the scan is repeated under it and
+        # the plan says which copy each one keeps (D-027).
+        self.rule_buttons = {}
+        for policy in RULES:
+            choice = button(self.t(f"sessions.rule.{policy}"))
+            choice.clicked.connect(lambda _=False, policy=policy: self.decide_all(policy))
+            self.rule_buttons[policy] = choice
+        self.rule_label = label(self.t("sessions.rule.label"))
+        inner.addLayout(row(self.rule_label, *self.rule_buttons.values()))
         # Codex rewrote every session into a newer record format once; each old
         # copy is then a conflict of its own, and deciding them one by one is
         # hundreds of clicks for one decision. Shown only when there are some.
@@ -318,7 +335,9 @@ class SessionsScreen(Screen):
         self.source.setEditText(source)
         self.target.setEditText(target)
         self._pair_changed()
-        self.model.category = ""
+        # Straight to the chats that stopped it.
+        self.model.category = "decide"
+        self.category.setCurrentIndex(max(0, self.category.findData("decide")))
         self.scan()
 
     def _pair_changed(self, *_: object) -> None:
@@ -326,6 +345,7 @@ class SessionsScreen(Screen):
         if self.model.scope_busy or self.model.scope_pair == self._pair():
             return
         self.model.source, self.model.target = self._pair()
+        self.model.rule = None
         self.load_working_set()
 
     def load_projects(self) -> None:
@@ -526,7 +546,7 @@ class SessionsScreen(Screen):
         model.action_result = None
         self.render()
         controller = self.host.controller
-        source, target = model.source, model.target
+        source, target, rule = model.source, model.target, model.rule
 
         def apply(model: SessionsModel, outcome: Outcome) -> None:
             model.busy = False
@@ -534,10 +554,21 @@ class SessionsScreen(Screen):
 
         self.read(
             lambda progress=None: controller.scan_sessions(
-                source_machine=source, target_machine=target, progress=progress,
+                source_machine=source, target_machine=target, progress=progress, conflict_policy=rule,
             ),
             apply, progress=True,
         )
+
+    def decide_all(self, policy: str) -> None:
+        """Scan again with every conflict decided by ``policy``.
+
+        Writes nothing: the plan shows what each one keeps, and *Apply* is the
+        decision, quoting that plan's id like any other.
+        """
+        if self.model.busy or self.model.action_busy:
+            return
+        self.model.rule = policy
+        self.scan()
 
     def resolve(self) -> None:
         model = self.model
@@ -556,12 +587,14 @@ class SessionsScreen(Screen):
         controller = self.host.controller
         source, target = model.source, model.target
 
+        rule = model.rule
+
         def go() -> Outcome:
             recorded = controller.resolve_session_conflict(scan, conflict_id=item.conflict_id, choice=choice)
             if not recorded.ok:
                 return recorded
             # A decision changes the plan; show the plan it produces.
-            return controller.scan_sessions(source_machine=source, target_machine=target)
+            return controller.scan_sessions(source_machine=source, target_machine=target, conflict_policy=rule)
 
         def apply(model: SessionsModel, outcome: Outcome) -> None:
             model.action_busy = False
@@ -585,11 +618,13 @@ class SessionsScreen(Screen):
         controller = self.host.controller
         source, target = model.source, model.target
 
+        rule = model.rule
+
         def go() -> Outcome:
             recorded = controller.resolve_format_migrations(scan)
             if not recorded.ok:
                 return recorded
-            return controller.scan_sessions(source_machine=source, target_machine=target)
+            return controller.scan_sessions(source_machine=source, target_machine=target, conflict_policy=rule)
 
         def apply(model: SessionsModel, outcome: Outcome) -> None:
             model.action_busy = False
@@ -607,10 +642,12 @@ class SessionsScreen(Screen):
         if scan is None or model.action_busy:
             return
         plan = scan.plan
+        decided = sum(1 for item in plan.writable_items if "RESOLVED_BY_RULE" in item.codes)
+        body = self.t("sessions.confirm.body", count=len(plan.writable_items), plan_id=plan.plan_id)
+        if decided:
+            body += "\n\n" + self.p("sessions.confirm.decided", decided)
         if not dry_run and not self.host.confirm(
-            self.t("sessions.confirm.title"),
-            self.t("sessions.confirm.body", count=len(plan.writable_items), plan_id=plan.plan_id),
-            self.t("sessions.apply"),
+            self.t("sessions.confirm.title"), body, self.t("sessions.apply"),
         ):
             return
         model.action_busy = True
@@ -724,6 +761,13 @@ class SessionsScreen(Screen):
             self.resolution_hint.setText(self.t("sessions.resolve.hint", conflict_id=conflict[:16]))
         else:
             self.resolution_hint.setText(self.t("sessions.resolve.select"))
+        conflicts = scan is not None and any(
+            item.action.value == "BLOCKED_CONFLICT" for item in scan.plan.items
+        )
+        self.rule_label.setVisible(conflicts)
+        for choice in self.rule_buttons.values():
+            choice.setVisible(conflicts)
+            choice.setEnabled(not (self.model.busy or self.model.action_busy))
         decidable, held = _format_migrations(scan.plan) if scan is not None else (0, 0)
         self.format_button.setVisible(bool(decidable))
         self.format_button.setEnabled(bool(decidable) and not self.model.action_busy)
@@ -783,7 +827,7 @@ class SessionsScreen(Screen):
 
 #: Notes about chats a plan does not carry, as opposed to notes about what it
 #: does beyond a plain copy.
-LEFT_OUT_NOTES = frozenset({"new_in_cloud", "held", "unreadable"})
+LEFT_OUT_NOTES = frozenset({"new_in_cloud", "held", "unreadable", "direction"})
 
 
 def plan_notes(plan) -> list[tuple[str, int]]:
@@ -792,9 +836,16 @@ def plan_notes(plan) -> list[tuple[str, int]]:
     Counted from the items, so the page says the same thing whatever codes a
     plan happens to collect at its own level.
     """
-    counts = {"new_in_cloud": 0, "held": 0, "unreadable": 0, "moves": 0, "stale": 0}
+    counts = {
+        "new_in_cloud": 0, "held": 0, "unreadable": 0, "moves": 0, "stale": 0, "decided": 0,
+        "direction": 0,
+    }
     for item in plan.items:
         action = item.action.value
+        if "RESOLVED_BY_RULE" in item.codes and (item.action.writes or action == "HELD_BY_DIRECTION"):
+            counts["decided"] += 1
+        if action == "HELD_BY_DIRECTION":
+            counts["direction"] += 1
         if action == "BLOCKED_UNPROVEN_LAYOUT" and "SESSION_ON_ONE_SIDE_ONLY" in item.codes:
             counts["new_in_cloud"] += 1
         elif action in {"BLOCKED_UNPROVEN_LAYOUT", "BLOCKED_UNSUPPORTED_BACKEND"}:

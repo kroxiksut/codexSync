@@ -76,9 +76,15 @@ the apply asks for a new scan.
 
 ## Divergences
 
-A divergence is never resolved automatically — no interleaving, no sorting by
-timestamp, no "newer wins". Both branches stay as they are, and the plan blocks
-until a decision is recorded:
+A divergence is never merged — no interleaving, no sorting of records. One of
+the two copies is kept, and the other goes whole into the conflict bundle
+before anything is replaced. Which one is decided by
+[`conflict.policy`](SYNC.md#conflicts) ([D-027](../dev/DECISIONS.md)): by
+default the copy whose last message is later, or always this machine's, or
+always the cloud's (`--conflict-policy` for one scan). Such an item carries
+`RESOLVED_BY_RULE`. Under `manual_abort`, and for two copies that end at the
+same moment (`RULE_CANNOT_DECIDE`), the plan blocks until a decision is
+recorded:
 
 ```powershell
 codexsync -c config.toml sessions resolve --plan sessions-plan.json --conflict <conflict-id> --choice KEEP_LOCAL --output resolutions.json
@@ -95,6 +101,15 @@ catalogue is left alone by the apply and does not change the exit code.
 A decision is pinned to the
 exact bytes of both branches: if either changes afterwards, the decision is
 refused as `STALE_RESOLUTION` rather than applied to a history you never saw.
+A recorded decision, `DEFER` included, always outranks the policy. In the
+window, the Sessions page decides every conflict of a scan at once by one rule
+(*All conflicts at once*), or one at a time.
+
+A long chat is continued by Codex in a second file,
+`rollout-…-<id>_<other id>.jsonl`, which opens with the same chat id and says
+where it carries on (`history_base`). The chat is the chain of files: each
+file is carried on its own (a page shows `HISTORY_PAGE`), the first one keeps
+growing as before, and neither is a conflict with the other.
 
 Record equality is decided by raw bytes. Canonical JSON is consulted only where it
 is provably unambiguous, so two different records can never collapse into one.
@@ -202,12 +217,26 @@ new_chats = "same_path"   # same_path | keep_in_cloud
   overwritten (`DESTINATION_OCCUPIED`), and a catalogue that places the chat
   somewhere else or cannot be read still refuses (`BLOCKED_UNSUPPORTED_BACKEND`).
 
-Codex lists chats from its thread catalogue, which codexSync does not write, so
-with `same_path` a new chat appears only once Codex takes the file up itself.
-That was observed under 0.1 and not yet in the controlled run, so it is checked
-every time: after starting Codex, `doctor` reports `session_visibility` — how
-many chat files here the catalogue does not list. `not_listed=0` means every
-chat is visible.
+Codex lists chats from its thread catalogue, which it fills from the chat files
+once and then keeps up itself. A chat file written afterwards — every chat from
+another machine — is not in it, so Codex does not show it. A full sync therefore
+asks Codex to rebuild that list from the files (`D-024`): codexSync puts one
+status row back to the value Codex creates it with, after a verified backup of
+the catalogue, and Codex writes every chat into its list on its next start,
+which takes longer than usual. codexSync never writes a chat into the catalogue
+itself. `codexsync sessions catalogue` lists the chat files Codex does not
+list and, with `--confirm-plan`, asks the same on its own. It is asked once per
+set of files; if Codex still leaves some out, the sync says so instead of
+asking again. `doctor` reports the same count as `session_visibility`;
+`not_listed=0` means every chat is visible.
+
+A chat's **name** is not in its file either: Codex keeps it only in that
+catalogue, so a carried chat first shows its first message. Each machine
+therefore publishes the names it shows into `chat-names` beside the manifest,
+and a full sync sets the other machine's name on a chat whose name here is
+unset — never over a name given here (`D-025`). A chat Codex lists only after
+its next start gets its name on the sync after that. `codexsync sessions names`
+previews and, with `--confirm-plan`, does the same on its own.
 
 The chat's working folder may be elsewhere on this machine. The file is not
 changed for that (a record's bytes are its identity); map the folder with

@@ -28,6 +28,7 @@ from typing import Any, Iterable
 from .exceptions import ConfigError
 from .guardian_models import normalize_machine_id
 from .models import FileMeta, ManifestEntry, SnapshotFingerprint, SyncManifest
+from .fs_replace import replace_with_retry
 
 LOG = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ def save_manifest(manifest: SyncManifest, path: Path | None) -> None:
         fh.write("\n")
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp_path, path)
+    replace_with_retry(tmp_path, path)
 
 
 def build_manifest(

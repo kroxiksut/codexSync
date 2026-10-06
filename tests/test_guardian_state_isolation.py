@@ -43,6 +43,21 @@ class _Clock:
         self.now += seconds
 
 
+def plain_path(path):
+    """``path`` without Windows' extended-length prefix (``\\\\?\\``).
+
+    `resolve()` keeps the prefix, so `\\\\?\\D:\\x` is not "inside" `D:\\x`
+    to a plain comparison and a write in that form would slip past a guard.
+    """
+    if isinstance(path, bytes):
+        return path
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[8:]
+    if path.startswith("\\\\?\\"):
+        return path[4:]
+    return path
+
+
 @contextmanager
 def forbid_writes_under(state_root: Path):
     """Fail on any mutating filesystem call targeting ``state_root``.
@@ -56,7 +71,7 @@ def forbid_writes_under(state_root: Path):
         if isinstance(candidate, int):  # already-open descriptor
             return False
         try:
-            resolved = Path(os.fspath(candidate)).resolve()
+            resolved = Path(plain_path(os.fspath(candidate))).resolve()
         except (TypeError, ValueError, OSError):
             return False
         return resolved == root or root in resolved.parents

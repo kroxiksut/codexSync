@@ -15,14 +15,20 @@ that looks like it can send half a plan.
 The History tab lists past runs from the operation journals -- the same files
 the Recovery page reads, so a history needs no store of its own. Reading them
 touches neither `.codex` nor the gate, which is why it may load on arrival.
+
+A full sync that stopped on something both machines changed offers the answer
+where the question is (D-027): keep the newer copies, this machine's, or the
+cloud's, for this run -- and, with the box ticked, as `[conflict] policy` for
+every run after it. The run is the same full sync, decided by that rule; the
+copy not kept is saved first, as always.
 """
 from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtWidgets import QComboBox, QLineEdit, QTabWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QLineEdit, QTabWidget
 
-from ..controller import Outcome
+from ..controller import Failure, Outcome
 from ..widgets import Banner, Cell, button, card, fill_table, label, row, set_tone, table
 from .base import Model, Screen
 
@@ -34,6 +40,7 @@ VIEWS = ("plan", "history")
 HISTORY_LIMIT = 150
 #: Journal failures the History tab names in words; anything else shows its class.
 KNOWN_FAILURES = (
+    "Abandoned",
     "ConflictError",
     "SafetyPreconditionError",
     "FailSafeError",
@@ -45,6 +52,9 @@ KNOWN_FAILURES = (
 )
 #: Who may have started a run (`run_sync(origin=...)`).
 ORIGINS = ("window", "cli", "unattended", "handoff")
+#: The answers a stopped sync offers, in button order: `[conflict] policy`
+#: values, each decided for files and chats alike (D-027).
+DECIDE_POLICIES = ("prefer_newer_mtime", "prefer_local", "prefer_cloud")
 
 
 class SyncModel(Model):
@@ -106,12 +116,26 @@ class SyncScreen(Screen):
         self.body.addWidget(self.views, stretch=1)
 
         self.result = label("", wrap=True)
-        self.decide_button = button(self.t("sync.decisions.open"), primary=True)
+        self.body.addWidget(self.result)
+        # The answers to a stopped sync, beside the sentence that asks (D-027).
+        self.decide_buttons = {}
+        for index, policy in enumerate(DECIDE_POLICIES):
+            choice = button(self.t(f"sync.decide.{policy}"), primary=index == 0)
+            choice.clicked.connect(lambda _=False, policy=policy: self.decide(policy))
+            self.decide_buttons[policy] = choice
+        self.decide_button = button(self.t("sync.decisions.open"))
         self.decide_button.clicked.connect(self.open_decisions)
-        self.decide_button.setVisible(False)
-        self.body.addLayout(row(self.result, self.decide_button))
+        self.remember = QCheckBox(self.t("sync.decide.remember"))
+        self.decide_row = row(*self.decide_buttons.values(), self.decide_button)
+        self.body.addLayout(self.decide_row)
+        self.body.addWidget(self.remember)
+        self._show_decisions(False)
         self.links = ResultLinks(self)
         self.body.addLayout(self.links.layout)
+
+    def _show_decisions(self, visible: bool) -> None:
+        for widget in (*self.decide_buttons.values(), self.decide_button, self.remember):
+            widget.setVisible(visible)
 
     def _build_history(self):
         self.history_summary = label()
@@ -279,6 +303,46 @@ class SyncScreen(Screen):
         # is how a laptop ended up with its own sidebar after a sync.
         self.host.run(self.page, lambda progress=None: controller.handoff_now(progress=progress), apply, progress=True)
 
+    def decide(self, policy: str) -> None:
+        """Run the full sync again with this run's conflicts decided by ``policy``.
+
+        One confirmation, like *Synchronise*. With the box ticked the rule is
+        written into the config first -- through the same validated, history-
+        keeping save the Settings page uses -- so the next run, from any shell,
+        decides the same way; a save that fails stops before the sync.
+        """
+        if self.model.run_busy:
+            return
+        remember = self.remember.isChecked()
+        if not self.host.confirm(
+            self.t("sync.decide.confirm.title"),
+            self.t(f"sync.decide.confirm.{policy}")
+            + ("\n\n" + self.t("sync.decide.confirm.remember") if remember else ""),
+            self.t(f"sync.decide.{policy}"),
+        ):
+            return
+        self.model.run_busy = True
+        self.model.run_kind = "apply"
+        self.model.result = None
+        self.render()
+        controller = self.host.controller
+
+        def go(progress=None) -> Outcome:
+            if remember:
+                saved = controller.remember_conflict_policy(policy)
+                if not saved.ok:
+                    return saved
+            return controller.handoff_now(progress=progress, conflict_policy=policy)
+
+        def apply(model: SyncModel, outcome: Outcome) -> None:
+            model.run_busy = False
+            model.result = outcome
+            model.history = None
+            if outcome.ok:
+                model.preview = None
+
+        self.host.run(self.page, go, apply, progress=True)
+
     def open_decisions(self) -> None:
         """Go to the chats the stopped sync named, for the pair it was syncing."""
         run = self.model.result
@@ -361,7 +425,11 @@ class SyncScreen(Screen):
         elif run.ok and hasattr(run.value, "sync_actions"):
             self.result.setText(full_sync_result(self, run.value))
             self.links.show(run.value)
-            set_tone(self.result, "attention" if run.value.projects_missing_folders else "ok", palette)
+            attention = (
+                run.value.projects_missing_folders or run.value.chats_codex_ignores
+                or run.value.project_files_behind
+            )
+            set_tone(self.result, "attention" if attention else "ok", palette)
         elif run.ok:
             value = run.value
             key = "sync.done.apply" if value.applied else "sync.done.dry"
@@ -376,11 +444,16 @@ class SyncScreen(Screen):
         else:
             self.result.setText(self.failure_text(run))
             set_tone(self.result, "danger", palette)
+            self.links.show_stop(run)
         self.result.setVisible(bool(self.result.text()))
-        self.decide_button.setVisible(
-            not model.run_busy and run is not None and not run.ok and run.code == DECISIONS_CODE
-            and isinstance(run.details, dict)
+        # A stop on something both machines changed -- chats or settings files
+        # -- is answered right here; only chats also have a page to go to.
+        stopped = (
+            not model.run_busy and run is not None and not run.ok
+            and run.failure is Failure.NEEDS_A_DECISION
         )
+        self._show_decisions(stopped)
+        self.decide_button.setVisible(stopped and run.code == DECISIONS_CODE and isinstance(run.details, dict))
         self._render_history()
         if (
             model.view == "history" and model.history is None
@@ -464,6 +537,8 @@ class SyncScreen(Screen):
 
 #: A full sync stopped on chats a person has to decide (`ChatDecisionsNeeded`).
 DECISIONS_CODE = "CHAT_DECISIONS_NEEDED"
+#: A run refused because an earlier journal is still open (`RecoveryPendingError`).
+RECOVERY_CODE = "RECOVERY_PENDING"
 
 
 def decisions_text(screen: Screen, details: dict) -> str:
@@ -490,6 +565,9 @@ def full_sync_result(screen: Screen, result) -> str:
 def full_sync_notes(screen: Screen, result) -> list[str]:
     """What a full sync left for a person, one sentence each; `ResultLinks` leads there."""
     notes = []
+    # Said every time: a choice nobody saw is still a choice (D-027).
+    if getattr(result, "chats_decided_by_rule", 0):
+        notes.append(screen.p("sync.note.decided_by_rule", result.chats_decided_by_rule))
     if result.projects_missing_folders:
         notes.append(screen.p("sync.note.missing_folders", result.projects_missing_folders))
     # The part a setting changes is said apart from the rest (CS-347).
@@ -498,6 +576,28 @@ def full_sync_notes(screen: Screen, result) -> list[str]:
     others = result.chats_not_loaded - result.new_chats_kept_in_cloud
     if others > 0:
         notes.append(screen.p("sync.note.chats_not_loaded", others))
+    # Written is not shown: Codex lists a chat only once its catalogue has it (D-024).
+    if result.chats_codex_will_list:
+        notes.append(screen.p("sync.note.codex_will_list", result.chats_codex_will_list))
+    if result.chats_codex_ignores:
+        notes.append(screen.p("sync.note.codex_ignores", result.chats_codex_ignores))
+    # Names live only in Codex's catalogue, so they travel separately (D-025).
+    if result.chat_names_set:
+        notes.append(screen.p("sync.note.names_set", result.chat_names_set))
+    if result.chat_names_waiting:
+        notes.append(screen.p("sync.note.names_waiting", result.chat_names_waiting))
+    if result.chat_names_kept:
+        notes.append(screen.p("sync.note.names_kept", result.chat_names_kept))
+    # Chats travel, project folders do not (D-026).
+    for item in result.project_files_behind:
+        text = screen.t(
+            f"sync.note.files.{item.verdict.value}", project=item.name, machine=item.peer,
+            newer=len(item.newer_there), missing=len(item.missing_here), removed=len(item.removed_there),
+        )
+        if item.chats_there_at:
+            when = datetime.fromtimestamp(item.chats_there_at).strftime("%Y-%m-%d %H:%M")
+            text += " " + screen.t("sync.note.files.chats_there", when=when)
+        notes.append(text)
     return notes
 
 
@@ -513,22 +613,44 @@ class ResultLinks:
     def __init__(self, screen: Screen) -> None:
         self.screen = screen
         self.result = None
+        self.journal: str | None = None
+        self.recovery = button(screen.t("sync.link.recovery"))
+        self.recovery.clicked.connect(lambda: screen.host.go_to("recovery", self.journal))
         self.mappings = button(screen.t("sync.link.mappings"))
         self.mappings.clicked.connect(lambda: screen.host.go_to("settings", "mappings"))
         self.new_chats = button(screen.t("sync.link.new_chats"))
         self.new_chats.clicked.connect(lambda: screen.host.go_to("settings", "semantic.new_chats"))
         self.sessions = button(screen.t("sync.decisions.open"))
         self.sessions.clicked.connect(self.open_sessions)
-        self.layout = row(self.mappings, self.new_chats, self.sessions)
+        self.files = button(screen.t("sync.link.files"))
+        self.files.clicked.connect(self.open_files)
+        self.layout = row(self.recovery, self.mappings, self.new_chats, self.sessions, self.files)
         self.show(None)
+
+    def show_stop(self, outcome) -> None:
+        """A run that did not happen: offer the journal that stopped it, if one did."""
+        self.show(None)
+        details = outcome.details if isinstance(outcome.details, dict) else {}
+        if outcome.code == RECOVERY_CODE and details.get("operation_id"):
+            self.journal = str(details["operation_id"])
+            self.recovery.setVisible(True)
 
     def show(self, result) -> None:
         self.result = result
+        self.journal = None
+        self.recovery.setVisible(False)
         self.mappings.setVisible(bool(result is not None and result.projects_missing_folders))
         self.new_chats.setVisible(bool(result is not None and result.new_chats_kept_in_cloud))
         self.sessions.setVisible(bool(
             result is not None and result.chats_not_loaded - result.new_chats_kept_in_cloud > 0
         ))
+        self.files.setVisible(bool(result is not None and result.project_files_behind))
+
+    def open_files(self) -> None:
+        """Projects, at the folders that did not come along, checked afresh."""
+        host = self.screen.host
+        host.go_to("projects", "files")
+        host.screen("projects").check_files()
 
     def open_sessions(self) -> None:
         """Sessions, for the pair of machines the sync paired chats between."""

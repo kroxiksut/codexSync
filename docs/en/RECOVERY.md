@@ -57,6 +57,25 @@ is interrupted — a power cut, a forced shutdown — the journal stays open, an
 every later write refuses to start until it is closed. That block is what keeps a
 half-applied state from being changed further. Two commands close it.
 
+**A run that stopped before replacing anything closes by itself.** A journal
+still at `PREPARED` or `BACKED_UP` proves no file was replaced — the usual cause
+is a cloud client holding the journal file while uploading it, so the write that
+would have closed it was refused too. The next write on the same machine closes
+such a journal (history reason *Abandoned*) and goes ahead. Two kinds still wait
+for you: a run that entered the commit phase (`COMMITTING`,
+`RECOVERY_REQUIRED`), and another machine's run — the journals folder is in the
+shared workspace, and that run may still be going.
+
+**See what is open** (no side effects):
+
+```powershell
+codexsync -c config.toml recover list           # open journals, and what closes each
+codexsync -c config.toml recover list --all     # finished ones too; --json for scripts
+```
+
+In the window the same list is the **Recovery** page; a synchronisation stopped
+by an open journal offers **Open Recovery**, which lands on that journal.
+
 **Read the evidence first** (no side effects):
 
 ```powershell

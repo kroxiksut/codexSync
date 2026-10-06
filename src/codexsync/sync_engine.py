@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 import logging
 import os
 from pathlib import Path
@@ -12,16 +11,12 @@ from collections.abc import Callable
 
 from .backup import BackupManager
 from .exceptions import FailSafeError
+from .fs_replace import replace_with_retry
 from .jsonl_codec import JsonlCodec, codec_of, open_jsonl, transcode
 from .models import CopyAction, DeleteAction, SyncPlan
 
 LOG = logging.getLogger(__name__)
 
-_REPLACE_ATTEMPTS = 5
-_REPLACE_BACKOFF_SECONDS = 0.1
-# Windows: ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
-_TRANSIENT_WINERRORS = frozenset({5, 32, 33})
-_TRANSIENT_ERRNOS = frozenset({errno.EACCES, errno.EBUSY, errno.ETXTBSY})
 #: Marks a payload staged beside its destination. Greppable on purpose: this is
 #: what a user finds in `.codex` after a run that was killed mid-staging.
 STAGE_SUFFIX = ".codexsync.tmp"
@@ -48,14 +43,6 @@ def _older_than(path: Path, seconds: float, now: float) -> bool:
     except OSError:
         return False
     return (now - max(stat.st_ctime, stat.st_mtime)) > seconds
-
-
-def _is_transient_lock(exc: OSError) -> bool:
-    """True when the target was momentarily held open by another process."""
-    winerror = getattr(exc, "winerror", None)
-    if winerror is not None:
-        return winerror in _TRANSIENT_WINERRORS
-    return exc.errno in _TRANSIENT_ERRNOS
 
 
 class SyncEngine:
@@ -226,20 +213,7 @@ class SyncEngine:
         starts during the wait still stops the commit.  Errors that are not a
         transient lock are raised on the first attempt.
         """
-        for attempt in range(_REPLACE_ATTEMPTS):
-            try:
-                os.replace(staged, dst)
-                return
-            except OSError as exc:
-                if attempt == _REPLACE_ATTEMPTS - 1 or not _is_transient_lock(exc):
-                    raise
-                LOG.warning(
-                    "atomic replace blocked by another process (%s); retry %d of %d for %s",
-                    exc, attempt + 1, _REPLACE_ATTEMPTS - 1, dst,
-                )
-                time.sleep(_REPLACE_BACKOFF_SECONDS * (2 ** attempt))
-                if self._before_replace_check is not None:
-                    self._before_replace_check()
+        replace_with_retry(staged, dst, before_retry=self._before_replace_check)
 
     @staticmethod
     def _ensure_parent(path: Path) -> None:

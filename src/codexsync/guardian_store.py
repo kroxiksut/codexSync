@@ -44,6 +44,7 @@ from .guardian_retention import (
     prune_staging,
     prune_uncommitted_snapshots,
 )
+from .fs_replace import replace_with_retry
 
 
 QUARANTINE_PAYLOAD_NAME = "source.bin"
@@ -214,7 +215,7 @@ class GuardianStore:
             destination = destination_parent / event_id
             if destination.exists():
                 raise GuardianIntegrityError("Refusing to overwrite an existing Guardian quarantine event")
-            os.replace(stage_dir, destination)
+            replace_with_retry(stage_dir, destination)
             _fsync_directory(destination_parent)
             # Only after the newest event is in place: it carries their count.
             for _event, _occurrences, directory in superseded:
@@ -258,7 +259,7 @@ class GuardianStore:
         _ensure_private_dir(destination_parent)
         if snapshot.directory.exists():
             raise GuardianIntegrityError("Refusing to overwrite an existing Guardian snapshot")
-        os.replace(stage_dir, snapshot.directory)
+        replace_with_retry(stage_dir, snapshot.directory)
         _fsync_directory(destination_parent)
         _fault(fault_hook, "snapshot_published")
 
@@ -280,7 +281,7 @@ class GuardianStore:
         # longest path in the store -- over 260 characters on a deep root (CS-310).
         temp_marker = marker.with_name(COMMITTED_TEMP_NAME)
         _write_private_file(temp_marker, (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
-        os.replace(temp_marker, marker)
+        replace_with_retry(temp_marker, marker)
         _fsync_directory(snapshot.directory)
         _fault(fault_hook, "committed")
 

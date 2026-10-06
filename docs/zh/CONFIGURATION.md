@@ -51,7 +51,7 @@ temp_dir = "${workspace_root}/.tmp"
 | `[sync]` | 比较方式、方向、删除、默认试运行 | [同步](SYNC.md) |
 | `[targets]` | `include_roots`：`.codex` 下哪些内容参与 `sync` | [同步](SYNC.md#同步哪些内容) |
 | `[filters]` | `exclude_globs`：哪些内容永不复制 | [同步](SYNC.md#同步哪些内容) |
-| `[conflict]` | 两侧都被改过的文件适用的 `policy` | [同步](SYNC.md#冲突) |
+| `[conflict]` | 两侧都被改过的文件或聊天适用的 `policy`（默认：保留较新的） | [同步](SYNC.md#冲突) |
 | `[backup]` | 备份的保留策略与格式 | [恢复](RECOVERY.md#备份) |
 | `[guardian]` | 快照存储、轮询、减少阈值、保留策略 | [守护](GUARDIAN.md#设置) |
 | `[semantic]` | 冲突包、镜像压缩 | [会话](SESSIONS.md#云端镜像) |
@@ -175,8 +175,8 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
 - **登录后同步**（`sync_at_login = true`，即「登录后同步设置」复选框）是唯一的例外，默认
   关闭。它会安装第二个任务，在您登录后等待 `startup_delay_seconds`，执行一次
   `sync --apply --unattended`，之后不再重复。它经过与手动同步相同的检查：Codex 打开时
-  会被拒绝（退出码 3），而 `--unattended` 会让任何冲突在写入前停止（退出码 2），不论
-  `conflict.policy` 如何设置。它只同步设置目录 —— 任务从不传输会话。如果 Codex 随
+  会被拒绝（退出码 3），冲突与任何一次运行一样由 `conflict.policy` 裁决；策略未能裁决的
+  冲突会在写入前停止它（退出码 2）。它只同步设置目录 —— 任务从不传输会话。如果 Codex 随
   Windows 启动，任务运行时它已经打开，同步会直接跳过；若希望它生效，请把 Codex 从自启动
   中移除。窗口会显示该任务的上次运行及其结果含义。
 - 它是用户级任务 —— Windows 上是任务计划程序，macOS 上是 LaunchAgent，Linux 上是

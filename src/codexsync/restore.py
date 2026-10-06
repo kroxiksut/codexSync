@@ -250,6 +250,7 @@ def execute_restore_plan(
                     _plan_hash(plan),
                     plan.action_count,
                     backup_snapshot=mgr.snapshot_name,
+                    machine_id=cfg.identity.machine_id or platform.node(),
                 )
                 current = [journal]
 

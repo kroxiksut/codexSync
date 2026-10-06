@@ -686,6 +686,7 @@ class AutomationScreen(ConfigFormScreen):
             result = model.handoff_result
             if not result.ok:
                 text, tone = self.failure_text(result), "danger"
+                self.handoff_links.show_stop(result)
             else:
                 done = result.value
                 parts = [self.t(
@@ -701,7 +702,10 @@ class AutomationScreen(ConfigFormScreen):
                 parts.extend(full_sync_notes(self, done))
                 self.handoff_links.show(done)
                 text = " ".join(parts)
-                tone = "attention" if done.chats_not_loaded or done.projects_missing_folders else "ok"
+                tone = "attention" if (
+                    done.chats_not_loaded or done.projects_missing_folders or done.chats_codex_ignores
+                    or done.project_files_behind
+                ) else "ok"
         self.handoff_status.setText(text)
         set_tone(self.handoff_status, tone, palette)
         self.handoff_status.setVisible(bool(text))

@@ -76,8 +76,22 @@ from .project_sync import (
     build_project_merge,
     publication_from_state,
     read_board as read_project_board,
+    root_key,
     serialise_state,
     write_publication,
+)
+from .project_files import (
+    WARNINGS as FILES_WARNINGS,
+    FilesPublication,
+    GitRunner,
+    Verdict as FilesVerdict,
+    compare,
+    now_utc as files_now_utc,
+    read_files_board,
+    read_files_state,
+    run_git,
+    with_removed,
+    write_files_publication,
 )
 from .guardian_runner import GuardianRunner
 from .guardian_store import GuardianStore
@@ -86,6 +100,7 @@ from .chat_move import ChatMovePlan, apply_chat_moves_to_state, build_chat_move_
 from .guardian_schema import (
     build_binding_value,
     detect_state_schema,
+    project_root_paths,
     replace_project_root,
     supports_project_creation,
     supports_root_remap,
@@ -119,6 +134,7 @@ from .project_move import (
     apply_project_move,
     build_project_move_plan,
     load_project_move_plan,
+    move_notes as project_move_notes,
     save_project_move_plan,
 )
 from .runtime import (
@@ -162,7 +178,9 @@ from .semantic_transfer import (
     MOVES_BRANCH,
     OLDER_FORMAT_HAS_LATER_RECORDS,
     NEW_CHAT_SAME_PATH,
+    RESOLVED_BY_RULE,
     build_transfer_plan,
+    conflict_rule_for,
     descriptors_by_session_hash,
     format_migration_resolutions,
     layout_for_new_chats,
@@ -176,8 +194,36 @@ from .semantic_transfer import (
 )
 from .semantic_store import SemanticStore
 from .jsonl_codec import JSONL_READ_ERRORS, JsonlCodec, codec_of, open_jsonl
-from .sqlite_audit import read_thread_placements
-from .session_catalog import scan_both_sides, scan_sessions
+from .sqlite_audit import (
+    PlacementStatus,
+    ThreadActivity,
+    read_backfill_state,
+    read_thread_activity,
+    read_thread_names,
+    read_thread_placements,
+)
+from .fs_replace import replace_with_retry
+from .config_locations import cache_dir
+from .chat_names import (
+    NamePlan,
+    apply_names,
+    build_name_plan,
+    publication_from_names,
+    read_names_back,
+    read_names_board,
+    write_names_publication,
+)
+from .thread_catalogue import (
+    BACKFILL_PENDING,
+    CatalogueRefreshPlan,
+    RefreshStatus,
+    build_refresh_plan,
+    database_fingerprint,
+    read_backfill_status,
+    reset_backfill,
+    unnamed_digest,
+)
+from .session_catalog import one_per_chat, scan_both_sides, scan_sessions
 from .session_index import (
     PROVEN_CONTRACTS,
     SESSION_INDEX_FILE,
@@ -214,6 +260,13 @@ __all__ = [
     "HandoffStatus",
     "handoff_status",
     "run_handoff",
+    "refresh_thread_catalogue",
+    "CatalogueRefreshResult",
+    "sync_chat_names",
+    "ChatNamesResult",
+    "check_project_files",
+    "ProjectFilesItem",
+    "ProjectFilesReport",
     "watch_handoff",
     "MAX_STATE_BACKUP_INTERVAL_HOURS",
     "DEFAULT_SCHEDULER_INTERVAL_SECONDS",
@@ -248,6 +301,7 @@ __all__ = [
     "ProjectMovePlan",
     "ProjectMoveResult",
     "apply_project_move_plan",
+    "project_move_notes",
     "restore_global_state",
     "save_project_move_plan",
     "scan_project_move",
@@ -382,13 +436,23 @@ def apply_config_migration(
     )
 
 
-def unattended_config(cfg: AppConfig) -> AppConfig:
-    """The config a run nobody is watching works with (`D-016`).
+#: `[conflict] policy` values, which are also what `--conflict-policy` takes.
+CONFLICT_POLICIES = ("manual_abort", "prefer_newer_mtime", "prefer_local", "prefer_cloud")
 
-    Nobody is there to decide a conflict, so none is decided: whatever
-    `conflict.policy` says, a conflict stops the run before any write.
+
+def with_conflict_policy(cfg: AppConfig, policy: str | None) -> AppConfig:
+    """``cfg`` with `[conflict] policy` replaced for one run, or as it is.
+
+    A run nobody watches used to force `manual_abort` here (`D-016`). Since
+    D-027 the rule in the config is the person's decision made in advance, so
+    it applies whoever starts the run; this override is the one-run choice a
+    stopped sync offers ("keep the newer copies", "keep this machine's").
     """
-    return replace(cfg, conflict=replace(cfg.conflict, policy="manual_abort"))
+    if policy is None:
+        return cfg
+    if policy not in CONFLICT_POLICIES:
+        raise ConfigError(f"conflict policy must be one of: {', '.join(CONFLICT_POLICIES)}")
+    return replace(cfg, conflict=replace(cfg.conflict, policy=policy))
 
 
 def build_context(
@@ -396,11 +460,9 @@ def build_context(
     manual_terminate_confirmation_override: bool | None = None,
     enforce_safety: bool = True,
     unattended: bool = False,
+    conflict_policy: str | None = None,
 ) -> AppContext:
-    cfg = load_config(config_path)
-    if unattended:
-        # Applied before planning, because the policy shapes the plan.
-        cfg = unattended_config(cfg)
+    cfg = with_conflict_policy(load_config(config_path), conflict_policy)
     safety_gate = _make_safety_gate(cfg)
     if enforce_safety:
         _require_mutation_compatible_config(cfg)
@@ -646,7 +708,7 @@ def commit_global_state(
         )
         journal = journals.begin(
             family, plan_id, action_count, backup_snapshot=manager.snapshot_name,
-            counts=counts, origin=origin,
+            counts=counts, origin=origin, machine_id=machine,
         )
         original_sha256 = hashlib.sha256(original).hexdigest()
         # Everything up to COMMITTING replaces nothing, so any failure here --
@@ -666,21 +728,26 @@ def commit_global_state(
             raise
         replaced = False
         temp = source.with_name(f".{source.name}.{uuid.uuid4().hex}.tmp")
+
+        def require_safe_to_replace() -> None:
+            gate.require(operation, final=True)
+            # The candidate was computed from `original`. A file that moved
+            # since -- Codex, or another writer this lock did not cover --
+            # would be overwritten with an edit of a state that no longer
+            # exists (CS-304), so it is re-read right before the replace,
+            # and again before each retry of a replace a lock refused.
+            if _hash_file(source) != original_sha256:
+                raise FailSafeError(
+                    f"{source.name} changed after it was read; nothing was replaced. Run the command again."
+                )
+
         try:
             with temp.open("xb") as handle:
                 handle.write(candidate)
                 handle.flush()
                 os.fsync(handle.fileno())
-            gate.require(operation, final=True)
-            # The candidate was computed from `original`. A file that moved
-            # since -- Codex, or another writer this lock did not cover --
-            # would be overwritten with an edit of a state that no longer
-            # exists (CS-304), so it is re-read right before the replace.
-            if _hash_file(source) != original_sha256:
-                raise FailSafeError(
-                    f"{source.name} changed after it was read; nothing was replaced. Run the command again."
-                )
-            os.replace(temp, source)
+            require_safe_to_replace()
+            replace_with_retry(temp, source, before_retry=require_safe_to_replace)
             replaced = True
             post = validate_global_state_references(source.read_bytes())
             if post.status not in {ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING}:
@@ -702,7 +769,9 @@ def commit_global_state(
                     gate.require(operation, final=True)
                     rollback = source.with_name(f".{source.name}.{uuid.uuid4().hex}.rollback.tmp")
                     shutil.copy2(backup_path, rollback)
-                    os.replace(rollback, source)
+                    replace_with_retry(
+                        rollback, source, before_retry=lambda: gate.require(operation, final=True)
+                    )
                     if hashlib.sha256(source.read_bytes()).hexdigest() != hashlib.sha256(original).hexdigest():
                         raise FailSafeError("Rollback verification failed")
                     journal = journals.transition(journal, JournalState.FAILED)
@@ -1049,6 +1118,460 @@ def sync_projects(
     return replace(result, written=written, published=published)
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogueRefreshResult:
+    """What `refresh_thread_catalogue` found and whether it asked Codex (D-024)."""
+
+    plan: CatalogueRefreshPlan
+    #: Codex was asked to rebuild its chat list; it does so on its next start.
+    refreshed: bool = False
+    #: Read while Codex was open, so only an indication.
+    volatile: bool = False
+
+
+def _catalogue_marker(cfg: AppConfig) -> Path:
+    """Which files this machine last asked Codex to take up, beside the journals."""
+    machine = cfg.identity.machine_id or platform.node()
+    return cfg.paths.temp_dir / "thread-catalogue" / f"{machine_key(machine)}.json"
+
+
+def _read_catalogue_marker(path: Path) -> str | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    digest = payload.get("unnamed_digest") if isinstance(payload, dict) else None
+    return digest if isinstance(digest, str) else None
+
+
+def _write_catalogue_marker(path: Path, plan: CatalogueRefreshPlan) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "unnamed_digest": unnamed_digest(plan.unnamed),
+        "files": len(plan.unnamed),
+        "asked_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+    replace_with_retry(temp, path)
+
+
+def refresh_thread_catalogue(
+    config_path: Path,
+    *,
+    confirm_plan: str | None = None,
+    dry_run: bool = False,
+    gate: SafetyGate | None = None,
+    origin: str | None = None,
+) -> CatalogueRefreshResult:
+    """Preview, or ask Codex to list the chat files its catalogue misses (D-024).
+
+    Without ``confirm_plan`` this reads only. With it, Codex must be closed, the
+    plan is rebuilt and its id must still match, and the one write --
+    `backfill_state` back to the row Codex's own migration creates -- runs in
+    the usual envelope: operation lock, journal, a verified backup of the
+    database and its sidecars, the process re-checked and the database re-hashed
+    right before the transaction. Codex then writes every thread row itself on
+    its next start; codexSync never writes one.
+    """
+    cfg = load_config(config_path)
+    local_dir = locate_local_state_dir(cfg)
+    gate = gate if gate is not None else _make_safety_gate(cfg)
+    applying = confirm_plan is not None
+    if applying:
+        _require_mutation_compatible_config(cfg)
+        gate.require(OperationKind.SESSION_APPLY)
+        volatile = False
+    else:
+        volatile = gate.check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
+    marker = _catalogue_marker(cfg)
+    plan = build_refresh_plan(
+        local_dir, read_thread_placements(local_dir), read_backfill_state(local_dir),
+        asked_before=_read_catalogue_marker(marker),
+    )
+    result = CatalogueRefreshResult(plan=plan, volatile=volatile)
+    if not applying:
+        return result
+    if plan.plan_id != confirm_plan:
+        raise ConfigError(
+            "--confirm-plan must match the plan id from the preview; Codex's catalogue or the chat files "
+            "changed since then, so preview again"
+        )
+    if not plan.writes:
+        LOG.info("thread catalogue: %s, nothing asked of Codex", plan.status.value)
+        return result
+    if dry_run:
+        LOG.info("thread catalogue dry-run: %d chat file(s) Codex does not list", len(plan.unnamed))
+        return result
+    assert plan.database is not None
+    database = local_dir / Path(plan.database)
+    snapshot = _write_codex_catalogue(
+        cfg, gate, local_dir, database,
+        family="thread-catalogue", plan_id=plan.plan_id, action_count=1,
+        counts={"chats": len(plan.unnamed)}, origin=origin,
+        # The plan was built from these exact bytes; a database that moved
+        # since is one whose status may no longer be what was planned.
+        still_planned=lambda: build_refresh_plan(
+            local_dir, read_thread_placements(local_dir), read_backfill_state(local_dir),
+            asked_before=_read_catalogue_marker(marker),
+        ).plan_id == plan.plan_id,
+        write=lambda: reset_backfill(database, now=int(time.time())),
+        verify=lambda: read_backfill_status(database) == BACKFILL_PENDING,
+    )
+    _write_catalogue_marker(marker, plan)
+    LOG.info(
+        "thread catalogue: asked Codex to take up %d chat file(s) on its next start (backup %s)",
+        len(plan.unnamed), snapshot,
+    )
+    return replace(result, refreshed=True)
+
+
+@dataclass(frozen=True, slots=True)
+class ChatNamesResult:
+    """What `sync_chat_names` found, set and published (D-025)."""
+
+    plan: NamePlan
+    #: Names set on this machine's chats.
+    written: int = 0
+    #: This machine's own names were (re)published for the others.
+    published: bool = False
+    volatile: bool = False
+
+
+def chat_names_root(cfg: AppConfig) -> Path:
+    return _coordination_dir(cfg) / "chat-names"
+
+
+def sync_chat_names(
+    config_path: Path,
+    *,
+    confirm_plan: str | None = None,
+    dry_run: bool = False,
+    gate: SafetyGate | None = None,
+    origin: str | None = None,
+) -> ChatNamesResult:
+    """Preview, or set other machines' chat names here and publish this one's.
+
+    Without ``confirm_plan`` this reads only. With it, Codex must be closed and
+    the plan id must still match; names are set only on chats whose name here
+    is unset (`chat_names.is_unset`), in one transaction inside the catalogue
+    envelope, and this machine's names are then published for the others.
+    """
+    cfg = load_config(config_path)
+    machine = _handoff_machine(cfg)
+    local_dir = locate_local_state_dir(cfg)
+    gate = gate if gate is not None else _make_safety_gate(cfg)
+    applying = confirm_plan is not None
+    if applying:
+        _require_mutation_compatible_config(cfg)
+        gate.require(OperationKind.SESSION_APPLY)
+        volatile = False
+    else:
+        volatile = gate.check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
+    root = chat_names_root(cfg)
+
+    def fingerprint(relative: str) -> str:
+        return database_fingerprint(local_dir / Path(relative))
+
+    def plan_now() -> NamePlan:
+        board = read_names_board(root)
+        for name, reason in sorted(board.unreadable.items()):
+            LOG.warning("chat names %s are not believed: %s", name, reason)
+        return build_name_plan(read_thread_names(local_dir), board.others(machine), fingerprint=fingerprint)
+
+    plan = plan_now()
+    result = ChatNamesResult(plan=plan, volatile=volatile)
+    if not applying:
+        return result
+    if plan.plan_id != confirm_plan:
+        raise ConfigError(
+            "--confirm-plan must match the plan id from the preview; chat names changed since then, "
+            "so preview again"
+        )
+    if dry_run:
+        LOG.info("chat names dry-run: %d name(s) would be set", len(plan.changes))
+        return result
+    written = 0
+    if plan.writes:
+        assert plan.database is not None
+        database = local_dir / Path(plan.database)
+        expected = {item.thread_id: item.name for item in plan.changes}
+        _write_codex_catalogue(
+            cfg, gate, local_dir, database,
+            family="chat-names", plan_id=plan.plan_id, action_count=len(plan.changes),
+            counts={"names": len(plan.changes)}, origin=origin,
+            still_planned=lambda: plan_now().plan_id == plan.plan_id,
+            write=lambda: apply_names(database, plan.changes),
+            verify=lambda: read_names_back(database, sorted(expected)) == expected,
+        )
+        written = len(plan.changes)
+        LOG.info("chat names: %d set from other machines, %d kept as named here", written, plan.kept)
+    return replace(result, written=written, published=_publish_chat_names(root, machine, local_dir))
+
+
+def _publish_chat_names(root: Path, machine: str, local_dir: Path) -> bool:
+    """Rewrite this machine's names file when what it shows differs from it."""
+    names = read_thread_names(local_dir)
+    if names.status is not PlacementStatus.AVAILABLE:
+        if names.status is not PlacementStatus.ABSENT:
+            LOG.warning("chat names not published: catalogue %s %s", names.status.value, ",".join(names.codes))
+        return False
+    publication = publication_from_names(names, machine)
+    own = read_names_board(root).publications.get(machine)
+    if own is not None and own.content_id == publication.content_id:
+        return False
+    write_names_publication(root, publication)
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectFilesItem:
+    """One project of this machine compared with one other machine (D-026)."""
+
+    project_id: str
+    name: str
+    root: str
+    peer: str
+    verdict: FilesVerdict
+    #: When the other machine published what it held.
+    peer_published_at_utc: str = ""
+    #: Plain folders: files changed later there, files only there, and files
+    #: deleted there that are still here.
+    newer_there: tuple[str, ...] = ()
+    missing_here: tuple[str, ...] = ()
+    removed_there: tuple[str, ...] = ()
+    #: The last time (unix seconds) a chat of this project changed on the
+    #: other machine, when that is later than any here; 0 otherwise. Work in
+    #: chats is the likeliest reason files moved, so it is said first.
+    chats_there_at: int = 0
+
+    @property
+    def warns(self) -> bool:
+        return self.verdict in FILES_WARNINGS
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectFilesReport:
+    machine: str
+    items: tuple[ProjectFilesItem, ...] = ()
+    published: bool = False
+    unreadable: tuple[str, ...] = ()
+
+    @property
+    def warnings(self) -> tuple[ProjectFilesItem, ...]:
+        return tuple(item for item in self.items if item.warns)
+
+
+def project_files_root(cfg: AppConfig) -> Path:
+    return _coordination_dir(cfg) / "project-files"
+
+
+#: Project folders read at once: git and the walk mostly wait on the disk.
+PROJECT_FILES_WORKERS = 4
+
+
+def check_project_files(
+    config_path: Path,
+    *,
+    publish: bool = False,
+    git: GitRunner = run_git,
+) -> ProjectFilesReport:
+    """Whether this machine's project folders hold what the others last had.
+
+    Reads only, except that ``publish`` rewrites this machine's own file in the
+    workspace (never anything in a project or in `.codex`), and only when what
+    it says changed. Folders and files come and go at any time, so every check
+    reads them afresh and publishes: a full sync, `projects files`, and the
+    window on every start -- which is how a machine that never ran a full sync
+    with this version still tells the others what it holds.
+    """
+    cfg = load_config(config_path)
+    machine = _handoff_machine(cfg)
+    local_dir = locate_local_state_dir(cfg)
+    source = local_dir / ".codex-global-state.json"
+    try:
+        state = json.loads(source.read_bytes().decode("utf-8-sig"))
+    except FileNotFoundError:
+        return ProjectFilesReport(machine)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ConfigError(f"Cannot read the project list in {source}: {exc}") from exc
+    schema_id = detect_state_schema(state)
+    projects: dict[str, tuple[str, str]] = {}
+    for project_id, entry in dict(state.get("local-projects") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        roots = project_root_paths(schema_id, entry) if schema_id else ()
+        if roots:
+            # Codex's sidebar shows the folder's name.
+            projects[str(project_id)] = (roots[0], Path(roots[0]).name or str(entry.get("name") or ""))
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    cache_root = _project_hash_cache_root()
+    with ThreadPoolExecutor(max_workers=PROJECT_FILES_WORKERS) as pool:
+        states = dict(zip(
+            projects,
+            pool.map(
+                lambda item: read_files_state(Path(item[0]), git=git, cache_root=cache_root),
+                projects.values(),
+            ),
+        ))
+    last_chat = _last_chat_by_project(
+        {key: value[0] for key, value in projects.items()}, read_thread_activity(local_dir),
+    )
+
+    root = project_files_root(cfg)
+    board = read_files_board(root)
+    for name, reason in sorted(board.unreadable.items()):
+        LOG.warning("project files %s are not believed: %s", name, reason)
+    map_root = _root_mapper(cfg, machine)
+    by_root = {root_key(local_root): project_id for project_id, (local_root, _) in projects.items()}
+    items: list[ProjectFilesItem] = []
+    for peer in board.others(machine):
+        for peer_id, published in sorted(peer.projects.items()):
+            local_id = peer_id if peer_id in projects else None
+            if local_id is None:
+                try:
+                    local_id = by_root.get(root_key(map_root(peer.machine, published["root"])))
+                except RootMappingAmbiguous:
+                    local_id = None
+            if local_id is None:
+                continue
+            local_root, name = projects[local_id]
+            comparison = compare(Path(local_root), states[local_id], published["state"], git=git)
+            there_at = int(published.get("last_chat_at") or 0)
+            items.append(ProjectFilesItem(
+                local_id, name, local_root, peer.machine, comparison.verdict, peer.published_at_utc,
+                comparison.newer_there, comparison.missing_here, comparison.removed_there,
+                there_at if there_at > last_chat.get(local_id, 0) else 0,
+            ))
+    # Projects whose chats moved on elsewhere first: that is where work happened.
+    items.sort(key=lambda item: (not item.chats_there_at, item.name.casefold(), item.peer))
+    for item in items:
+        if item.warns:
+            LOG.warning(
+                "project %s: files %s against %s (%d newer there, %d missing here, %d deleted there%s)",
+                item.name, item.verdict.value, item.peer, len(item.newer_there), len(item.missing_here),
+                len(item.removed_there),
+                ", chats continued there" if item.chats_there_at else "",
+            )
+    published = False
+    if publish:
+        own = board.publications.get(machine)
+        now = int(time.time())
+        publication = FilesPublication(
+            machine,
+            {
+                key: {
+                    "root": value[0], "name": value[1], "last_chat_at": last_chat.get(key, 0),
+                    # Deletions are known only against what this machine said before.
+                    "state": with_removed(
+                        states[key],
+                        own.projects[key]["state"] if own is not None and key in own.projects else None,
+                        now,
+                    ),
+                }
+                for key, value in projects.items()
+            },
+            files_now_utc(),
+        )
+        # Rewritten only when what it says changed: it sits in the cloud
+        # folder and lists every file of every plain project.
+        if own is None or own.body()["projects"] != publication.body()["projects"]:
+            write_files_publication(root, publication)
+            published = True
+    return ProjectFilesReport(machine, tuple(items), published, tuple(sorted(board.unreadable)))
+
+
+def _project_hash_cache_root() -> Path:
+    """This machine's own cache of project file hashes; local, never synced."""
+    return cache_dir() / "project-hashes"
+
+
+def _last_chat_by_project(roots: Mapping[str, str], activity: ThreadActivity) -> dict[str, int]:
+    """Per project, the last time a chat whose folder lies inside it changed."""
+    keyed = {project_id: root_key(root) for project_id, root in roots.items()}
+    result: dict[str, int] = {}
+    for cwd, updated_at in activity.rows:
+        where = root_key(cwd)
+        for project_id, key in keyed.items():
+            separator = "\\" if "\\" in key else "/"
+            if where == key or where.startswith(key.rstrip(separator) + separator):
+                result[project_id] = max(result.get(project_id, 0), updated_at)
+    return result
+
+
+def _write_codex_catalogue(
+    cfg: AppConfig,
+    gate,
+    local_dir: Path,
+    database: Path,
+    *,
+    family: str,
+    plan_id: str,
+    action_count: int,
+    counts: Mapping[str, int],
+    origin: str | None,
+    still_planned: Callable[[], bool],
+    write: Callable[[], object],
+    verify: Callable[[], bool],
+) -> str:
+    """The one envelope for a write into Codex's thread catalogue (D-024, D-025).
+
+    Operation lock, journal, a verified backup of the database and its
+    sidecars, the process re-checked and the plan rebuilt right before the
+    write, which is a single SQLite transaction: it commits whole or rolls
+    back, so a failure inside it closes the journal as replacing nothing. A
+    write that committed but does not read back as intended leaves the
+    journal in RECOVERY_REQUIRED; the database is in the snapshot.
+    Returns the snapshot name.
+    """
+    _ensure_dir(cfg.paths.backup_dir, "paths.backup_dir")
+    _ensure_dir(cfg.paths.temp_dir, "paths.temp_dir")
+    machine = cfg.identity.machine_id or platform.node()
+    relative = database.relative_to(local_dir).as_posix()
+    with OperationLock(cfg.paths.temp_dir, state_root=local_dir, machine_id=machine, family=family):
+        journals = JournalStore(cfg.paths.temp_dir)
+        manager = BackupManager(
+            cfg.paths.backup_dir, machine, compression="none", journal_root=cfg.paths.temp_dir
+        )
+        journal = journals.begin(
+            family, plan_id, action_count, backup_snapshot=manager.snapshot_name,
+            counts=counts, origin=origin, machine_id=machine,
+        )
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                part = database.with_name(database.name + suffix)
+                if not part.is_file():
+                    continue
+                expected = _hash_file(part)
+                copy = manager.backup_file(part, relative + suffix, side="local")
+                if copy is None or _hash_file(copy) != expected:
+                    raise FailSafeError("Verified backup of Codex's catalogue could not be created")
+            manager.finalize()
+            journal = journals.transition(journal, JournalState.BACKED_UP)
+            gate.require(OperationKind.SESSION_APPLY, final=True)
+            if not still_planned():
+                raise FailSafeError("Codex's catalogue changed after it was read; nothing was written. Run again.")
+            journal = journals.transition(journal, JournalState.COMMITTING)
+        except Exception as exc:
+            _close_journal_after_failure(journals, journal, exc)
+            raise
+        try:
+            write()
+        except Exception as exc:
+            _close_journal_after_failure(journals, journal, exc)
+            raise
+        if not verify():
+            failure = FailSafeError(f"{family}: the catalogue did not read back as written")
+            journals.transition(journal, JournalState.RECOVERY_REQUIRED, failure=failure)
+            raise failure
+        journals.transition(journal, JournalState.COMMITTED)
+        manager.prune()
+        return manager.snapshot_name
+
+
 def _publish_projects(root: Path, board, machine: str, source: Path, plan: ProjectMergePlan) -> bool:
     """Rewrite this machine's project list from the state as it now is.
 
@@ -1110,6 +1633,7 @@ def scan_session_transfer(
     resolutions_path: Path | None = None,
     progress: ProgressCallback | None = None,
     scope: SessionScope | None = None,
+    conflict_policy: str | None = None,
 ) -> TransferPlan:
     """Classify every session branch on both sides. Reads only.
 
@@ -1120,8 +1644,12 @@ def scan_session_transfer(
     (`session_scope`). The cloud mirror is written in full regardless, so the
     backup never becomes partial, and a plan without a scope behaves -- and
     hashes -- exactly as it did before working sets existed.
+
+    A divergence is decided by `[conflict] policy` and `sync.direction`
+    (D-027), or by ``conflict_policy`` for this one plan; the rule is frozen
+    into the plan, so its apply decides the same way.
     """
-    cfg = load_config(config_path)
+    cfg = with_conflict_policy(load_config(config_path), conflict_policy)
     local_dir = locate_local_state_dir(cfg)
     cloud_dir = cfg.paths.cloud_root_dir
     decision = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN)
@@ -1148,6 +1676,8 @@ def scan_session_transfer(
         scope=scope.session_hashes if scope is not None and not scope.is_empty else None,
         path_rules=cfg.path_mappings,
         folder_exists=local_folder_exists,
+        conflict_rule=conflict_rule_for(cfg.conflict.policy, cfg.sync.direction),
+        direction=cfg.sync.direction,
     )
 
 
@@ -1462,7 +1992,7 @@ def apply_session_transfer(
         # how many chats went each way (`to_cloud` is the mirror).
         journal = journals.begin(
             "sessions", plan.plan_id, copies.action_count, backup_snapshot=mgr.snapshot_name,
-            counts=sync_plan_counts(copies), origin=origin,
+            counts=sync_plan_counts(copies), origin=origin, machine_id=machine,
         )
         current = [journal]
 
@@ -1539,6 +2069,9 @@ def _rebuild_transfer_plan(
         # rule edited after the scan is a changed plan, not a silent one.
         path_rules=cfg.path_mappings,
         folder_exists=local_folder_exists,
+        # The rule and direction the plan was confirmed under, like the codec.
+        conflict_rule=plan.conflict_rule,
+        direction=plan.direction,
     )
     return (
         fresh,
@@ -1633,7 +2166,10 @@ def _bundle_resolved_conflicts(
     being overwritten, compressed: the other one is what the destination is
     about to hold, and copying all of them was a gigabyte into the cloud.
     """
-    resolved = [item for item in plan.items if "RESOLVED_BY_USER" in item.codes]
+    resolved = [
+        item for item in plan.items
+        if "RESOLVED_BY_USER" in item.codes or RESOLVED_BY_RULE in item.codes
+    ]
     if not resolved:
         return []
     store = SemanticStore(cfg.semantic.root_dir, require_guardian_identity(cfg))
@@ -1655,7 +2191,7 @@ def _bundle_resolved_conflicts(
             )
             kept = store.archive_superseded(
                 losing,
-                session_id=local.session_id or remote.session_id or "",
+                session_id=local.branch_key or remote.branch_key or "",
                 reason=FORMAT_MIGRATION,
                 codec=cfg.semantic.mirror_compression,
             )
@@ -1665,7 +2201,9 @@ def _bundle_resolved_conflicts(
         bundle = store.conflict_bundle(
             local_dir / Path(*local.relative_path.split("/")),
             cloud_dir / Path(*remote.relative_path.split("/")),
-            session_id=local.session_id or remote.session_id or "",
+            # The branch key, so the bundle's conflict id is the item's own --
+            # for a page of a chat as for the file it began in (CS-356).
+            session_id=local.branch_key or remote.branch_key or "",
             common_records=0,
             # The pair the resolution was pinned to, so the bundle holds -- and
             # is named by -- exactly the conflict that was decided.
@@ -1704,7 +2242,8 @@ def _record_semantic_manifest(
         # hold, so it is the one that describes the agreed branch.
         source = (remote_by_hash if towards_local else local_by_hash).get(item.session_hash)
         descriptor = source or local_by_hash.get(item.session_hash) or remote_by_hash.get(item.session_hash)
-        session_id = getattr(descriptor, "session_id", None)
+        # Keyed like the item: a page of a chat is an entry of its own.
+        session_id = getattr(descriptor, "branch_key", None)
         if not session_id:
             continue
         try:
@@ -1833,10 +2372,11 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
         ).execute(ctx.plan, dry_run=True)
         return
 
+    machine = ctx.config.identity.machine_id or platform.node()
     with OperationLock(
         ctx.config.paths.temp_dir,
         state_root=ctx.local_dir,
-        machine_id=ctx.config.identity.machine_id or platform.node(),
+        machine_id=machine,
         family="sync",
     ):
         journals = JournalStore(ctx.config.paths.temp_dir)
@@ -1847,6 +2387,7 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
             backup_snapshot=mgr.snapshot_name,
             counts=sync_plan_counts(ctx.plan),
             origin=origin,
+            machine_id=machine,
         )
         current = [journal]
 
@@ -1955,12 +2496,28 @@ class HandoffResult:
     #: `[semantic] new_chats = "same_path"` (D-020). Codex shows them only once
     #: it takes the files up, which `doctor` reports as `session_visibility`.
     new_chats_written: int = 0
+    #: Chats changed on both machines that the conflict rule decided (D-027);
+    #: the copy not kept of each is in the conflict bundle.
+    chats_decided_by_rule: int = 0
     #: Projects another machine had that were added here (CS-333).
     projects_added: int = 0
     #: Changes written into the project list: added projects, pins, order, bindings.
     project_changes: int = 0
     #: Added projects whose folder does not exist on this machine.
     projects_missing_folders: int = 0
+    #: Chat files Codex's catalogue did not list, which it was asked to take
+    #: up on its next start (D-024).
+    chats_codex_will_list: int = 0
+    #: Chat files Codex still does not list although it was asked once before.
+    chats_codex_ignores: int = 0
+    #: Chat names taken from other machines (D-025).
+    chat_names_set: int = 0
+    #: Chats named here that another machine names differently; local kept.
+    chat_names_kept: int = 0
+    #: Names waiting for Codex to list their chat here; set on a later sync.
+    chat_names_waiting: int = 0
+    #: Projects whose folder here holds less than another machine had (D-026).
+    project_files_behind: tuple["ProjectFilesItem", ...] = ()
     #: The other machine the chats were paired with, so a page can open
     #: Sessions for exactly this pair.
     source: str | None = None
@@ -2140,16 +2697,18 @@ def run_handoff(
     sleep: Callable[[float], None] = time.sleep,
     on_wait: Callable[[Sequence[Delivery]], None] | None = None,
     progress: ProgressCallback | None = None,
+    conflict_policy: str | None = None,
 ) -> HandoffResult:
     """One full sync with nobody deciding anything, then the handoff record.
 
-    Settings are synced with conflicts forced to `manual_abort` (`D-016`), and
-    chats with the plan applied by its own id in the same process (`D-018`).
-    Anything that needs a person -- a conflict of either kind, a target
-    collision, an archive move -- stops the run before the first write, and
-    the handoff record is written only when both halves finished: a record
-    that claimed a handoff which did not happen is exactly the lie the other
-    machine would act on.
+    Conflicts of both kinds -- settings files and chats -- are decided by
+    `[conflict] policy` and `sync.direction` (D-027), or by
+    ``conflict_policy`` for this run, and chats are applied by the plan's own
+    id in the same process (`D-018`). What the rule leaves open -- `manual_abort`,
+    two copies `newer` cannot order, a target collision -- stops the run before
+    the first write, and the handoff record is written only when both halves
+    finished: a record that claimed a handoff which did not happen is exactly
+    the lie the other machine would act on.
 
     Other machines' handoffs are waited for first, up to ``wait_seconds``
     (``[handoff] delivery_wait_minutes``); loading half of one is how a file
@@ -2196,6 +2755,7 @@ def run_handoff(
     plan = scan_session_transfer(
         config_path, source_machine=source, target_machine=machine,
         resolutions_path=resolutions_path, progress=progress, scope=scope,
+        conflict_policy=conflict_policy,
     )
     if plan.volatile:
         raise SafetyPreconditionError("Codex started while the chats were being read; nothing was written")
@@ -2223,7 +2783,7 @@ def run_handoff(
     save_transfer_plan(plan, plan_path)
 
     report_progress(progress, "sync_settings", 0, 0)
-    ctx = build_context(config_path, enforce_safety=True, unattended=True)
+    ctx = build_context(config_path, enforce_safety=True, unattended=True, conflict_policy=conflict_policy)
     run_sync(ctx, dry_run=False, origin=origin)
     report_progress(progress, "sync_chats", 0, 0)
     session_actions = apply_session_transfer(
@@ -2240,6 +2800,28 @@ def run_handoff(
     except ProjectsNotCarried as exc:
         LOG.warning("projects were not carried: %s", exc)
         projects = None
+    # Names live only in Codex's catalogue, never in the chat file (D-025):
+    # set the other machines' names on chats Codex already lists here, and
+    # publish this machine's.
+    report_progress(progress, "sync_chat_names", 0, 0)
+    names_preview = sync_chat_names(config_path)
+    names = sync_chat_names(config_path, confirm_plan=names_preview.plan.plan_id, origin=origin)
+    # Chat files Codex's catalogue does not list -- written now or by an
+    # earlier run -- are invisible until Codex takes them up (D-024).
+    report_progress(progress, "refresh_catalogue", 0, 0)
+    catalogue_preview = refresh_thread_catalogue(config_path)
+    catalogue = refresh_thread_catalogue(
+        config_path, confirm_plan=catalogue_preview.plan.plan_id, origin=origin,
+    )
+    # Chats are carried, project folders are not (D-026): say which projects
+    # here hold less than another machine had, and publish this one's. A
+    # check that fails says so in the log and never undoes a finished sync.
+    report_progress(progress, "check_project_files", 0, 0)
+    try:
+        files_report = check_project_files(config_path, publish=True)
+    except Exception:
+        LOG.exception("project files were not checked")
+        files_report = None
     to_cloud = len(ctx.plan.to_cloud) + sum(
         1 for item in plan.items if transfer_direction(item) == "mirror"
     )
@@ -2266,12 +2848,28 @@ def run_handoff(
         projects_added=len(projects.plan.added) if projects else 0,
         project_changes=projects.written if projects else 0,
         projects_missing_folders=len(projects.plan.missing_folders) if projects else 0,
+        # Asked now, or Codex has not run its own backfill since: either way
+        # it walks the files on its next start.
+        chats_codex_will_list=(
+            len(catalogue.plan.unnamed)
+            if catalogue.refreshed or catalogue.plan.status is RefreshStatus.ALREADY_PENDING else 0
+        ),
+        chats_codex_ignores=(
+            len(catalogue.plan.unnamed) if catalogue.plan.status is RefreshStatus.ALREADY_ASKED else 0
+        ),
+        chat_names_set=names.written,
+        chat_names_kept=names.plan.kept,
+        chat_names_waiting=names.plan.waiting,
+        project_files_behind=files_report.warnings if files_report else (),
         chats_not_loaded=left_behind,
         new_chats_kept_in_cloud=sum(
             1 for item in plan.items if item.action is TransferAction.BLOCKED_UNPROVEN_LAYOUT
             and "SESSION_ON_ONE_SIDE_ONLY" in item.codes
         ),
         new_chats_written=new_chats,
+        chats_decided_by_rule=sum(
+            1 for item in plan.items if item.action.writes and RESOLVED_BY_RULE in item.codes
+        ),
         taken=tuple(item.machine for item in pending),
         sync_actions=ctx.plan.action_count,
         session_actions=session_actions,
@@ -2605,7 +3203,7 @@ def _build_project_move(
     cfg: AppConfig, local_dir: Path, *, project_id: str, new_root: Path, volatile: bool, state: bytes
 ) -> ProjectMovePlan:
     catalog = scan_sessions(local_dir, volatile=volatile, max_line_bytes=cfg.semantic.max_jsonl_line_bytes)
-    sessions = [(item.session_id, item.cwd) for item in catalog.valid if item.session_id]
+    sessions = [(item.session_id, item.cwd) for item in one_per_chat(catalog.valid) if item.session_id]
     return build_project_move_plan(
         state_bytes=state,
         project_id=project_id,

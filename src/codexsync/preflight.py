@@ -27,7 +27,7 @@ from .exceptions import FailSafeError
 from .mutation_journal import JournalStore
 from .runtime import _make_safety_gate
 from .safety_gate import OperationKind, ProcessState
-from .session_catalog import SessionCatalog, SessionState, peek_record_formats, scan_sessions
+from .session_catalog import SessionCatalog, SessionState, latest_page, peek_record_formats, scan_sessions
 from .session_index import SESSION_INDEX_FILE, parse_session_index
 from .sqlite_audit import PlacementStatus, audit_sqlite, read_thread_placements
 from .project_registry import PROVEN_PROJECT_REGISTRY, registry_note
@@ -276,10 +276,14 @@ def _check_session_visibility(local_dir: Path, catalog: SessionCatalog) -> Prefl
             "session_visibility", "WARN",
             f"Thread catalogue unreadable ({','.join(placements.codes) or 'unknown'}); visibility not checked",
         )
-    chats = [
+    files = [
         item for item in catalog.descriptors
         if item.session_id and item.state in {SessionState.ACTIVE, SessionState.ARCHIVED}
     ]
+    # Per chat, the file its history ends in: a chat continued in pages is
+    # listed by its last page, and a row naming an earlier part shows the
+    # chat only up to there (CS-356).
+    chats = list(latest_page(files).values())
     unlisted = sum(1 for item in chats if not placements.knows(item.session_id))
     elsewhere = sum(
         1 for item in chats
@@ -290,8 +294,8 @@ def _check_session_visibility(local_dir: Path, catalog: SessionCatalog) -> Prefl
     if unlisted or elsewhere:
         return PreflightCheckResult(
             "session_visibility", "WARN",
-            detail + "; Codex does not show these chats. If they were just transferred, start Codex "
-            "once and run doctor again; if they stay, Codex does not take up a chat file by itself",
+            detail + "; Codex does not show these chats. A full sync (or `sessions catalogue`) asks "
+            "Codex to rebuild its chat list from the files, which it does on its next start",
         )
     return PreflightCheckResult("session_visibility", "PASS", detail)
 

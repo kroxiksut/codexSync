@@ -24,11 +24,12 @@ So the connection is chosen by what is already on disk (`_read_only_connect`):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 from pathlib import Path
 import sqlite3
+from typing import Callable, TypeVar
 from urllib.parse import quote
 
 
@@ -185,6 +186,159 @@ def read_thread_placements(
     return ThreadPlacements(
         PlacementStatus.AVAILABLE, by_session, frozenset(archived), tuple(dict.fromkeys(codes))
     )
+
+
+@dataclass(frozen=True, slots=True)
+class BackfillReading:
+    """Whether Codex considers its thread catalogue built from the chat files.
+
+    ``database`` is the catalogue's path relative to the state root and
+    ``backfill`` the ``backfill_state.status`` value as Codex wrote it
+    (``pending``, ``running``, ``complete``), ``None`` when the row is absent.
+    Read with the same rules as the placements, so it creates nothing.
+    """
+    status: PlacementStatus
+    database: str | None = None
+    backfill: str | None = None
+    codes: tuple[str, ...] = ()
+
+
+class _Refused(Exception):
+    """A catalogue that was read but lacks what a query needs."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+_T = TypeVar("_T")
+
+
+def _query_the_catalogue(
+    state_root: Path, query: Callable[[sqlite3.Connection], _T], *, timeout_seconds: float,
+) -> tuple[PlacementStatus, str | None, _T | None, tuple[str, ...]]:
+    """Run ``query`` against the one thread catalogue, strictly read-only.
+
+    Exactly one catalogue is required -- two would make "the" catalogue a
+    guess -- and every way of not reading it is ``INDETERMINATE``, never
+    ``ABSENT``. ``query`` raises `_Refused` for a shape it cannot use.
+    Returns (status, catalogue path relative to the root, result, codes).
+    """
+    root = state_root.resolve()
+    discovered = discover_sqlite_sets(root)
+    if any(_would_create_a_sidecar(root / Path(item.database.relative_path)) for item in discovered):
+        return PlacementStatus.INDETERMINATE, None, None, (WAL_WITHOUT_SHARED_INDEX,)
+    shapes = [(item, _looks_like_thread_catalogue(root, item, timeout_seconds)) for item in discovered]
+    if any(shape is None for _, shape in shapes):
+        return PlacementStatus.INDETERMINATE, None, None, ("CATALOG_UNAVAILABLE",)
+    catalogues = [item for item, shape in shapes if shape]
+    if not catalogues:
+        return PlacementStatus.ABSENT, None, None, ()
+    if len(catalogues) > 1:
+        return PlacementStatus.INDETERMINATE, None, None, ("SEVERAL_CATALOGUES",)
+    relative = catalogues[0].database.relative_path
+    database = root / Path(relative)
+    immutable = not _has_pending_frames(database)
+    try:
+        connection = _read_only_connect(database, timeout_seconds)
+    except sqlite3.Error:
+        return PlacementStatus.INDETERMINATE, relative, None, ("CATALOG_UNAVAILABLE",)
+    if connection is None:
+        return PlacementStatus.INDETERMINATE, relative, None, (WAL_WITHOUT_SHARED_INDEX,)
+    try:
+        result = query(connection)
+    except _Refused as refused:
+        return PlacementStatus.INDETERMINATE, relative, None, (refused.code,)
+    except sqlite3.Error:
+        return PlacementStatus.INDETERMINATE, relative, None, ("CATALOG_UNREADABLE",)
+    finally:
+        connection.close()
+    if _wal_appeared(database, immutable):
+        return PlacementStatus.INDETERMINATE, relative, None, ("CATALOG_CHANGED",)
+    return PlacementStatus.AVAILABLE, relative, result, ()
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')}
+
+
+def read_backfill_state(state_root: Path, *, timeout_seconds: float = 2.0) -> BackfillReading:
+    """The catalogue's own backfill status, strictly read-only."""
+
+    def query(connection: sqlite3.Connection) -> str | None:
+        if not {"id", "status"}.issubset(_columns(connection, "backfill_state")):
+            raise _Refused("NO_BACKFILL_STATE")
+        row = connection.execute("SELECT status FROM backfill_state WHERE id = 1").fetchone()
+        return row[0] if row is not None and isinstance(row[0], str) else None
+
+    status, relative, value, codes = _query_the_catalogue(state_root, query, timeout_seconds=timeout_seconds)
+    return BackfillReading(status, relative, value, codes)
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadNames:
+    """Each thread's shown name and its title, from the catalogue (D-025).
+
+    ``name`` is what the chat list shows; ``title`` is Codex's first-message
+    fallback. Only these two text columns are read, besides the id.
+    """
+    status: PlacementStatus
+    database: str | None = None
+    #: Thread id -> (name or ``None``, title).
+    rows: dict[str, tuple[str | None, str]] = field(default_factory=dict)
+    codes: tuple[str, ...] = ()
+
+
+def read_thread_names(state_root: Path, *, timeout_seconds: float = 2.0) -> ThreadNames:
+    """Names and titles of every thread, strictly read-only.
+
+    A catalogue without a ``name`` column is ``INDETERMINATE`` with
+    ``NO_NAME_COLUMN``: an older Codex, whose names live somewhere else.
+    """
+
+    def query(connection: sqlite3.Connection) -> dict[str, tuple[str | None, str]]:
+        if not {"name", "title"}.issubset(_columns(connection, "threads")):
+            raise _Refused("NO_NAME_COLUMN")
+        rows: dict[str, tuple[str | None, str]] = {}
+        for thread_id, name, title in connection.execute("SELECT id, name, title FROM threads"):
+            if isinstance(thread_id, str) and thread_id:
+                # Kept exactly as stored ('' and NULL both occur): a write
+                # requires the row to still hold this very value.
+                rows[thread_id] = (
+                    name if isinstance(name, str) else None,
+                    title if isinstance(title, str) else "",
+                )
+        return rows
+
+    status, relative, rows, codes = _query_the_catalogue(state_root, query, timeout_seconds=timeout_seconds)
+    return ThreadNames(status, relative, rows or {}, codes)
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadActivity:
+    """When each thread last changed and in which folder (D-026).
+
+    Only ``cwd`` and ``updated_at`` are read: enough to say which project saw
+    work in chats, and when, without a word of what was said.
+    """
+    status: PlacementStatus
+    #: (working folder, unix seconds) per thread.
+    rows: tuple[tuple[str, int], ...] = ()
+    codes: tuple[str, ...] = ()
+
+
+def read_thread_activity(state_root: Path, *, timeout_seconds: float = 2.0) -> ThreadActivity:
+    def query(connection: sqlite3.Connection) -> tuple[tuple[str, int], ...]:
+        if not {"cwd", "updated_at"}.issubset(_columns(connection, "threads")):
+            raise _Refused("NO_ACTIVITY_COLUMNS")
+        return tuple(
+            (cwd, int(updated))
+            for cwd, updated in connection.execute("SELECT cwd, updated_at FROM threads")
+            if isinstance(cwd, str) and cwd and isinstance(updated, int)
+        )
+
+    status, _, rows, codes = _query_the_catalogue(state_root, query, timeout_seconds=timeout_seconds)
+    return ThreadActivity(status, rows or (), codes)
 
 
 #: Reason a database could not be opened without writing beside it.

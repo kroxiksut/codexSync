@@ -28,6 +28,8 @@ class RecoveryModel(Model):
         self.action_busy = False
         self.action_kind = ""
         self.result: Outcome | None = None
+        #: The journal another page sent the person to (`reveal`).
+        self.wanted: str | None = None
 
 
 class RecoveryScreen(Screen):
@@ -44,6 +46,7 @@ class RecoveryScreen(Screen):
         frame, inner = card(self.t("recovery.list.title"), self.summary)
         self.table = table([
             self.t("recovery.column.state"),
+            self.t("recovery.column.machine"),
             self.t("recovery.column.family"),
             self.t("recovery.column.created"),
             self.t("recovery.column.actions"),
@@ -86,6 +89,22 @@ class RecoveryScreen(Screen):
     def activated(self) -> None:
         if not self.model.busy:
             self.refresh()
+
+    def reveal(self, target: str) -> None:
+        """Select the journal ``target`` names, now or once the listing arrives."""
+        self.model.wanted = target
+        self._select_wanted()
+
+    def _select_wanted(self) -> None:
+        wanted = self.model.wanted
+        listing = self.model.listing
+        if not wanted or listing is None or not listing.ok:
+            return
+        for index, journal in enumerate(listing.value):
+            if journal.operation_id == wanted:
+                self.table.selectRow(index)
+                self.model.wanted = None
+                return
 
     def refresh(self) -> None:
         if self.model.busy:
@@ -175,9 +194,15 @@ class RecoveryScreen(Screen):
             self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
         else:
             open_ = [j for j in outcome.value if not j.terminal]
-            if open_:
+            blocking = [j for j in open_ if not j.closes_itself]
+            if blocking:
                 self.banner.show_message(
-                    "danger", self.p("recovery.blocked.title", len(open_)), self.t("recovery.blocked.detail"), palette
+                    "danger", self.p("recovery.blocked.title", len(blocking)), self.t("recovery.blocked.detail"), palette
+                )
+            elif open_:
+                self.banner.show_message(
+                    "attention", self.p("recovery.self_closing.title", len(open_)),
+                    self.t("recovery.self_closing.detail"), palette,
                 )
             else:
                 self.banner.show_message("ok", self.t("recovery.clear.title"), self.t("recovery.clear.detail"), palette)
@@ -198,8 +223,13 @@ class RecoveryScreen(Screen):
                 snapshot = journal.backup_snapshot or "—"
                 if journal.backup_snapshot and journal.backup_snapshot_present is False:
                     snapshot = self.t("recovery.backup.missing", name=journal.backup_snapshot)
+                if journal.own:
+                    machine = self.t("recovery.machine.this", machine=journal.machine_id or self.host.machine_id() or "—")
+                else:
+                    machine = journal.machine_id or self.t("recovery.machine.unknown")
                 rows.append([
                     Cell(state, tone=tone, data=journal),
+                    Cell(machine, muted=journal.own),
                     Cell(self.t(f"journal.family.{journal.family}") if journal.family and self.host.catalog.has(f"journal.family.{journal.family}") else (journal.family or "—")),
                     Cell(_when(journal.created_at_utc) if journal.created_at_utc else "—"),
                     Cell(str(journal.action_count) if journal.action_count is not None else "—"),
@@ -214,6 +244,7 @@ class RecoveryScreen(Screen):
                         self.table.selectRow(r)
             self.table.blockSignals(False)
             self._drawn = outcome
+            self._select_wanted()
             self.summary.setText(self.p("recovery.count", len(outcome.value)))
         self._render_actions()
 
@@ -237,13 +268,21 @@ class RecoveryScreen(Screen):
         elif not journal.readable:
             self.evidence.setText(self.t("recovery.evidence.unreadable"))
         else:
-            self.evidence.setText(self.t(
+            text = self.t(
                 "recovery.evidence.open",
                 family=journal.family or "—",
                 state=self.t(f"journal.state.{journal.state}"),
                 actions=journal.action_count if journal.action_count is not None else "—",
                 backup=journal.backup_snapshot or self.t("recovery.backup.none"),
-            ))
+            )
+            if journal.closes_itself:
+                text += "\n" + self.t("recovery.evidence.closes_itself")
+            elif not journal.own:
+                text += "\n" + self.t(
+                    "recovery.evidence.other_machine",
+                    machine=journal.machine_id or self.t("recovery.machine.unknown"),
+                )
+            self.evidence.setText(text)
 
         text, tone = "", None
         if busy:

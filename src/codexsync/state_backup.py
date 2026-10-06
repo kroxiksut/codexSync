@@ -60,6 +60,7 @@ from .safety_gate import OperationKind, ProcessState, SafetyGate
 from .state_locator import locate_local_state_dir
 from .sync_candidates import SECRET_NAMES
 from .version import PRODUCER_VERSION
+from .fs_replace import replace_with_retry
 
 LOG = logging.getLogger(__name__)
 
@@ -452,7 +453,7 @@ def create_state_backup(
             # The last word belongs to the gate: a Codex that opened during the
             # copy may have written after a file was read.
             gate.require(OperationKind.STATE_BACKUP, final=True)
-            os.replace(partial, final)
+            replace_with_retry(partial, final)
         except BaseException:
             partial.unlink(missing_ok=True)
             raise

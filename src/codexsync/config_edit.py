@@ -40,6 +40,7 @@ from .exceptions import ConfigError, ConflictError, FailSafeError
 from .guardian_models import require_guardian_machine_id
 from .models import AppConfig
 from .runtime import _require_mutation_compatible_config
+from .fs_replace import replace_with_retry
 
 TEMPLATE_PATH = Path(__file__).with_name("config.example.toml")
 CONFIG_HISTORY_DIR_NAME = "config-history"
@@ -1169,7 +1170,7 @@ def _write_atomically(path: Path, data: bytes) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, path)
+        replace_with_retry(temp_path, path)
     except BaseException:
         try:
             temp_path.unlink()

@@ -17,6 +17,7 @@ from .guardian_models import (
     GuardianSnapshot,
     require_guardian_machine_id,
 )
+from .fs_replace import replace_with_retry
 
 
 @dataclass(slots=True, frozen=True)
@@ -219,7 +220,7 @@ def _write_pointer(root: Path, snapshot: GuardianSnapshot) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     except OSError as exc:
         temporary.unlink(missing_ok=True)
         raise GuardianIntegrityError("Cannot atomically update Guardian latest-good pointer") from exc

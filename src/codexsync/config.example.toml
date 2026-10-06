@@ -115,9 +115,19 @@ exclude_globs = [
 ]
 
 [conflict]
-# Conflict policy:
-# manual_abort|prefer_cloud|prefer_local|prefer_newer_mtime
-policy = "manual_abort"
+# What happens when a file or a chat changed on both machines (D-027).
+# One rule for settings files and chats, in every run - the window, the
+# console, the sign-in task:
+#   prefer_newer_mtime - keep the newer copy: a file by its modification time,
+#                        a chat by the time of its last message
+#   prefer_local       - keep this machine's copy
+#   prefer_cloud       - keep the cloud's copy
+#   manual_abort       - stop before writing anything and ask
+# The copy not kept is never lost: a file goes into the backup first, a chat
+# whole into the conflict bundle under [semantic] root_dir. Two chats that end
+# at the same moment are still asked about. A one-way sync.direction decides
+# chats too: to_cloud keeps this machine's, to_local the cloud's.
+policy = "prefer_newer_mtime"
 # Include conflict file list in report
 report_conflicts = true
 
@@ -209,8 +219,8 @@ startup_delay_seconds = 0
 # Random delay before a regular run; 0 disables it.
 jitter_seconds = 0
 # Sync settings once after signing in, in a separate task (off by default).
-# This is `sync --apply --unattended`: refused while Codex is open, and any
-# conflict stops it before a write, whatever conflict.policy says. It waits
+# This is `sync --apply --unattended`: refused while Codex is open, and a
+# conflict is decided by conflict.policy, as in any other run. It waits
 # startup_delay_seconds after sign-in. Session transfer, restore and repair
 # are never scheduled.
 sync_at_login = false
