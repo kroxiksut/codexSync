@@ -1,0 +1,27 @@
+name: Feature request
+description: Something codexSync should do that it does not
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start from the problem, not the solution: what you were trying to do between your
+        machines, and where codexSync got in the way. Please do not attach real chats or
+        files from `.codex`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do, on which machines, and what stopped you
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today
+      description: The workaround, if there is one
+  - type: textarea
+    id: idea
+    attributes:
+      label: An idea for the solution
+      description: Optional. How it could work, in the window or on the command line

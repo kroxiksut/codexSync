@@ -42,7 +42,7 @@ class UnattendedSyncTests(unittest.TestCase):
 
     def test_an_unattended_run_keeps_the_configured_policy(self) -> None:
         with mock.patch("codexsync.app._make_safety_gate"),                 mock.patch("codexsync.app.locate_state_dirs", return_value=(self.root, self.root)),                 mock.patch("codexsync.app._build_indexes", return_value=({}, {})),                 mock.patch("codexsync.app.build_sync_plan") as plan:
-            ctx = build_context(self.config, enforce_safety=False, unattended=True)
+            ctx = build_context(self.config, enforce_safety=False)
         self.assertEqual(ctx.config.conflict.policy, "prefer_local")
         self.assertEqual(plan.call_args.kwargs["conflict_policy"], "prefer_local", "the planner decides by it")
 
@@ -61,17 +61,19 @@ class UnattendedSyncTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(build.call_args.kwargs["conflict_policy"], "prefer_cloud")
 
-    def test_the_cli_flag_reaches_the_planner(self) -> None:
-        with mock.patch("codexsync.cli.build_context") as build, mock.patch("codexsync.cli.run_sync"):
+    def test_the_cli_flag_only_labels_the_run(self) -> None:
+        with mock.patch("codexsync.cli.build_context") as build, mock.patch("codexsync.cli.run_sync") as run:
             code = main(["-c", str(self.config), "sync", "--apply", "--unattended"])
         self.assertEqual(code, 0)
-        self.assertIs(build.call_args.kwargs["unattended"], True)
+        # The flag labels the run; the configured policy decides it either way (D-027).
+        self.assertEqual(run.call_args.kwargs["origin"], "unattended")
+        self.assertNotIn("unattended", build.call_args.kwargs)
         self.assertIs(build.call_args.kwargs["enforce_safety"], True, "the process gate still decides")
 
     def test_an_ordinary_sync_is_not_unattended(self) -> None:
-        with mock.patch("codexsync.cli.build_context") as build, mock.patch("codexsync.cli.run_sync"):
+        with mock.patch("codexsync.cli.build_context"), mock.patch("codexsync.cli.run_sync") as run:
             main(["-c", str(self.config), "sync", "--dry-run"])
-        self.assertIs(build.call_args.kwargs["unattended"], False)
+        self.assertEqual(run.call_args.kwargs["origin"], "cli")
 
 
 if __name__ == "__main__":

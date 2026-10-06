@@ -44,16 +44,22 @@
 内核和命令行没有任何依赖。窗口是可选的附加部分。
 
 ```powershell
-git clone https://github.com/kroxiksut/codexSync
-cd codexSync
-pip install .            # 只装命令行
-pip install ".[gui]"     # 命令行加窗口（PySide6）
+pip install "codexsync[gui]"    # 命令行加窗口（PySide6）
+pip install codexsync           # 只装命令行
 ```
 
 在 Windows 上也可以直接从
 [Releases](https://github.com/kroxiksut/codexSync/releases) 下载构建好的版本，
 它们都不需要安装 Python：`codexsync-gui-<tag>-windows-amd64.zip`（窗口，同时也是
 命令行）或 `codexsync-<tag>-windows-amd64.zip`（只有命令行，不含 Qt）。
+
+从源码安装，用于开发或尚未发布的改动：
+
+```powershell
+git clone https://github.com/kroxiksut/codexSync
+cd codexSync
+pip install -e ".[gui]"
+```
 
 ## 首次运行
 

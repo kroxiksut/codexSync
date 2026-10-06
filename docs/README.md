@@ -5,7 +5,7 @@
 [← Project page](../README.md)
 
 This folder holds the user documentation in three languages and the developer
-documents. Every language has the same eight pages; the developer documents are
+documents. Every language has the same nine pages; the developer documents are
 English only.
 
 ## User documentation

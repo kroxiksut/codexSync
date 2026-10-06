@@ -48,10 +48,8 @@
 У ядра и командной строки нет зависимостей. Окно — необязательное дополнение.
 
 ```powershell
-git clone https://github.com/kroxiksut/codexSync
-cd codexSync
-pip install .            # только командная строка
-pip install ".[gui]"     # командная строка и окно (PySide6)
+pip install "codexsync[gui]"    # командная строка и окно (PySide6)
+pip install codexsync           # только командная строка
 ```
 
 На Windows можно вместо этого скачать готовую сборку из
@@ -59,6 +57,14 @@ pip install ".[gui]"     # командная строка и окно (PySide6)
 нужен установленный Python: `codexsync-gui-<tag>-windows-amd64.zip` (окно, оно
 же командная строка) или `codexsync-<tag>-windows-amd64.zip` (только командная
 строка, без Qt).
+
+Из исходников — для разработки или ещё не выпущенного изменения:
+
+```powershell
+git clone https://github.com/kroxiksut/codexSync
+cd codexSync
+pip install -e ".[gui]"
+```
 
 ## Первый запуск
 

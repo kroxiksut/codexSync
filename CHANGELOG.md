@@ -10,6 +10,21 @@ version through `codexsync.__version__`, which is read from installed package
 metadata.
 
 ### Added
+- **A security policy and issue forms.** `SECURITY.md` says what counts as a
+  security or data-safety problem and how to report it privately (GitHub's
+  private reporting is on); the bug form asks for version, install, platform
+  and surface, and warns against attaching real chats, `auth.json` or
+  databases. The README now says first why a cloud folder alone is not enough,
+  what stays private, and installs from PyPI or a release build rather than
+  from a source checkout.
+- **The console does everything the window does.** New: `summary` (the Home
+  page, `--recount`), `backups list` (the names `restore --from` takes),
+  `sessions scope` (the stored working set), `config set` / `unset` (one value,
+  edited the way Settings edit it: comments kept, checked like a load, refused if
+  the file moved, the old file kept in `config-history/`; `--dry-run` shows the
+  change), `config mapping list|suggest|add|remove`, `config roots` (what can be
+  synchronised, one level at a time) and `config history`. What the window does
+  not let you edit, the console refuses too.
 - **An interrupted run that replaced nothing no longer blocks the next one.**
   A journal left at `PREPARED`/`BACKED_UP` by this machine is closed by the
   next write here (history reason *Abandoned*); a run that entered the commit
@@ -488,6 +503,23 @@ metadata.
 
 ### Fixed
 
+- **A full sync that had delivered everything could end without telling the
+  other machine.** Projects, chat names and the request for Codex to list new
+  chat files run after the settings and chats; one of them failing — another
+  machine's names arriving mid-run, Codex starting, a locked database — stopped
+  the run before the handoff record. Each is now logged and reported as not done
+  this time, the record is written, and the next sync does it again. Each step
+  also builds its plan once instead of twice, which spares a full read of Codex's
+  database per step.
+- **Writes into Codex's chat catalogue check once more that Codex is closed**
+  right before the transaction, after the journal write that a cloud client may
+  have held for seconds.
+- **The *newer* rule no longer decides a chat whose last message time is
+  unknown** in favour of the newer record format; it asks, as for two chats that
+  end at the same moment. Record times are compared as moments there too.
+- **Two moves of the same project at once** (the window and the console) could
+  remove each other's copy in progress; the whole move now holds the state
+  root's lock, not only the final state write.
 - **Moving a project with a deep `.git` failed with `WinError 3` and left a
   partial copy.** The copy goes through a staging folder beside the target,
   whose name made a 219-character path inside `.git` exceed Windows' 260-character

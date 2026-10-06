@@ -24,6 +24,7 @@ from codexsync.app import (
     run_handoff,
     watch_handoff,
 )
+from codexsync import app as app_module
 from codexsync.config import load_config
 from codexsync.exceptions import ConfigError, ConflictError, SafetyPreconditionError
 from codexsync.handoff import (
@@ -263,6 +264,46 @@ class RunHandoffTests(_Workspace):
         self.assertEqual(
             board.pending("desktop"), [], "a machine that handed nothing off leaves nothing to wait for"
         )
+
+    def test_a_later_step_that_fails_does_not_cost_the_handoff(self) -> None:
+        # A peer's names file arriving mid-run once made the names step refuse
+        # its own plan after settings and chats were in the cloud, so no record
+        # was written and nobody was told of the work that had been delivered.
+        desktop, desktop_codex = self.machine("desktop")
+        self.session(desktop_codex, "11111111-1111-1111-1111-111111111111")
+        failing = mock.patch(
+            "codexsync.app.sync_chat_names", side_effect=ConfigError("chat names changed since then"),
+        )
+        with failing, self.assertLogs("codexsync", level="ERROR"):
+            sent = run_handoff(desktop)
+        self.assertTrue(sent.handed_off)
+        self.assertEqual(sent.steps_not_done, ("chat_names",))
+        self.assertEqual(sent.chat_names_set, 0)
+        board = read_board(self.handoff_root)
+        self.assertEqual(board.records["desktop"].handoff_id, sent.record.handoff_id, "the record is written")
+        self.assertEqual(
+            board.pending("laptop")[0].machine, "desktop", "the other machine learns of the handoff"
+        )
+
+    def test_each_later_step_builds_its_plan_once(self) -> None:
+        desktop, desktop_codex = self.machine("desktop")
+        self.session(desktop_codex, "11111111-1111-1111-1111-111111111111")
+        calls = {}
+        patches = []
+        for name in ("sync_projects", "sync_chat_names", "refresh_thread_catalogue"):
+            real = getattr(app_module, name)
+            spy = mock.patch(f"codexsync.app.{name}", side_effect=real)
+            calls[name] = spy.start()
+            patches.append(spy)
+        try:
+            sent = run_handoff(desktop)
+        finally:
+            for spy in patches:
+                spy.stop()
+        self.assertEqual(sent.steps_not_done, ())
+        for name, spy in calls.items():
+            self.assertEqual(spy.call_count, 1, name)
+            self.assertIs(spy.call_args.kwargs["planned_here"], True, name)
 
     def test_a_chat_started_on_the_other_machine_is_carried_by_default(self) -> None:
         # D-020 amendment (2026-10-03): carrying new chats is the job, so a

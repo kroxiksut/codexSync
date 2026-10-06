@@ -34,6 +34,7 @@ compression = "none"             # none | zip
 ## Restoring a backup
 
 ```powershell
+codexsync -c config.toml backups list                                  # the snapshots and their names
 codexsync -c config.toml restore --dry-run                              # preview, writes nothing
 codexsync -c config.toml restore --apply                                # the latest backup into the local .codex
 codexsync -c config.toml restore --from <snapshot-name> --apply         # a specific backup (directory or .zip)

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import platform
 from pathlib import Path
 import shutil
 import textwrap
+import threading
 import unittest
 from unittest.mock import patch
 import uuid
@@ -23,11 +25,14 @@ from codexsync.app import (
     save_project_move_plan,
     scan_project_move,
 )
-from codexsync.exceptions import ConfigError, FailSafeError, SafetyPreconditionError
+from codexsync import project_move
+from codexsync.config import load_config
+from codexsync.exceptions import ConfigError, FailSafeError, OperationBusyError, SafetyPreconditionError
 from codexsync.guardian_models import SourceObservation, ValidationStatus
 from codexsync.guardian_schema import validate_global_state_references
 from codexsync.guardian_store import GuardianStore
 from codexsync.mutation_journal import JournalState, JournalStore
+from codexsync.operation_lock import OperationLock
 from codexsync.safety_gate import OperationKind, ProcessState, SafetyDecision
 
 
@@ -238,6 +243,37 @@ class ProjectMoveTests(_Fixture):
         )
         self.assertIn(OperationKind.PROJECT_MOVE, gate.required)
         self.assertTrue(list((self.root / "backups").rglob(".codex-global-state.json")), "state backed up first")
+
+    def test_the_copy_holds_the_state_roots_lock(self) -> None:
+        # A second move to the same folder clears an earlier attempt's staging
+        # directory; without the lock over the copy it could clear one still
+        # being copied into by the window while the console ran the same move.
+        target = self.projects / "alpha-moved"
+        with self._gate(_StoppedGate()):
+            plan = scan_project_move(self.config_path, project_id="p-alpha", new_root=target)
+        plan_path = save_project_move_plan(plan, self.root / "plans" / "move.json")
+        cfg = load_config(self.config_path)
+        machine = cfg.identity.machine_id or platform.node()
+        seen: list[str] = []
+        real_copy = project_move._copy_into_place
+
+        def copy(*args, **kwargs):
+            def other_run() -> None:
+                try:
+                    with OperationLock(cfg.paths.temp_dir, state_root=self.state_dir, machine_id=machine, family="x"):
+                        seen.append("entered")
+                except OperationBusyError:
+                    seen.append("refused")
+
+            worker = threading.Thread(target=other_run)
+            worker.start()
+            worker.join()
+            return real_copy(*args, **kwargs)
+
+        with self._gate(_StoppedGate()), patch("codexsync.project_move._copy_into_place", copy):
+            apply_project_move_plan(self.config_path, plan_path=plan_path, confirm_plan=plan.plan_id)
+        self.assertEqual(seen, ["refused"])
+        self.assertTrue((target / "README.md").is_file(), "the commit inside re-entered the lock")
 
     def test_a_running_codex_blocks_the_apply_before_any_copy(self) -> None:
         target = self.projects / "alpha-moved"

@@ -5,15 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codexsync"
 version = "0.2.0"
-description = "Local-first Codex state sync utility"
+description = "Local-first GUI and CLI for safe Codex sync between personal machines"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Fyodor Malkov" }]
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
-keywords = ["codex", "sync", "backup", "cli", "local-first"]
+keywords = [
+  "codex",
+  "codex-sync",
+  "session-sync",
+  "state-sync",
+  "chat-sync",
+  "backup",
+  "recovery",
+  "handoff",
+  "gui",
+  "cli",
+  "local-first",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Environment :: X11 Applications :: Qt",
   "Intended Audience :: Developers",
   "Operating System :: MacOS",
   "Operating System :: MacOS :: MacOS X",
@@ -24,6 +38,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Version Control",
+  "Topic :: System :: Archiving :: Backup",
   "Topic :: Utilities",
 ]
 dependencies = []
@@ -38,6 +53,8 @@ gui = ["PySide6>=6.6"]
 Homepage = "https://github.com/kroxiksut/codexSync"
 Repository = "https://github.com/kroxiksut/codexSync"
 Issues = "https://github.com/kroxiksut/codexSync/issues"
+Documentation = "https://github.com/kroxiksut/codexSync/tree/main/docs"
+Changelog = "https://github.com/kroxiksut/codexSync/blob/main/CHANGELOG.md"
 
 [project.scripts]
 codexsync = "codexsync.cli:main"

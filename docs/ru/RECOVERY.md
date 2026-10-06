@@ -37,6 +37,7 @@ compression = "none"             # none | zip
 ## Восстановление из резервной копии
 
 ```powershell
+codexsync -c config.toml backups list                                  # снимки и их имена
 codexsync -c config.toml restore --dry-run                              # предпросмотр, ничего не пишет
 codexsync -c config.toml restore --apply                                # последняя копия в локальную .codex
 codexsync -c config.toml restore --from <snapshot-name> --apply         # конкретная копия (каталог или .zip)

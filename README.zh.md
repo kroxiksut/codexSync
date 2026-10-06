@@ -5,8 +5,8 @@
 <h1 align="center">codexSync</h1>
 
 <p align="center">
-  通过一个云同步文件夹，把本地 Codex 状态 —— 项目、对话归属和会话历史 ——
-  在你自己的几台机器之间搬运。
+  在你自己的几台机器之间安全地搬运 Codex 工作 —— 对话、项目、配置和本地状态 ——
+  带有受保护的交接、冲突处理、经过校验的备份和恢复。
 </p>
 
 <p align="center">
@@ -31,32 +31,57 @@
   <a href="docs/zh/GUI.md"><img src="docs/screenshots/zh/02-overview.png" width="85%" alt="CodexSync 窗口：概览"></a>
 </p>
 
+Codex 把重要的工作状态保存在你的电脑上。把 `.codex` 放进 Dropbox、OneDrive 或
+Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两台机器上被以不同方式继续，
+而一次被中断的覆盖可能恰好毁掉你需要的那份副本。codexSync 把搬运这些状态当作一次
+受保护的交接，而不是普通的文件同步。
+
 ## 它能做什么
 
-- **同步**本地 Codex 状态目录，通过任意云同步文件夹 —— 先备份，而且只在 Codex
-  关闭时进行。→ [同步](docs/zh/SYNC.md)
+- **在机器之间交接工作** —— 点一下，或在 Codex 关闭时自动进行：设置、对话和项目
+  进入云文件夹，下一台机器载入它们，每台机器都知道另一台交接了什么。
+  → [同步](docs/zh/SYNC.md#在电脑之间交接工作)
+- **搬运对话和项目** —— 对话历史、对话名称和项目归属会出现在 Codex 查找它们的
+  位置，即使项目文件夹在另一台机器上是另一条路径。→ [项目与对话](docs/zh/PROJECTS.md)
+- **绝不合并两段历史** —— 每个会话分支都会被分类；在两台机器上都被继续的对话只
+  保留一份完整副本（按你的规则或选择），另一份被保存下来。→ [会话](docs/zh/SESSIONS.md)
+- **每次覆盖前先备份**，并能从被中断的写入中恢复 —— 锁、事务日志、经过校验的备份。
+  → [备份与恢复](docs/zh/RECOVERY.md)
 - **守护全局状态**：*在 Codex 运行期间*拍摄经过校验的快照，并且只写到 `.codex`
   之外。→ [快照守护](docs/zh/GUARDIAN.md)
-- **在机器之间搬运会话历史**，并对每个分支分类；分叉永远不会被合并，也不会按
-  时间戳决定。→ [会话](docs/zh/SESSIONS.md)
-- **找到某个对话并把它放到项目下**，在换机之后修复归属，搬移项目的文件。
-  → [项目与对话](docs/zh/PROJECTS.md)
-- **从被中断的写入中恢复** —— 锁、事务日志、经过校验的备份。
-  → [备份与恢复](docs/zh/RECOVERY.md)
+- **可以自动运行** —— 交接监视器、`.codex` 副本和定期快照都是操作系统的普通任务。
+  → [自动化](docs/zh/CONFIGURATION.md#自动化)
 
 它既不与 Codex 的内部实现集成，也不做实时同步：
 [它不做什么](docs/zh/README.md#它不做什么)。
 
+## 隐私与安全
+
+- **本地优先。** codexSync 没有自己的服务：共享状态只经过你选择的文件夹。
+- **你的登录信息绝不外传。** `auth.json` 和其他凭据文件在任何层级都不会被复制。
+- **只在 Codex 关闭时写入。** 无法确定时，什么都不写。
+- **没有经过校验的备份，什么都不会被替换**；每次写入都记入事务日志，被中断的写入可以
+  继续完成或回滚。
+
+发现了安全或数据安全方面的问题？见 [SECURITY.md](./SECURITY.md)。
+
 ## 安装
 
+**Windows，无需 Python：** 从 [Releases](https://github.com/kroxiksut/codexSync/releases)
+下载 `codexsync-gui-…-windows-amd64.zip`，解压后运行 `codexsync-gui.exe`。它同时也是命令行。
+
+**使用 Python 3.11+**，在 Windows 或 macOS 上：
+
 ```powershell
-pip install ".[gui]"     # 命令行加窗口；只要命令行用 `pip install .`
-codexsync-gui            # 或者：codexsync -c config.toml doctor
+pip install "codexsync[gui]"    # 窗口和命令行
+codexsync-gui                   # 首次启动时会和你一起创建 config.toml
+
+pip install codexsync           # 只有命令行，没有依赖
+codexsync init-config --output config.toml
+codexsync -c config.toml doctor
 ```
 
-不需要 Python 的 Windows 构建在
-[Releases](https://github.com/kroxiksut/codexSync/releases) 里。完整步骤和首次
-运行见[安装与上手](docs/zh/README.md#安装)。
+从源码安装以及首次运行的详细步骤：[安装与上手](docs/zh/README.md#安装)。
 
 ## 文档
 

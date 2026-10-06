@@ -61,6 +61,17 @@ from .app import (
     apply_config_migration,
     check_config_migration,
     preview_config_migration,
+    change_config_value,
+    change_path_mappings,
+    list_backup_snapshots,
+    list_config_history,
+    list_sync_candidates,
+    parse_config_value,
+    read_home_summary,
+    read_working_set,
+    recount_state,
+    remove_config_value,
+    suggest_path_mappings,
 )
 from .chat_directory import Association, ChatDirectory, ChatEntry, search_chats
 from .chat_move import ChatMovePlan
@@ -524,11 +535,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     config_cmd = sub.add_parser(
         "config",
-        help="Inspect and upgrade config.toml itself",
+        help="Inspect, edit and upgrade config.toml itself",
         description=(
-            "Report what this version would write differently in config.toml, and apply "
-            "those changes in one confirmed write. Comments and every value not named by "
-            "the plan are kept, and the replaced file is copied into config-history/."
+            "Edit config.toml the way the window's Settings do, and report what this version "
+            "would write differently in it. Every write keeps comments and every value it does "
+            "not name, passes the same checks as the loader, is refused if the file changed "
+            "meanwhile, and copies the replaced file into config-history/."
         ),
     )
     config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
@@ -556,6 +568,55 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Plan id printed by `config check`; refused if the file changed since",
     )
+    config_set = config_sub.add_parser(
+        "set",
+        help="Set one value, as the Settings page does (comments kept, old file in config-history/)",
+    )
+    config_set.add_argument("name", metavar="SECTION.KEY", help="For example conflict.policy")
+    config_set.add_argument(
+        "value", metavar="VALUE",
+        help='A TOML value (true, 600, ["sessions", "skills"]); text needs no quotes',
+    )
+    config_unset = config_sub.add_parser(
+        "unset", help="Remove one value, so the built-in default applies again",
+    )
+    config_unset.add_argument("name", metavar="SECTION.KEY")
+    for sub_parser in (config_set, config_unset):
+        sub_parser.add_argument(
+            "--dry-run", action="store_true", help="Print the change and check it; write nothing",
+        )
+    config_mapping = config_sub.add_parser("mapping", help="Path mapping rules ([[path_mappings]])")
+    mapping_sub = config_mapping.add_subparsers(dest="mapping_command", required=True)
+    mapping_list = mapping_sub.add_parser("list", help="List the rules; writes nothing")
+    mapping_suggest = mapping_sub.add_parser(
+        "suggest", help="Folders chats name that are missing here, and project roots; reads only",
+    )
+    mapping_add = mapping_sub.add_parser("add", help="Add one rule")
+    mapping_add.add_argument("--id", required=True, dest="rule_id", help="A unique name for the rule")
+    mapping_add.add_argument("--source-machine", required=True, help="The machine the path comes from")
+    mapping_add.add_argument("--target-machine", required=True, help="The machine it is read on")
+    mapping_add.add_argument("--from", required=True, dest="from_prefix", help="Folder on the source machine")
+    mapping_add.add_argument("--to", required=True, dest="to_prefix", help="The same folder on the target machine")
+    mapping_add.add_argument(
+        "--case-sensitive", choices=("true", "false"), default=None,
+        help="Compare the folder with case; left out, it follows the path's platform",
+    )
+    mapping_remove = mapping_sub.add_parser("remove", help="Remove one rule by its id")
+    mapping_remove.add_argument("--id", required=True, dest="rule_id")
+    for sub_parser in (mapping_add, mapping_remove):
+        sub_parser.add_argument(
+            "--dry-run", action="store_true", help="Print the change and check it; write nothing",
+        )
+    for sub_parser in (mapping_list, mapping_suggest):
+        sub_parser.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+    config_roots = config_sub.add_parser(
+        "roots",
+        help="One level of what .codex and the cloud copy hold, to choose targets.include_roots; reads only",
+    )
+    config_roots.add_argument("path", nargs="?", default="", metavar="PATH", help="Folder to list, relative")
+    config_history = config_sub.add_parser("history", help="Saved versions of config.toml; reads only")
+    for sub_parser in (config_roots, config_history):
+        sub_parser.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
     init_cfg = sub.add_parser(
         "init-config",
         help="Write config.toml from the packaged template",
@@ -742,6 +803,15 @@ def build_parser() -> argparse.ArgumentParser:
         "index",
         help="Report what each side's session_index.jsonl contains; writes nothing",
     )
+    sessions_scope = sessions_sub.add_parser(
+        "scope", help="Show the working set stored for a pair of machines; writes nothing",
+    )
+    sessions_scope.add_argument("--source-machine", required=True)
+    sessions_scope.add_argument("--target-machine", required=True)
+    sessions_scope.add_argument(
+        "--expand", action="store_true", help="Also count the chats it covers now (reads every chat)",
+    )
+    sessions_scope.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
     sessions_resolve = sessions_sub.add_parser(
         "resolve", help="Record one versioned choice between two divergent branches"
     )
@@ -870,6 +940,24 @@ def build_parser() -> argparse.ArgumentParser:
     state_backup_list = state_backup_sub.add_parser("list", help="List the copies in the folder; writes nothing")
     state_backup_list.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
 
+    backups = sub.add_parser(
+        "backups", help="Backups a sync or restore takes before overwriting (paths.backup_dir)",
+    )
+    backups_sub = backups.add_subparsers(dest="backups_command", required=True)
+    backups_list = backups_sub.add_parser(
+        "list", help="List the snapshots, newest first; the name is what `restore --from` takes",
+    )
+    backups_list.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+
+    summary = sub.add_parser(
+        "summary", help="What is kept and how it stands -- the window's Home page; reads only",
+    )
+    summary.add_argument(
+        "--recount", action="store_true",
+        help="Count chats and projects now (reads every chat) instead of the last count kept",
+    )
+    summary.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+
     handoff = sub.add_parser(
         "handoff",
         help="Hand work from one machine to the next ([handoff] in config.toml)",
@@ -958,6 +1046,8 @@ def _run_config_command(args: argparse.Namespace, config_path: Path) -> int:
     bytes, so a config edited in between stops the write instead of being
     overwritten by a plan built for a different file.
     """
+    if args.config_command not in {"check", "upgrade"}:
+        return _run_config_edit(args, config_path)
     plan, diff = preview_config_migration(
         config_path, include_defaults=args.include_defaults, skip=tuple(args.skip)
     )
@@ -977,6 +1067,258 @@ def _run_config_command(args: argparse.Namespace, config_path: Path) -> int:
         print(f"Skipped: {', '.join(outcome.skipped)}")
     if outcome.saved.history_entry is not None:
         print(f"Previous version kept: {outcome.saved.history_entry}")
+    return int(ExitCode.OK)
+
+
+def _run_config_edit(args: argparse.Namespace, config_path: Path) -> int:
+    """`config set|unset|mapping|roots|history`: the Settings page, from the console."""
+    command = args.config_command
+    if command == "set":
+        value = parse_config_value(args.name, args.value)
+        return _print_config_change(change_config_value(config_path, args.name, value, dry_run=args.dry_run))
+    if command == "unset":
+        return _print_config_change(remove_config_value(config_path, args.name, dry_run=args.dry_run))
+    if command == "history":
+        entries = list_config_history(load_config(config_path), config_path)
+        if args.as_json:
+            print(json.dumps([
+                {"name": item.name, "path": str(item.path), "size": item.size,
+                 "created_utc": item.created_utc.strftime("%Y-%m-%dT%H:%M:%SZ")}
+                for item in entries
+            ], sort_keys=True, indent=2))
+        elif not entries:
+            print("No saved versions of config.toml yet.")
+        else:
+            for item in entries:
+                print(f"{item.created_utc:%Y-%m-%d %H:%M:%S}Z  {item.size:>8} B  {item.path}")
+        return int(ExitCode.OK)
+    if command == "roots":
+        return _print_sync_roots(load_config(config_path), args.path, as_json=args.as_json)
+    if args.mapping_command == "list":
+        return _print_mappings(load_config(config_path), as_json=args.as_json)
+    if args.mapping_command == "suggest":
+        return _print_mapping_hints(suggest_path_mappings(config_path), as_json=args.as_json)
+    if args.mapping_command == "add":
+        rule = {
+            "rule_id": args.rule_id, "source_machine": args.source_machine, "target_machine": args.target_machine,
+            "from": args.from_prefix, "to": args.to_prefix,
+            "case_sensitive": None if args.case_sensitive is None else args.case_sensitive == "true",
+        }
+        return _print_config_change(change_path_mappings(config_path, add=rule, dry_run=args.dry_run))
+    return _print_config_change(change_path_mappings(config_path, remove=args.rule_id, dry_run=args.dry_run))
+
+
+def _print_backups(snapshots, config_path: Path, *, as_json: bool) -> int:
+    """`backups list`: what `restore --from` can take, newest first."""
+    if as_json:
+        print(json.dumps([
+            {"name": item.name, "committed": item.committed, "legacy": item.legacy,
+             "compressed": item.compressed, "entries": item.entries, "total_bytes": item.total_bytes,
+             "machine": item.machine, "created_utc": item.created_utc, "modified_utc": item.modified_utc,
+             "problem": item.problem}
+            for item in snapshots
+        ], sort_keys=True, indent=2))
+        return int(ExitCode.OK)
+    if not snapshots:
+        print("No backups yet.")
+        return int(ExitCode.OK)
+    for item in snapshots:
+        state = "ok" if item.committed else ("legacy" if item.legacy else f"not usable: {item.problem}")
+        size = "?" if item.total_bytes is None else f"{item.total_bytes} B"
+        files = "?" if item.entries is None else str(item.entries)
+        print(f"{item.created_utc or item.modified_utc}  {item.name}  ({item.machine or 'unknown machine'}, "
+              f"{files} file(s), {size}, {state})")
+    print(f"Restore one: codexsync -c {config_path} restore --from NAME --dry-run")
+    return int(ExitCode.OK)
+
+
+def _print_scope(scope, args: argparse.Namespace, *, as_json: bool) -> int:
+    """`sessions scope`: the working set stored for a pair of machines."""
+    expanded = args.expand and not scope.is_empty
+    if as_json:
+        payload = {"projects": list(scope.projects), "chats": list(scope.chats), "empty": scope.is_empty}
+        if expanded:
+            payload.update(
+                chat_count=scope.chat_count, total_bytes=scope.total_bytes,
+                not_in_catalog=len(scope.not_in_catalog),
+            )
+        print(json.dumps(payload, sort_keys=True, indent=2))
+        return int(ExitCode.OK)
+    pair = f"{args.source_machine} -> {args.target_machine}"
+    if scope.is_empty:
+        print(f"No working set stored for {pair}: every chat is brought into .codex.")
+        return int(ExitCode.OK)
+    print(f"Working set for {pair}:")
+    for project in scope.projects:
+        print(f"  project: {project}")
+    for chat in scope.chats:
+        print(f"  chat: {chat}")
+    if expanded:
+        print(f"  covers now: {scope.chat_count} chat(s), {scope.total_bytes} B")
+        if scope.not_in_catalog:
+            print(f"  not in this machine's thread catalogue: {len(scope.not_in_catalog)}")
+    return int(ExitCode.OK)
+
+
+def _print_summary(summary, *, as_json: bool) -> int:
+    """`summary`: the Home page's tiles, one line each."""
+    if as_json:
+        def plain(value):
+            if hasattr(value, "__dataclass_fields__"):
+                return {name: plain(getattr(value, name)) for name in value.__dataclass_fields__}
+            if isinstance(value, (list, tuple)):
+                return [plain(item) for item in value]
+            if isinstance(value, dict):
+                return {str(key): plain(item) for key, item in value.items()}
+            if value is None or isinstance(value, (bool, int, float, str)):
+                return value
+            return str(value)
+
+        print(json.dumps(plain(summary), sort_keys=True, indent=2))
+        return int(ExitCode.OK)
+    print(f"Codex: {summary.codex} (as seen now; a write checks again at that moment)")
+    sync = summary.sync
+    if sync is not None:
+        last = sync.last
+        print(
+            f"Sync: last {last.created_at_utc if last else 'never'}"
+            + (f" ({last.state})" if last else "")
+            + f"; last 7 days {sync.runs} run(s), {sync.failed} not finished; files to cloud {sync.to_cloud}, "
+            f"to .codex {sync.to_local}; chats to cloud {sync.chats_to_cloud}, to .codex {sync.chats_to_local}"
+        )
+    if summary.open_journals:
+        print(f"Open journals: {summary.open_journals} (`recover list` says what closes each)")
+    for title, copies, on in (
+        ("Backups", summary.backups, True),
+        ("Copies of .codex", summary.copies, summary.copies_configured),
+    ):
+        if not on:
+            print(f"{title}: off ([state_backup] root_dir is not chosen)")
+        elif copies is not None:
+            print(f"{title}: {copies.count}, {copies.bytes} B, newest {copies.newest_utc or '-'}")
+    guardian = summary.guardian
+    if guardian is not None:
+        print(
+            f"Guardian: latest good {guardian.latest_good_utc or 'none'}, {guardian.snapshots} snapshot(s), "
+            f"{guardian.quarantined} quarantined, {guardian.problems} problem(s)"
+        )
+    view = summary.automation
+    if view is not None:
+        installed = [
+            name for name, status in (
+                ("periodic", view.status), ("sign-in sync", view.login_status),
+                ("copy of .codex", view.backup_status), ("handoff watcher", view.handoff_status),
+            ) if status is not None and status.installed
+        ]
+        print("Automation: " + (", ".join(installed) + " installed" if installed else "no task installed"))
+    state = summary.state
+    if state is None:
+        print("Chats: not counted yet (`summary --recount`)")
+    else:
+        print(
+            f"Chats: {state.chats} ({state.archived} archived, {state.sub_threads} sub-threads), "
+            f"{state.projects} project(s), {state.chats_without_project} without a project, "
+            f"{state.chats_via_mapping} reachable only through a path mapping; {state.session_bytes} B; "
+            f"counted {state.computed_at_utc}"
+        )
+    for part, reason in sorted(summary.errors.items()):
+        print(f"Not read: {part}: {reason}")
+    return int(ExitCode.OK)
+
+
+def _print_config_change(change) -> int:
+    if not change.changed:
+        print(f"{change.path} already says so; nothing to change.")
+        return int(ExitCode.OK)
+    print(change.diff, end="")
+    if change.saved is None:
+        print("Dry run: nothing written. The edit passes the checks a save makes.")
+        return int(ExitCode.OK)
+    print(f"Saved: {change.saved.path}")
+    if change.saved.history_entry is not None:
+        print(f"Previous version kept: {change.saved.history_entry}")
+    return int(ExitCode.OK)
+
+
+def _print_mappings(cfg: AppConfig, *, as_json: bool) -> int:
+    rules = cfg.path_mappings
+    if as_json:
+        print(json.dumps([
+            {"rule_id": rule.rule_id, "source_machine": rule.source_machine,
+             "target_machine": rule.target_machine, "from": rule.source_prefix, "to": rule.target_prefix,
+             "case_sensitive": rule.case_sensitive}
+            for rule in rules
+        ], sort_keys=True, indent=2))
+    elif not rules:
+        print("No path mapping rules.")
+    else:
+        for rule in rules:
+            case = "" if rule.case_sensitive is None else f"  (case_sensitive = {str(rule.case_sensitive).lower()})"
+            print(f"{rule.rule_id}: {rule.source_machine} {rule.source_prefix} -> "
+                  f"{rule.target_machine} {rule.target_prefix}{case}")
+    return int(ExitCode.OK)
+
+
+def _print_mapping_hints(hints, *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps({
+            "machines": list(hints.machines),
+            "chat_roots": [{"folder": folder, "chats": count} for folder, count in hints.chat_roots],
+            "unmapped_roots": list(hints.unmapped_roots),
+            "local_project_roots": list(hints.local_project_roots),
+            "remote_project_roots": list(hints.remote_project_roots),
+        }, sort_keys=True, indent=2))
+        return int(ExitCode.OK)
+    print("Machines: " + (", ".join(hints.machines) or "(none named yet)"))
+    print("Folders chats name that do not exist here (what a rule is for):")
+    for folder in hints.unmapped_roots:
+        print(f"  {folder}  ({hints.chats_under(folder)} chat(s))")
+    if not hints.unmapped_roots:
+        print("  (none)")
+    for title, folders in (
+        ("Project folders that exist here:", hints.local_project_roots),
+        ("Project folders that do not exist here:", hints.remote_project_roots),
+    ):
+        print(title)
+        for folder in folders or ("(none)",):
+            print(f"  {folder}")
+    print(
+        "Add a rule: codexsync config mapping add --id NAME --source-machine A --target-machine B "
+        "--from FOLDER --to FOLDER"
+    )
+    return int(ExitCode.OK)
+
+
+def _print_sync_roots(cfg: AppConfig, path: str, *, as_json: bool) -> int:
+    """One level of both sides, with why an entry cannot be chosen."""
+    chosen = {root.strip("/") for root in cfg.targets.include_roots}
+    items = list_sync_candidates(cfg, path)
+
+    def included(relative: str) -> bool:
+        return any(relative == root or relative.startswith(root + "/") for root in chosen)
+
+    if as_json:
+        print(json.dumps([
+            {"path": item.relative, "dir": item.is_dir, "local": item.local, "cloud": item.cloud,
+             "included": included(item.relative), "semantic_owned": item.semantic_owned,
+             "excluded_by_glob": item.excluded_by_glob}
+            for item in items
+        ], sort_keys=True, indent=2))
+        return int(ExitCode.OK)
+    if not items:
+        print("Nothing here on either side.")
+        return int(ExitCode.OK)
+    print("  L C  path   (L = in .codex, C = in the cloud copy, * = in targets.include_roots)")
+    for item in items:
+        notes = []
+        if item.semantic_owned:
+            notes.append("carried by the chat sync, never copied as a file")
+        if item.excluded_by_glob:
+            notes.append("excluded by filters.exclude_globs")
+        mark = "*" if included(item.relative) else " "
+        name = item.relative + ("/" if item.is_dir else "")
+        print(f"{mark} {'L' if item.local else '-'} {'C' if item.cloud else '-'}  {name}"
+              + (f"   ({'; '.join(notes)})" if notes else ""))
     return int(ExitCode.OK)
 
 
@@ -1942,6 +2284,22 @@ def main(argv: list[str] | None = None) -> int:
             }, sort_keys=True, indent=2))
             return int(ExitCode.OK)
 
+        if args.command == "backups":
+            return _print_backups(list_backup_snapshots(config_path), config_path, as_json=args.as_json)
+
+        if args.command == "summary":
+            if args.recount:
+                recount_state(config_path)
+            return _print_summary(read_home_summary(config_path), as_json=args.as_json)
+
+        if args.command == "sessions" and args.sessions_command == "scope":
+            scope = read_working_set(
+                config_path, source_machine=args.source_machine, target_machine=args.target_machine,
+            )
+            if args.expand and not scope.is_empty:
+                scope = build_working_set(config_path, projects=scope.projects, chats=scope.chats)
+            return _print_scope(scope, args, as_json=args.as_json)
+
         if args.command == "state-backup":
             if args.state_backup_command == "create":
                 result = create_codex_backup(config_path, wait=args.wait)
@@ -2040,6 +2398,8 @@ def main(argv: list[str] | None = None) -> int:
                         f"  chat files Codex still does not list after rebuilding: {result.chats_codex_ignores} "
                         "(the files are in place; `sessions catalogue` lists them)"
                     )
+                for name in result.steps_not_done:
+                    print(f"  not done this time, the next sync tries again (the log says why): {name}")
                 print(
                     "  handed off: " + (result.record.handoff_id if result.handed_off else "nothing new")
                 )
@@ -2082,7 +2442,6 @@ def main(argv: list[str] | None = None) -> int:
                 config_path,
                 manual_terminate_confirmation_override=args.manual_terminate_confirmation_override,
                 enforce_safety=True,
-                unattended=args.unattended,
                 conflict_policy=args.conflict_policy,
             )
             dry_run = ctx.config.sync.dry_run_default

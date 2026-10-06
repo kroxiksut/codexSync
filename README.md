@@ -5,8 +5,9 @@
 <h1 align="center">codexSync</h1>
 
 <p align="center">
-  Carry your local Codex state — projects, chat bindings and session history —
-  between personal machines through a cloud-synced folder.
+  Move your Codex work safely between personal machines — chats, projects,
+  configuration and local state — with guarded handoff, conflict handling,
+  verified backups and recovery.
 </p>
 
 <p align="center">
@@ -31,33 +32,66 @@
   <a href="docs/en/GUI.md"><img src="docs/screenshots/en/02-overview.png" width="85%" alt="The CodexSync window: overview"></a>
 </p>
 
+Codex keeps important working state on your machine. Putting `.codex` into
+Dropbox, OneDrive or Syncthing is not enough: Codex may still be writing to it,
+the same chat may be continued differently on two machines, and an interrupted
+overwrite can destroy the very copy you needed. codexSync treats moving that
+state as a guarded handoff, not as ordinary file synchronisation.
+
 ## What it does
 
-- **Syncs** the Codex state directory through any cloud folder — backup first,
-  and only while Codex is closed. → [Synchronisation](docs/en/SYNC.md)
+- **Hands your work over between machines** — one click, or on its own when
+  Codex closes: settings, chats and projects go to the cloud folder, the next
+  machine loads them, and each knows what the other handed off.
+  → [Synchronisation](docs/en/SYNC.md#handing-work-over)
+- **Carries chats and projects** — chat history, chat names and project
+  bindings arrive where Codex looks for them, even when a project folder has
+  another path on the other machine. → [Projects and chats](docs/en/PROJECTS.md)
+- **Never merges two histories** — every session branch is classified; a chat
+  continued on both machines keeps one whole copy, by your rule or your choice,
+  and the other is saved. → [Sessions](docs/en/SESSIONS.md)
+- **Backs up before every overwrite** and recovers from an interrupted write —
+  lock, journal, verified backup. → [Backups and recovery](docs/en/RECOVERY.md)
 - **Guards the global state** with verified snapshots taken *while Codex runs*,
   written only outside `.codex`. → [Guardian](docs/en/GUARDIAN.md)
-- **Moves session history between machines**, classifying every branch; a
-  divergence is never merged or decided by timestamp.
-  → [Sessions](docs/en/SESSIONS.md)
-- **Finds a chat and puts it under a project**, repairs bindings after a machine
-  handoff, moves a project's files. → [Projects and chats](docs/en/PROJECTS.md)
-- **Recovers from an interrupted write** — lock, journal, verified backup.
-  → [Backups and recovery](docs/en/RECOVERY.md)
+- **Can run on its own** — the handoff watcher, copies of `.codex` and periodic
+  snapshots are ordinary tasks of your OS. → [Automation](docs/en/CONFIGURATION.md#automation)
 
 Neither an integration with Codex internals nor a real-time sync:
 [what it does not do](docs/en/README.md#what-it-does-not-do).
 
+## Privacy and safety
+
+- **Local-first.** codexSync has no service of its own: shared state goes only
+  through the folder you choose.
+- **Your sign-in never travels.** `auth.json` and other credential files are
+  never copied, at any depth.
+- **Writes only while Codex is closed.** When that cannot be determined, nothing
+  is written.
+- **Nothing is replaced without a verified backup**, and every write is
+  journaled, so an interrupted one can be resumed or rolled back.
+
+Found a security or data-safety problem? See [SECURITY.md](./SECURITY.md).
+
 ## Install
 
+**Windows, no Python needed:** download `codexsync-gui-…-windows-amd64.zip`
+from [Releases](https://github.com/kroxiksut/codexSync/releases), unpack it and
+run `codexsync-gui.exe`. It is the command line too.
+
+**With Python 3.11+**, on Windows or macOS:
+
 ```powershell
-pip install ".[gui]"     # command line and the window; `pip install .` for the CLI only
-codexsync-gui            # or: codexsync -c config.toml doctor
+pip install "codexsync[gui]"    # the window and the command line
+codexsync-gui                   # the first start sets up config.toml with you
+
+pip install codexsync           # the command line only, no dependencies
+codexsync init-config --output config.toml
+codexsync -c config.toml doctor
 ```
 
-Windows builds without Python are in
-[Releases](https://github.com/kroxiksut/codexSync/releases). Full instructions
-and the first run: [installing and getting started](docs/en/README.md#install).
+From source, and the first run step by step:
+[installing and getting started](docs/en/README.md#install).
 
 ## Documentation
 

@@ -1,0 +1,94 @@
+name: Bug report
+description: Something codexSync did wrong, or refused when it should not have
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not attach real data.** No `.codex` folder or files from it, no `auth.json`,
+        no session `.jsonl`, no `state_*.sqlite`, no `config.toml` with your paths, no logs
+        that show chat titles. Describe their shape, or make a small invented example.
+
+        If codexSync could leak state, write into `.codex` while Codex runs, or replace
+        something without a verified backup, do not open an issue: use
+        [private reporting](https://github.com/kroxiksut/codexSync/security/advisories/new)
+        (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: codexSync version
+      description: "`codexsync --version`, or the About page in the window"
+      placeholder: "codexsync 0.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it is installed
+      options:
+        - codexsync-gui.exe (Windows release)
+        - codexsync.exe (Windows release, console only)
+        - pip install codexsync[gui]
+        - pip install codexsync
+        - from source
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Window or command line
+      options:
+        - window
+        - command line
+        - a scheduled task (watcher, sign-in sync, copy of .codex)
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating systems
+      description: Every machine involved, e.g. "Windows 11 → Windows 10"
+    validations:
+      required: true
+  - type: input
+    id: codex
+    attributes:
+      label: Codex
+      description: Desktop app or CLI, and its version if you know it
+  - type: input
+    id: cloud
+    attributes:
+      label: Cloud folder
+      description: The client that carries the workspace (OneDrive, Dropbox, Yandex.Disk, Syncthing, …)
+  - type: dropdown
+    id: direction
+    attributes:
+      label: sync.direction
+      options:
+        - both (default)
+        - to_cloud
+        - to_local
+        - not sure
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Paste the command and its output.
+    validations:
+      required: true
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Does it happen again
+      options:
+        - every time
+        - sometimes
+        - once
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor output
+      description: "`codexsync -c config.toml doctor`, with paths and names removed"
+      render: text

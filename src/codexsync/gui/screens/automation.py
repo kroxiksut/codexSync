@@ -704,7 +704,7 @@ class AutomationScreen(ConfigFormScreen):
                 text = " ".join(parts)
                 tone = "attention" if (
                     done.chats_not_loaded or done.projects_missing_folders or done.chats_codex_ignores
-                    or done.project_files_behind
+                    or done.project_files_behind or getattr(done, "steps_not_done", ())
                 ) else "ok"
         self.handoff_status.setText(text)
         set_tone(self.handoff_status, tone, palette)

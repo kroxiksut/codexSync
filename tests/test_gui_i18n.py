@@ -19,6 +19,7 @@ import re
 import tempfile
 import unittest
 
+from codexsync.app import HANDOFF_STEPS
 from codexsync.chat_directory import Association
 from codexsync.chat_move import ChatMoveKind
 from codexsync.config_migrate import FINDING_CODES
@@ -162,6 +163,7 @@ class CatalogueCompletenessTests(unittest.TestCase):
         computed |= {f"progress.phase.{phase}" for phase in PHASES}
         computed |= {f"settings.migration.finding.{code}" for code in FINDING_CODES}
         computed |= {f"sync.history.result.{item.value}" for item in JournalState}
+        computed |= {f"sync.note.not_done.{name}" for name in HANDOFF_STEPS}
         sync_screen = GUI / "screens" / "sync.py"
         computed |= {f"sync.history.failure.{name}" for name in _module_constant(sync_screen, "KNOWN_FAILURES")}
         computed |= {f"sync.history.origin.{name}" for name in _module_constant(sync_screen, "ORIGINS")}

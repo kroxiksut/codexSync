@@ -292,6 +292,9 @@
   "sync.note.decided_by_rule": {
     "other": "有 {count} 个聊天在两台机器上都改过，已按冲突策略决定；未保留的版本完整保存在冲突包中。"
   },
+  "sync.note.not_done.projects": "本次未更新项目列表；下次同步会再试。",
+  "sync.note.not_done.chat_names": "本次未从其他机器同步对话名称；下次同步会再试。",
+  "sync.note.not_done.catalogue": "本次未请求 Codex 列出新的对话文件；下次同步会再试。",
   "sync.note.names_set": {
     "other": "有 {count} 个聊天从另一台机器获得了名称。"
   },

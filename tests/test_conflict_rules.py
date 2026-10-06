@@ -19,12 +19,15 @@ import textwrap
 import unittest
 from unittest import mock
 import uuid
+from types import SimpleNamespace
 
 from codexsync.app import apply_session_transfer, scan_session_transfer
 from codexsync.cli import main
 from codexsync.exceptions import ConflictError, FailSafeError
 from codexsync.safety_gate import OperationKind, ProcessState, SafetyDecision
 from codexsync.semantic_transfer import (
+    FORMAT_MIGRATION,
+    OLDER_FORMAT_HAS_LATER_RECORDS,
     RESOLVED_BY_RULE,
     RULE_ASK,
     RULE_CANNOT_DECIDE,
@@ -34,12 +37,14 @@ from codexsync.semantic_transfer import (
     BranchResolution,
     ResolutionChoice,
     TransferAction,
+    _format_migration_codes,
+    _rule_choice,
     build_transfer_plan,
     conflict_rule_for,
     load_transfer_plan,
     save_transfer_plan,
 )
-from codexsync.session_catalog import scan_sessions
+from codexsync.session_catalog import RECORD_FORMAT_LEGACY, RECORD_FORMAT_ORDINAL, scan_sessions
 from codexsync.sqlite_audit import PlacementStatus, ThreadPlacements
 
 SANDBOX = Path(__file__).resolve().parents[1] / "test-sandbox"
@@ -172,6 +177,35 @@ class RulePlanTests(_Sandbox):
         self.assertEqual(kept.action, TransferAction.FAST_FORWARD_REMOTE)
         self.assertIn("RESOLVED_BY_USER", kept.codes)
         self.assertNotIn(RESOLVED_BY_RULE, kept.codes)
+
+
+def _copy(record_format: str, last_record_at: str | None) -> SimpleNamespace:
+    return SimpleNamespace(record_format=record_format, last_record_at=last_record_at)
+
+
+class FormatMigrationRuleTests(unittest.TestCase):
+    """`newer` on two copies in different record formats (D-015 meets D-027)."""
+
+    def test_an_unknown_time_on_the_older_format_asks(self) -> None:
+        # A turn taken on the older-format machine before it upgraded may be
+        # all that copy holds: without its time nothing says it is older.
+        older, newer = _copy(RECORD_FORMAT_LEGACY, None), _copy(RECORD_FORMAT_ORDINAL, "2026-10-01T10:00:00Z")
+        kind = _format_migration_codes(older, newer)
+        self.assertIn(FORMAT_MIGRATION, kind)
+        self.assertIsNone(_rule_choice(RULE_NEWER, older, newer, kind))
+
+    def test_a_time_that_does_not_parse_asks_and_is_held(self) -> None:
+        older, newer = _copy(RECORD_FORMAT_LEGACY, "yesterday"), _copy(RECORD_FORMAT_ORDINAL, "2026-10-01T10:00:00Z")
+        kind = _format_migration_codes(older, newer)
+        self.assertIn(OLDER_FORMAT_HAS_LATER_RECORDS, kind, "the bulk decision must not take it either")
+        self.assertIsNone(_rule_choice(RULE_NEWER, older, newer, kind))
+
+    def test_the_same_moment_keeps_the_newer_format(self) -> None:
+        older = _copy(RECORD_FORMAT_LEGACY, "2026-10-01T10:00:00.5Z")
+        newer = _copy(RECORD_FORMAT_ORDINAL, "2026-10-01T10:00:00.500000+00:00")
+        kind = _format_migration_codes(older, newer)
+        self.assertNotIn(OLDER_FORMAT_HAS_LATER_RECORDS, kind, "compared as moments, not text")
+        self.assertIs(_rule_choice(RULE_NEWER, older, newer, kind), ResolutionChoice.KEEP_REMOTE)
 
 
 class DirectionTests(_Sandbox):

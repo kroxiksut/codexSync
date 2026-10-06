@@ -21,7 +21,7 @@ LANGUAGES = ("en", "ru", "zh")
 
 #: Tracked Markdown whose links are checked. Local `*.ru.md` working notes are
 #: gitignored and absent in CI, so they are deliberately not listed.
-ROOT_PAGES = ("README.md", "README.ru.md", "README.zh.md", "CONTRIBUTING.md", "CHANGELOG.md")
+ROOT_PAGES = ("README.md", "README.ru.md", "README.zh.md", "CONTRIBUTING.md", "CHANGELOG.md", "SECURITY.md")
 
 FENCE = re.compile(r"^(```|~~~).*?^\1", re.MULTILINE | re.DOTALL)
 CODE_SPAN = re.compile(r"`[^`\n]*`")

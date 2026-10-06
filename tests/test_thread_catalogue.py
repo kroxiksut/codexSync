@@ -12,9 +12,11 @@ import json
 from pathlib import Path
 import sqlite3
 import unittest
+from unittest import mock
 
 from codexsync.app import list_history, refresh_thread_catalogue, run_handoff
 from codexsync.exceptions import ConfigError, SafetyPreconditionError
+from codexsync.mutation_journal import JournalState, JournalStore
 from codexsync.safety_gate import ProcessState
 from codexsync.sqlite_audit import PlacementStatus, read_backfill_state, read_thread_placements
 from codexsync.thread_catalogue import (
@@ -234,6 +236,25 @@ class RefreshCommandTests(_Workspace):
         with self.assertRaises(SafetyPreconditionError):
             refresh_thread_catalogue(self.config, confirm_plan=preview.plan.plan_id)
         self.assertEqual(backfill_row(self.database)[0], BACKFILL_COMPLETE)
+
+    def test_codex_starting_while_the_journal_is_written_refuses_the_write(self) -> None:
+        # The journal write before the transaction may wait seconds on a cloud
+        # client; the process is checked again after it, right before the write.
+        preview = refresh_thread_catalogue(self.config)
+        real = JournalStore.transition
+
+        def transition(store, journal, state, **kwargs):
+            moved = real(store, journal, state, **kwargs)
+            if state is JournalState.COMMITTING:
+                self.gate.state = ProcessState.RUNNING
+            return moved
+
+        with mock.patch.object(JournalStore, "transition", transition):
+            with self.assertRaises(SafetyPreconditionError):
+                refresh_thread_catalogue(self.config, confirm_plan=preview.plan.plan_id)
+        self.assertEqual(backfill_row(self.database)[0], BACKFILL_COMPLETE)
+        runs = list_history(self.config, family="thread-catalogue")
+        self.assertEqual([run.state for run in runs], ["FAILED"], "closed, so it blocks nothing later")
 
 
 class FullSyncTests(_Workspace):

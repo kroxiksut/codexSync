@@ -25,6 +25,10 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `validate` | 否 | 加载并检查配置，包括会写入的命令是否接受它 | [见下](#上手) |
 | `config check` | 否 | 报告本版本会对 `config.toml` 做哪些改动 | [配置](CONFIGURATION.md#升级来自旧版本的配置) |
 | `config upgrade` | 否 | 以一次确认过的写入应用这些改动 | [配置](CONFIGURATION.md#升级来自旧版本的配置) |
+| `config set` / `unset` | 否 | 像“设置”页那样修改或删除一个值（`--dry-run` 显示改动） | [见下](#窗口与控制台) |
+| `config mapping` | 否 | 列出、建议、添加或删除 `[[path_mappings]]` 规则 | [见下](#窗口与控制台) |
+| `config roots` | 否 | 列出 `.codex` 与云端副本的一层内容，用于选择 `targets.include_roots` | [见下](#窗口与控制台) |
+| `config history` | 否 | `config.toml` 的已保存版本 | [见下](#窗口与控制台) |
 | `doctor` / `preflight` | 否 | 环境诊断；两者相同且无副作用 | [见下](#上手) |
 | `plan` | 否 | 显示一次同步会复制什么（Codex 开着时标记为 `volatile`） | [同步](SYNC.md) |
 | `sync` | **是** | 双向复制状态，先备份 | [同步](SYNC.md) |
@@ -39,6 +43,8 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `automation apply` / `remove` | 否 | 让系统任务与 `[scheduler]`、`[state_backup]` 和 `[handoff]` 一致，或删除它们 | [配置](CONFIGURATION.md#自动化) |
 | `state-backup create` | **是** | 制作一个经过校验的 `.codex` 副本；`--wait` 会等待 Codex 关闭 | [配置](CONFIGURATION.md#codex-副本) |
 | `state-backup list` | 否 | 列出 `[state_backup] root_dir` 中的副本 | [配置](CONFIGURATION.md#codex-副本) |
+| `backups list` | 否 | 同步或恢复前做的备份快照；名称即 `restore --from` 的参数 | [恢复](RECOVERY.md#还原一份备份) |
+| `summary` | 否 | “主页”显示的内容；`--recount` 立即重新统计对话 | [见下](#窗口与控制台) |
 | `handoff status` | 否 | 哪台电脑在工作、各自交接了什么、什么已到达本机 | [同步](SYNC.md#在电脑之间交接工作) |
 | `handoff sync` | **是** | 载入其他电脑交接的内容，再交接本机；冲突由 `conflict.policy` 裁决（单次运行可用 `--conflict-policy`） | [同步](SYNC.md#在电脑之间交接工作) |
 | `handoff watch` | **是** | 登录任务运行的监视器：启动时载入，Codex 关闭时交接 | [同步](SYNC.md#在电脑之间交接工作) |
@@ -46,6 +52,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `sessions resolve` | 否 | 为一处分叉记录一个决定 | [会话](SESSIONS.md#分叉) |
 | `sessions apply` | **是** | 按一份已确认的计划整体传输分支 | [会话](SESSIONS.md#执行计划) |
 | `sessions index` | 否 | 报告两边的 `session_index.jsonl` 各有什么 | [会话](SESSIONS.md#会话索引) |
+| `sessions scope` | 否 | 显示为一对机器保存的工作集 | [会话](SESSIONS.md) |
 | `sessions names` | **是** | 其他机器显示的聊天名称；加 `--confirm-plan` 时给本机没有名称的聊天设置名称 | [会话](SESSIONS.md#写入-codex) |
 | `sessions catalogue` | **是** | 列出 Codex 不显示的聊天文件；加 `--confirm-plan` 时请 Codex 重建聊天列表 | [会话](SESSIONS.md#写入-codex) |
 | `chats list` / `chats tree` | 否 | 查找对话，看每个对话属于哪个项目 | [项目](PROJECTS.md#对话) |
@@ -107,6 +114,30 @@ codexsync -c config.toml doctor
 里面创建。它会检查配置和各个目录、Codex 是否在运行、全局状态的结构与最近一张可还原的
 快照、会话文件与会话索引、SQLite 线程目录、一次同步被允许做什么、同步清单、遗留的
 临时文件，以及是否有未完成的写操作仍在阻止一切写入（在 `recover` 关闭它之前算作失败）。
+
+## 窗口与控制台
+
+窗口能做的，控制台都能做：窗口只是方便，而脚本和计划任务只有控制台可用。没有独立命令的页面对应如下：
+
+| 窗口 | 控制台 |
+|---|---|
+| 主页 | `summary`（`--recount` 立即统计对话和项目） |
+| 设置 — 任意字段 | `config set 节.键 值`、`config unset 节.键` |
+| 设置 — 路径映射 | `config mapping list`、`suggest`、`add`、`remove` |
+| 设置 — 同步内容 | `config roots [路径]` |
+| 设置 — 历史 | `config history` |
+| 备份 | `backups list`，然后 `restore --from 名称` |
+| 会话 — 工作集 | `sessions scan --project/--chat --save-scope`；用 `sessions scope` 查看 |
+| *始终这样处理* | `config set conflict.policy prefer_newer_mtime`（或其他规则） |
+
+`config set` 接受 TOML 值（`true`、`600`、`["sessions", "skills"]`）；文本无需引号。它像“设置”页一样修改文件：注释和其他值保持不变，结果必须通过与加载时相同的检查，期间被改动的文件不会被覆盖，被替换的版本保存到 `config-history/`。窗口不允许修改的，控制台同样拒绝——`safety.*`、`assumptions`、0.1 的终止进程开关以及 `handoff.root_dir`。
+
+```powershell
+codexsync -c config.toml config set conflict.policy prefer_local --dry-run
+codexsync -c config.toml config mapping add --id laptop --source-machine laptop `
+  --target-machine desktop --from C:/Users/me/Projects --to D:/Projects
+codexsync -c config.toml backups list
+```
 
 ## 退出码
 

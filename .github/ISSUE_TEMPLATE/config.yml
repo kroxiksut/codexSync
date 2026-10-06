@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security or data-safety problem
+    url: https://github.com/kroxiksut/codexSync/security/advisories/new
+    about: Leaked state, a write while Codex runs, a replace without a verified backup — report it privately.

@@ -26,6 +26,10 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `validate` | no | Load and check the configuration, including that commands that write accept it | [below](#getting-started) |
 | `config check` | no | Report what this version would change in `config.toml` | [Configuration](CONFIGURATION.md#upgrading-a-config-from-an-earlier-version) |
 | `config upgrade` | no | Apply that, in one confirmed write | [Configuration](CONFIGURATION.md#upgrading-a-config-from-an-earlier-version) |
+| `config set` / `unset` | no | Change or remove one value, as the Settings page does (`--dry-run` shows the change) | [below](#the-window-from-the-console) |
+| `config mapping` | no | List, suggest, add or remove `[[path_mappings]]` rules | [below](#the-window-from-the-console) |
+| `config roots` | no | One level of `.codex` and the cloud copy, to choose `targets.include_roots` | [below](#the-window-from-the-console) |
+| `config history` | no | Saved versions of `config.toml` | [below](#the-window-from-the-console) |
 | `doctor` / `preflight` | no | Environment diagnostics; identical and side-effect free | [below](#getting-started) |
 | `plan` | no | Show what a sync would copy (marked `volatile` if Codex is open) | [Sync](SYNC.md) |
 | `sync` | **yes** | Copy state both ways, backup first | [Sync](SYNC.md) |
@@ -40,6 +44,8 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `automation apply` / `remove` | no | Make the OS tasks match `[scheduler]`, `[state_backup]` and `[handoff]`, or remove them | [Configuration](CONFIGURATION.md#automation) |
 | `state-backup create` | **yes** | Take one verified copy of `.codex`; `--wait` waits for Codex to close | [Configuration](CONFIGURATION.md#copies-of-codex) |
 | `state-backup list` | no | List the copies in `[state_backup] root_dir` | [Configuration](CONFIGURATION.md#copies-of-codex) |
+| `backups list` | no | Backup snapshots a sync or restore took; the name is what `restore --from` takes | [Recovery](RECOVERY.md#restoring-a-backup) |
+| `summary` | no | What the Home page shows; `--recount` counts chats now | [below](#the-window-from-the-console) |
 | `handoff status` | no | Which machine is working, what each handed off, what arrived here | [Synchronisation](SYNC.md#handing-work-over) |
 | `handoff sync` | **yes** | Load what other machines handed off, then hand off this one; conflicts decided by `conflict.policy` (`--conflict-policy` for one run) | [Synchronisation](SYNC.md#handing-work-over) |
 | `handoff watch` | **yes** | The watcher the task at sign-in runs: loads at start, hands off when Codex closes | [Synchronisation](SYNC.md#handing-work-over) |
@@ -47,6 +53,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `sessions resolve` | no | Record one decision about a divergence | [Sessions](SESSIONS.md#divergences) |
 | `sessions apply` | **yes** | Transfer whole branches under one confirmed plan | [Sessions](SESSIONS.md#applying-a-plan) |
 | `sessions index` | no | Report what each `session_index.jsonl` holds | [Sessions](SESSIONS.md#the-session-index) |
+| `sessions scope` | no | Show the working set stored for a pair of machines | [Sessions](SESSIONS.md) |
 | `sessions names` | **yes** | Chat names other machines show; with `--confirm-plan`, set them on chats unnamed here | [Sessions](SESSIONS.md#writing-into-codex) |
 | `sessions catalogue` | **yes** | List chat files Codex does not show; with `--confirm-plan`, ask Codex to rebuild its chat list | [Sessions](SESSIONS.md#writing-into-codex) |
 | `chats list` / `chats tree` | no | Find chats and see which project each is in | [Projects](PROJECTS.md#chats) |
@@ -118,6 +125,38 @@ running, the global-state schema and the latest restorable snapshot, session
 files and the session index, the SQLite thread catalogue, what a sync is allowed
 to do, the sync manifest, leftover temporary files, and whether an unfinished
 mutation still blocks every write (a failure until `recover` closes it).
+
+## The window from the console
+
+Everything the window does, the console does too: the window is a convenience,
+and a script or a scheduled task has only the console. The pages that are not
+commands of their own map like this:
+
+| Window | Console |
+|---|---|
+| Home | `summary` (`--recount` to count chats and projects now) |
+| Settings — any field | `config set SECTION.KEY VALUE`, `config unset SECTION.KEY` |
+| Settings — path mappings | `config mapping list`, `suggest`, `add`, `remove` |
+| Settings — what is synchronised | `config roots [PATH]` |
+| Settings — history | `config history` |
+| Backups | `backups list`, then `restore --from NAME` |
+| Sessions — working set | `sessions scan --project/--chat --save-scope`; `sessions scope` shows it |
+| *Always decide this way* | `config set conflict.policy prefer_newer_mtime` (or another rule) |
+
+`config set` takes a TOML value (`true`, `600`, `["sessions", "skills"]`); text
+needs no quotes. It edits the file the way Settings do: comments and every other
+value stay, the result must pass the same checks as the loader, a file that
+changed meanwhile is not overwritten, and the replaced version goes into
+`config-history/`. What the window does not let you edit, the console refuses as
+well — `safety.*`, the `assumptions`, the 0.1 termination switches and
+`handoff.root_dir`.
+
+```powershell
+codexsync -c config.toml config set conflict.policy prefer_local --dry-run
+codexsync -c config.toml config mapping add --id laptop --source-machine laptop `
+  --target-machine desktop --from C:/Users/me/Projects --to D:/Projects
+codexsync -c config.toml backups list
+```
 
 ## Exit codes
 

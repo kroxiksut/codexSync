@@ -427,7 +427,7 @@ class SyncScreen(Screen):
             self.links.show(run.value)
             attention = (
                 run.value.projects_missing_folders or run.value.chats_codex_ignores
-                or run.value.project_files_behind
+                or run.value.project_files_behind or getattr(run.value, "steps_not_done", ())
             )
             set_tone(self.result, "attention" if attention else "ok", palette)
         elif run.ok:
@@ -588,6 +588,9 @@ def full_sync_notes(screen: Screen, result) -> list[str]:
         notes.append(screen.p("sync.note.names_waiting", result.chat_names_waiting))
     if result.chat_names_kept:
         notes.append(screen.p("sync.note.names_kept", result.chat_names_kept))
+    # A step after the settings and chats that failed; the handoff still happened.
+    for name in getattr(result, "steps_not_done", ()):
+        notes.append(screen.t(f"sync.note.not_done.{name}"))
     # Chats travel, project folders do not (D-026).
     for item in result.project_files_behind:
         text = screen.t(

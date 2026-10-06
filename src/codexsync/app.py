@@ -28,13 +28,19 @@ from .sync_candidates import SyncCandidate, list_sync_candidates
 from .automation import AutomationView, apply_automation, automation_status, remove_automation
 from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK
 from .config_edit import (
+    MAPPING_KEYS,
+    ConfigChange,
     ConfigDocument,
     ConfigHistoryEntry,
     SavedConfig,
+    change_config_value,
+    change_path_mappings,
     config_diff,
     create_config,
     list_config_history,
+    parse_config_value,
     read_config_document,
+    remove_config_value,
     remove_key,
     replace_array_of_tables,
     save_config_text,
@@ -252,10 +258,17 @@ from .version import PRODUCER_VERSION, __version__
 LOG = logging.getLogger(__name__)
 
 __all__ = [
+    "MAPPING_KEYS",
+    "ConfigChange",
+    "change_config_value",
+    "change_path_mappings",
+    "parse_config_value",
+    "remove_config_value",
     "__version__",
     "BROKEN_TASK_CODES",
     "MAX_HANDOFF_DELIVERY_WAIT_MINUTES",
     "HandoffNotDelivered",
+    "HANDOFF_STEPS",
     "HandoffResult",
     "HandoffStatus",
     "handoff_status",
@@ -459,7 +472,6 @@ def build_context(
     config_path: Path,
     manual_terminate_confirmation_override: bool | None = None,
     enforce_safety: bool = True,
-    unattended: bool = False,
     conflict_policy: str | None = None,
 ) -> AppContext:
     cfg = with_conflict_policy(load_config(config_path), conflict_policy)
@@ -1035,6 +1047,7 @@ def sync_projects(
     dry_run: bool = False,
     gate: SafetyGate | None = None,
     origin: str | None = None,
+    planned_here: bool = False,
 ) -> ProjectSyncResult:
     """Preview or carry other machines' project lists into this one (CS-333).
 
@@ -1042,13 +1055,15 @@ def sync_projects(
     plan is rebuilt from the state as it is now and its id must still match;
     the merge is written through `commit_global_state` and this machine's own
     publication is rewritten from the result, so the other machines take this
-    one's projects on their next sync.
+    one's projects on their next sync. ``planned_here`` applies the plan this
+    call builds, as `refresh_thread_catalogue` does; the envelope still refuses
+    a state that moved since it was read.
     """
     cfg = load_config(config_path)
     machine = _handoff_machine(cfg)
     local_dir = locate_local_state_dir(cfg)
     gate = gate if gate is not None else _make_safety_gate(cfg)
-    applying = confirm_plan is not None
+    applying = confirm_plan is not None or planned_here
     if applying:
         _require_mutation_compatible_config(cfg)
         gate.require(OperationKind.PROJECT_SYNC)
@@ -1079,7 +1094,7 @@ def sync_projects(
     )
     if not applying:
         return result
-    if plan.plan_id != confirm_plan:
+    if not planned_here and plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from the preview; the state has changed "
             "since then, so preview again and read what it now says"
@@ -1164,6 +1179,7 @@ def refresh_thread_catalogue(
     dry_run: bool = False,
     gate: SafetyGate | None = None,
     origin: str | None = None,
+    planned_here: bool = False,
 ) -> CatalogueRefreshResult:
     """Preview, or ask Codex to list the chat files its catalogue misses (D-024).
 
@@ -1174,11 +1190,16 @@ def refresh_thread_catalogue(
     database and its sidecars, the process re-checked and the database re-hashed
     right before the transaction. Codex then writes every thread row itself on
     its next start; codexSync never writes one.
+
+    ``planned_here`` applies the plan this call builds, for a caller in the
+    same run that showed nobody a preview (`run_handoff`): building it twice
+    only to compare the ids hashed the whole database twice more. The envelope
+    still rebuilds it right before the write.
     """
     cfg = load_config(config_path)
     local_dir = locate_local_state_dir(cfg)
     gate = gate if gate is not None else _make_safety_gate(cfg)
-    applying = confirm_plan is not None
+    applying = confirm_plan is not None or planned_here
     if applying:
         _require_mutation_compatible_config(cfg)
         gate.require(OperationKind.SESSION_APPLY)
@@ -1193,7 +1214,7 @@ def refresh_thread_catalogue(
     result = CatalogueRefreshResult(plan=plan, volatile=volatile)
     if not applying:
         return result
-    if plan.plan_id != confirm_plan:
+    if not planned_here and plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from the preview; Codex's catalogue or the chat files "
             "changed since then, so preview again"
@@ -1250,6 +1271,7 @@ def sync_chat_names(
     dry_run: bool = False,
     gate: SafetyGate | None = None,
     origin: str | None = None,
+    planned_here: bool = False,
 ) -> ChatNamesResult:
     """Preview, or set other machines' chat names here and publish this one's.
 
@@ -1257,12 +1279,14 @@ def sync_chat_names(
     the plan id must still match; names are set only on chats whose name here
     is unset (`chat_names.is_unset`), in one transaction inside the catalogue
     envelope, and this machine's names are then published for the others.
+    ``planned_here`` applies the plan this call builds, as
+    `refresh_thread_catalogue` does.
     """
     cfg = load_config(config_path)
     machine = _handoff_machine(cfg)
     local_dir = locate_local_state_dir(cfg)
     gate = gate if gate is not None else _make_safety_gate(cfg)
-    applying = confirm_plan is not None
+    applying = confirm_plan is not None or planned_here
     if applying:
         _require_mutation_compatible_config(cfg)
         gate.require(OperationKind.SESSION_APPLY)
@@ -1284,7 +1308,7 @@ def sync_chat_names(
     result = ChatNamesResult(plan=plan, volatile=volatile)
     if not applying:
         return result
-    if plan.plan_id != confirm_plan:
+    if not planned_here and plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from the preview; chat names changed since then, "
             "so preview again"
@@ -1520,7 +1544,7 @@ def _write_codex_catalogue(
     """The one envelope for a write into Codex's thread catalogue (D-024, D-025).
 
     Operation lock, journal, a verified backup of the database and its
-    sidecars, the process re-checked and the plan rebuilt right before the
+    sidecars, the plan rebuilt and the process re-checked right before the
     write, which is a single SQLite transaction: it commits whole or rolls
     back, so a failure inside it closes the journal as replacing nothing. A
     write that committed but does not read back as intended leaves the
@@ -1559,6 +1583,10 @@ def _write_codex_catalogue(
             _close_journal_after_failure(journals, journal, exc)
             raise
         try:
+            # Again right before the transaction: the journal write above may
+            # have waited seconds on a cloud client, and Codex may have started
+            # in them -- the same final check `commit_global_state` makes.
+            gate.require(OperationKind.SESSION_APPLY, final=True)
             write()
         except Exception as exc:
             _close_journal_after_failure(journals, journal, exc)
@@ -2471,6 +2499,10 @@ class HandoffNotDelivered(FailSafeError):
         )
 
 
+#: The steps of a full sync that may fail without failing it, in run order.
+HANDOFF_STEPS = ("projects", "chat_names", "catalogue")
+
+
 @dataclass(frozen=True, slots=True)
 class HandoffResult:
     machine: str
@@ -2518,6 +2550,10 @@ class HandoffResult:
     chat_names_waiting: int = 0
     #: Projects whose folder here holds less than another machine had (D-026).
     project_files_behind: tuple["ProjectFilesItem", ...] = ()
+    #: Steps after the settings and chats that failed this time and were
+    #: logged: ``projects``, ``chat_names``, ``catalogue`` (`HANDOFF_STEPS`).
+    #: The handoff itself happened; the next sync does them again.
+    steps_not_done: tuple[str, ...] = ()
     #: The other machine the chats were paired with, so a page can open
     #: Sessions for exactly this pair.
     source: str | None = None
@@ -2783,35 +2819,44 @@ def run_handoff(
     save_transfer_plan(plan, plan_path)
 
     report_progress(progress, "sync_settings", 0, 0)
-    ctx = build_context(config_path, enforce_safety=True, unattended=True, conflict_policy=conflict_policy)
+    ctx = build_context(config_path, enforce_safety=True, conflict_policy=conflict_policy)
     run_sync(ctx, dry_run=False, origin=origin)
     report_progress(progress, "sync_chats", 0, 0)
     session_actions = apply_session_transfer(
         config_path, plan_path=plan_path, confirm_plan=plan.plan_id, resolutions_path=resolutions_path,
         origin=origin,
     )
+    # Projects, names and the catalogue come after both halves and are each
+    # applied by the plan they build. Each is re-done by the next sync, so one
+    # that fails -- a peer's file arriving mid-run, Codex starting, a locked
+    # database -- is logged and reported, and never costs the handoff record
+    # of the settings and chats already written.
+    skipped: list[str] = []
+
+    def step(name: str, call: Callable[[], object]):
+        try:
+            return call()
+        except ProjectsNotCarried as exc:
+            LOG.warning("projects were not carried: %s", exc)
+        except Exception:
+            LOG.exception("full sync: %s was not done; the next sync tries again", name)
+            skipped.append(name)
+        return None
+
     # Projects last: a chat binding may name a chat the transfer just wrote.
-    # A merge never needs a person (an ambiguous project is left alone), so it
-    # is applied by its own id like the chat plan.
+    # A merge never needs a person (an ambiguous project is left alone).
     report_progress(progress, "sync_projects", 0, 0)
-    try:
-        project_preview = sync_projects(config_path)
-        projects = sync_projects(config_path, confirm_plan=project_preview.plan.plan_id, origin=origin)
-    except ProjectsNotCarried as exc:
-        LOG.warning("projects were not carried: %s", exc)
-        projects = None
+    projects = step("projects", lambda: sync_projects(config_path, origin=origin, planned_here=True))
     # Names live only in Codex's catalogue, never in the chat file (D-025):
     # set the other machines' names on chats Codex already lists here, and
     # publish this machine's.
     report_progress(progress, "sync_chat_names", 0, 0)
-    names_preview = sync_chat_names(config_path)
-    names = sync_chat_names(config_path, confirm_plan=names_preview.plan.plan_id, origin=origin)
+    names = step("chat_names", lambda: sync_chat_names(config_path, origin=origin, planned_here=True))
     # Chat files Codex's catalogue does not list -- written now or by an
     # earlier run -- are invisible until Codex takes them up (D-024).
     report_progress(progress, "refresh_catalogue", 0, 0)
-    catalogue_preview = refresh_thread_catalogue(config_path)
-    catalogue = refresh_thread_catalogue(
-        config_path, confirm_plan=catalogue_preview.plan.plan_id, origin=origin,
+    catalogue = step(
+        "catalogue", lambda: refresh_thread_catalogue(config_path, origin=origin, planned_here=True),
     )
     # Chats are carried, project folders are not (D-026): say which projects
     # here hold less than another machine had, and publish this one's. A
@@ -2852,14 +2897,17 @@ def run_handoff(
         # it walks the files on its next start.
         chats_codex_will_list=(
             len(catalogue.plan.unnamed)
-            if catalogue.refreshed or catalogue.plan.status is RefreshStatus.ALREADY_PENDING else 0
+            if catalogue and (catalogue.refreshed or catalogue.plan.status is RefreshStatus.ALREADY_PENDING)
+            else 0
         ),
         chats_codex_ignores=(
-            len(catalogue.plan.unnamed) if catalogue.plan.status is RefreshStatus.ALREADY_ASKED else 0
+            len(catalogue.plan.unnamed)
+            if catalogue and catalogue.plan.status is RefreshStatus.ALREADY_ASKED else 0
         ),
-        chat_names_set=names.written,
-        chat_names_kept=names.plan.kept,
-        chat_names_waiting=names.plan.waiting,
+        chat_names_set=names.written if names else 0,
+        chat_names_kept=names.plan.kept if names else 0,
+        chat_names_waiting=names.plan.waiting if names else 0,
+        steps_not_done=tuple(skipped),
         project_files_behind=files_report.warnings if files_report else (),
         chats_not_loaded=left_behind,
         new_chats_kept_in_cloud=sum(
@@ -3293,12 +3341,27 @@ def apply_project_move_plan(
             state_root=local_dir, source=source, original=original, candidate=candidate,
         )
 
-    return apply_project_move(
-        plan,
-        confirm_plan=confirm_plan,
-        rebuild=rebuild,
-        require_stopped=lambda: gate.require(OperationKind.PROJECT_MOVE),
-        read_state=source.read_bytes,
-        commit_state=commit,
-        dry_run=dry_run,
-    )
+    def apply() -> ProjectMoveResult:
+        return apply_project_move(
+            plan,
+            confirm_plan=confirm_plan,
+            rebuild=rebuild,
+            require_stopped=lambda: gate.require(OperationKind.PROJECT_MOVE),
+            read_state=source.read_bytes,
+            commit_state=commit,
+            dry_run=dry_run,
+        )
+
+    if dry_run:
+        return apply()
+    # The copy is held under the state root's lock too, not only the commit:
+    # a second move to the same folder (the window and the console, or a plan
+    # rebuilt after a file changed) clears an earlier attempt's staging
+    # directory, and must never clear one that is still being copied into.
+    # The commit inside re-enters the lock in this thread.
+    _ensure_dir(cfg.paths.temp_dir, "paths.temp_dir")
+    machine = cfg.identity.machine_id or platform.node()
+    with OperationLock(
+        cfg.paths.temp_dir, state_root=local_dir, machine_id=machine, family="project-move", reentrant=True,
+    ):
+        return apply()

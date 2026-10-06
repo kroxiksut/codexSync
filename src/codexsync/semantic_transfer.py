@@ -450,7 +450,10 @@ def _format_migration_codes(local: SessionDescriptor, remote: SessionDescriptor)
         return ()
     newer, older = (local, remote) if local_rank > remote_rank else (remote, local)
     codes = [FORMAT_MIGRATION, NEWER_FORMAT_LOCAL if newer is local else NEWER_FORMAT_REMOTE]
-    if older.last_record_at and (newer.last_record_at is None or older.last_record_at > newer.last_record_at):
+    # As moments, not text: two copies need not write the same fractional
+    # digits. An older copy with a time that does not parse may be later.
+    older_at, newer_at = _record_time(older.last_record_at), _record_time(newer.last_record_at)
+    if older.last_record_at and (older_at is None or newer_at is None or older_at > newer_at):
         codes.append(OLDER_FORMAT_HAS_LATER_RECORDS)
     return tuple(codes)
 
@@ -873,7 +876,12 @@ def _rule_choice(
     if rule != RULE_NEWER:
         return None
     local_at, remote_at = _record_time(local.last_record_at), _record_time(remote.last_record_at)
-    if local_at is not None and remote_at is not None and local_at != remote_at:
+    if local_at is None or remote_at is None:
+        # A copy whose last moment is unknown cannot be ordered -- not even
+        # behind a newer format, since a turn taken before the upgrade may be
+        # exactly what it holds.
+        return None
+    if local_at != remote_at:
         return ResolutionChoice.KEEP_LOCAL if local_at > remote_at else ResolutionChoice.KEEP_REMOTE
     if FORMAT_MIGRATION in kind and OLDER_FORMAT_HAS_LATER_RECORDS not in kind:
         # The same moment in both: only the rewrite differs, and the newer

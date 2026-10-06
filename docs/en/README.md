@@ -48,10 +48,8 @@ The core and the command line have no dependencies. The window is an optional
 extra.
 
 ```powershell
-git clone https://github.com/kroxiksut/codexSync
-cd codexSync
-pip install .            # command line only
-pip install ".[gui]"     # command line and the window (PySide6)
+pip install "codexsync[gui]"    # the command line and the window (PySide6)
+pip install codexsync           # the command line only
 ```
 
 On Windows you can instead download a build from
@@ -59,6 +57,14 @@ On Windows you can instead download a build from
 needs Python installed: `codexsync-gui-<tag>-windows-amd64.zip` (the window,
 which is also the command line) or `codexsync-<tag>-windows-amd64.zip` (command
 line only, without Qt).
+
+From source, for development or an unreleased change:
+
+```powershell
+git clone https://github.com/kroxiksut/codexSync
+cd codexSync
+pip install -e ".[gui]"
+```
 
 ## First run
 

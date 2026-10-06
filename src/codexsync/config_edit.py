@@ -1181,3 +1181,169 @@ def _write_atomically(path: Path, data: bytes) -> None:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+# --- one value at a time, for the console (CS-370, CS-371) ----------------------
+
+#: Template keys nobody sets, with the reason. The window shows `safety.*` but
+#: never edits it, and offers no field for the rest; the console refuses the
+#: same keys, so the two cannot drift into allowing different things.
+NOT_EDITABLE: dict[str, str] = {
+    "safety.require_codex_stopped": "the safety rules are fixed; a config that loosens them is refused",
+    "safety.fail_on_unknown": "the safety rules are fixed; a config that loosens them is refused",
+    "assumptions.strict_handoff_required": "a statement, not a setting",
+    "assumptions.cloud_readiness_is_user_responsibility": "a statement, not a setting",
+    "assumptions.cloud_capacity_is_user_responsibility": "a statement, not a setting",
+    "process_detection.allow_terminate_if_running": "legacy, may only be false",
+    "process_detection.manual_terminate_confirmation": "legacy, unused",
+    "process_detection.terminate_confirmation_mode": "legacy, unused",
+    "process_detection.terminate_timeout_seconds": "legacy, unused",
+    "handoff.root_dir": "CS-335: not a setting by the owner's decision",
+}
+
+#: The keys of one `[[path_mappings]]` rule, in the order the window shows them.
+MAPPING_KEYS = ("rule_id", "source_machine", "target_machine", "from", "to", "case_sensitive")
+
+
+@dataclass(frozen=True)
+class ConfigChange:
+    """What one console edit of `config.toml` did, or would do."""
+
+    path: Path
+    #: Unified diff of the edit; empty when the file already said so.
+    diff: str
+    #: ``None`` for a dry run or an edit that changed nothing.
+    saved: SavedConfig | None
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.diff)
+
+
+def _template_value(name: str) -> Any:
+    """The shipped template's value for ``section.key``, refusing what nobody sets."""
+    section, _, key = name.partition(".")
+    if not section or not key or "." in key:
+        raise ConfigError(f"Name a setting as section.key, for example conflict.policy (got {name!r})")
+    if name in NOT_EDITABLE:
+        raise ConfigError(f"{name} is not a setting: {NOT_EDITABLE[name]}")
+    template = tomllib.loads(decode_config_bytes(TEMPLATE_PATH.read_bytes(), source=str(TEMPLATE_PATH)))
+    table = template.get(section)
+    if section == "path_mappings":
+        raise ConfigError("Path mappings are a list of rules: use `config mapping add|remove`")
+    if not isinstance(table, dict) or key not in table:
+        raise ConfigError(f"{name} is not a setting this version knows")
+    return table[key]
+
+
+def parse_config_value(name: str, text: str) -> Any:
+    """Read ``text`` as the value of ``name``, of the type the template gives it.
+
+    A TOML literal is taken as written (`true`, `600`, `["sessions", "skills"]`,
+    `"quoted"`); for a text setting anything else is the text itself, so
+    `config set conflict.policy prefer_local` needs no quotes. A true/false
+    setting takes only `true` or `false`: `bool("false")` is True.
+    """
+    expected = _template_value(name)
+    try:
+        value = tomllib.loads(f"value = {text}")["value"]
+    except tomllib.TOMLDecodeError:
+        if not isinstance(expected, str):
+            raise ConfigError(f"{name} takes {_type_word(expected)}; {text!r} is not one") from None
+        value = text
+    if isinstance(expected, bool):
+        ok = isinstance(value, bool)
+    elif isinstance(expected, float):
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+        value = float(value) if ok else value
+    elif isinstance(expected, int):
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    elif isinstance(expected, list):
+        ok = isinstance(value, list)
+    else:
+        if not isinstance(value, str):
+            value = text
+        ok = True
+    if not ok:
+        raise ConfigError(f"{name} takes {_type_word(expected)}; {text!r} is not one")
+    return value
+
+
+def _type_word(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true or false"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return 'a list, for example ["a", "b"]'
+    return "text"
+
+
+def _change(path: Path, document: ConfigDocument, text: str, *, dry_run: bool) -> ConfigChange:
+    """Validate ``text`` like a save would, then save it unless asked not to."""
+    diff = config_diff(document.text, text, path_label=path.name)
+    if not diff:
+        return ConfigChange(path, "", None)
+    cfg = validate_config_text(text, path=path)
+    _require_mutation_compatible_config(cfg)
+    if dry_run:
+        return ConfigChange(path, diff, None)
+    return ConfigChange(path, diff, save_config_text(path, text, expected_sha256=document.sha256))
+
+
+def change_config_value(path: Path, name: str, value: Any, *, dry_run: bool = False) -> ConfigChange:
+    """Set one ``section.key`` the way the Settings page does.
+
+    The edit keeps every comment, must parse back to exactly the intended
+    dictionary, passes the CLI's own loader, is refused if the file moved
+    since it was read, and keeps the replaced file in `config-history/`.
+    """
+    _template_value(name)
+    document = read_config_document(path)
+    section, _, key = name.partition(".")
+    try:
+        text = set_value(document.text, section, key, value)
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"The edit cannot be written safely: {exc}") from exc
+    return _change(path, document, text, dry_run=dry_run)
+
+
+def remove_config_value(path: Path, name: str, *, dry_run: bool = False) -> ConfigChange:
+    """Remove one ``section.key``, so the built-in default applies again."""
+    _template_value(name)
+    document = read_config_document(path)
+    section, _, key = name.partition(".")
+    if key not in (tomllib.loads(document.text).get(section) or {}):
+        return ConfigChange(path, "", None)
+    try:
+        text = remove_key(document.text, section, key)
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"The edit cannot be written safely: {exc}") from exc
+    return _change(path, document, text, dry_run=dry_run)
+
+
+def change_path_mappings(
+    path: Path,
+    *,
+    add: dict[str, Any] | None = None,
+    remove: str | None = None,
+    dry_run: bool = False,
+) -> ConfigChange:
+    """Add one `[[path_mappings]]` rule, or remove one by its `rule_id`."""
+    document = read_config_document(path)
+    rules = [dict(item) for item in tomllib.loads(document.text).get("path_mappings") or []]
+    ids = [str(item.get("rule_id")) for item in rules]
+    if add is not None:
+        entry = {key: add[key] for key in MAPPING_KEYS if add.get(key) is not None}
+        if entry.get("rule_id") in ids:
+            raise ConfigError(f"A path mapping named {entry['rule_id']!r} already exists; remove it first")
+        rules.append(entry)
+    if remove is not None:
+        if remove not in ids:
+            raise ConfigError(f"No path mapping is named {remove!r}")
+        rules = [item for item in rules if str(item.get("rule_id")) != remove]
+    try:
+        text = replace_array_of_tables(document.text, "path_mappings", rules)
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"The edit cannot be written safely: {exc}") from exc
+    return _change(path, document, text, dry_run=dry_run)

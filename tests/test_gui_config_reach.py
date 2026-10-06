@@ -15,26 +15,15 @@ from pathlib import Path
 import tomllib
 import unittest
 
+from codexsync.config_edit import NOT_EDITABLE
+
 _HAS_QT = importlib.util.find_spec("PySide6") is not None
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "src" / "codexsync" / "config.example.toml"
 
-#: Keys of the template no page edits, each with why it is not a setting.
-NOT_SETTINGS = {
-    # Statements about what the user is responsible for, not behaviour.
-    "assumptions.strict_handoff_required": "a statement, not a setting",
-    "assumptions.cloud_readiness_is_user_responsibility": "a statement, not a setting",
-    "assumptions.cloud_capacity_is_user_responsibility": "a statement, not a setting",
-    # 0.1's termination switches: codexSync never stops Codex, and a config
-    # that turns them on is refused (exit 4), so there is nothing to choose.
-    "process_detection.allow_terminate_if_running": "legacy, may only be false",
-    "process_detection.manual_terminate_confirmation": "legacy, unused",
-    "process_detection.terminate_confirmation_mode": "legacy, unused",
-    "process_detection.terminate_timeout_seconds": "legacy, unused",
-    # CS-335, the owner: the handoff folder is not a setting ("we synced with
-    # the cloud -- there is the folder"); the line is an optional override.
-    "handoff.root_dir": "CS-335: not a setting by the owner's decision",
-}
+#: Template keys with no field, and why: the core's list, which the console
+#: refuses too, minus `safety.*` -- the window shows those, it only never edits them.
+NOT_SETTINGS = {key: reason for key, reason in NOT_EDITABLE.items() if not key.startswith("safety.")}
 
 
 def _keys(table: dict, prefix: str = ""):

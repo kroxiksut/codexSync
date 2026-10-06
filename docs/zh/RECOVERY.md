@@ -30,6 +30,7 @@ compression = "none"             # none | zip
 ## 还原一份备份
 
 ```powershell
+codexsync -c config.toml backups list                                  # 列出快照及其名称
 codexsync -c config.toml restore --dry-run                              # 预览，不写入任何内容
 codexsync -c config.toml restore --apply                                # 把最新的备份还原到本地 .codex
 codexsync -c config.toml restore --from <快照名称> --apply              # 指定某一份备份（目录或 .zip）
