@@ -123,7 +123,10 @@ def stand_in(folder: Path, name: str) -> Path:
     """A copy of `sleep` under ``folder/name``: a real process with that path."""
     target = folder / name
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2("/bin/sleep", target)
+    # copyfile, not copy2: copy2 also copies the file flags, and /bin/sleep
+    # carries the system-protected one, which chflags may not set elsewhere.
+    shutil.copyfile("/bin/sleep", target)
+    target.chmod(0o755)
     return target
 
 
