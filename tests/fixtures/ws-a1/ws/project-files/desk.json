@@ -1,0 +1,50 @@
+{
+  "entry_digest": "2337e36d83c8318968c23e2b7c4b4d94af1f3f1ef214731ad076ced21fb0da5e",
+  "format": "codexsync-project-files-v1",
+  "machine": "desk",
+  "projects": {
+    "alpha": {
+      "last_chat_at": 0,
+      "name": "alpha",
+      "root": "D:\\Projects\\codexSync\\test-sandbox\\a1\\proj\\alpha",
+      "state": {
+        "branch": null,
+        "dirty": false,
+        "entries": {
+          "README.txt": [
+            23,
+            "d061ef8f6b80c3239b9c57eddd839589037147d579b51cca56ac39e243fb3fce",
+            1791290774534422800
+          ]
+        },
+        "head": null,
+        "kind": "plain",
+        "removed": {},
+        "truncated": false,
+        "worktree": null
+      }
+    },
+    "beta": {
+      "last_chat_at": 0,
+      "name": "beta",
+      "root": "D:\\Projects\\codexSync\\test-sandbox\\a1\\proj\\beta",
+      "state": {
+        "branch": null,
+        "dirty": false,
+        "entries": {
+          "README.txt": [
+            22,
+            "ae62493a756212edc9a15719d5aa64d7b9f5ab9b8bdf9b32b67c17ea07014a7d",
+            1791290774535397000
+          ]
+        },
+        "head": null,
+        "kind": "plain",
+        "removed": {},
+        "truncated": false,
+        "worktree": null
+      }
+    }
+  },
+  "published_at_utc": "2026-10-06T12:46:17Z"
+}

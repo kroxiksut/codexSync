@@ -41,17 +41,24 @@
 
 ## 安装
 
-内核和命令行没有任何依赖。窗口是可选的附加部分。
+内核和命令行没有任何依赖。窗口是可选的附加部分。0.2 处于 alpha 阶段时，pip 需要加 `--pre`；
+不加的话会安装 0.1。
 
 ```powershell
-pip install "codexsync[gui]"    # 命令行加窗口（PySide6）
-pip install codexsync           # 只装命令行
+pip install --pre "codexsync[gui]"    # 命令行加窗口（PySide6）
+pip install --pre codexsync           # 只装命令行
 ```
 
 在 Windows 上也可以直接从
 [Releases](https://github.com/kroxiksut/codexSync/releases) 下载构建好的版本，
-它们都不需要安装 Python：`codexsync-gui-<tag>-windows-amd64.zip`（窗口，同时也是
-命令行）或 `codexsync-<tag>-windows-amd64.zip`（只有命令行，不含 Qt）。
+它们都不需要安装 Python：
+
+| 构建 | Windows |
+|---|---|
+| `codexsync-gui-<tag>-windows-amd64.zip`、`…-arm64.zip` —— 窗口，同时也能运行所有命令 | x64、ARM64 |
+| `codexsync-<tag>-windows-amd64.zip`、`…-arm64.zip`、`…-x86.zip` —— 只有命令行，不含 Qt | x64、ARM64、32 位 |
+
+没有 32 位的窗口版本：Qt 6 没有 32 位 Windows 的构建。
 
 从源码安装，用于开发或尚未发布的改动：
 
@@ -125,7 +132,10 @@ codexSync 假定机器之间有严格的先后顺序：
   写好，并针对记录下来的 `ps` 输出做过测试，但在还没有对着真实运行的 Codex 跑过之前，
   该平台会把自己报告为不受支持：进程状态读作「无法判定」，因而每条会写入的命令都会
   拒绝执行。
-- **Linux** 的运行时支持目前不在范围内。
+- **Linux** 的运行时支持目前不在范围内。Codex 本身在 2026 年 8 月以桌面应用预览版的形式登陆
+  Linux；codexSync 目前还不检测它，也不向它写入。
+- **最低版本：** Windows 10（1809）或更新版本；通过 pip 安装需要 Python 3.11 或更新版本；
+  在 macOS 上使用窗口需要 macOS 13 或更新版本（当前 PySide6 支持的范围）。
 - CI 在 `windows-latest` 和 `macos-latest` 上用 Python 3.11、3.12 和 3.13 跑测试。
 
 ## 还没有被验证的部分

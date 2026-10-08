@@ -1,0 +1,43 @@
+{
+  "accepted": {
+    "desk": "1a79e5239f5701897eb086c52817dcd812e5f0ee4d487a7151363b3c4fb833c9"
+  },
+  "bindings": {
+    "0199a1a1-0000-7000-8000-00000000000a": "alpha",
+    "0199a1a1-0000-7000-8000-00000000000b": "beta",
+    "0199a1a1-0000-7000-8000-00000000000c": "beta"
+  },
+  "entry_digest": "661f77afc0fc6e01e4f558931762a64b14c3b53e8fb01f6263bed7de392bdc91",
+  "format": "codexsync-projects-v1",
+  "machine": "lap",
+  "order": [
+    "alpha",
+    "beta"
+  ],
+  "pinned": [
+    "alpha"
+  ],
+  "producer_version": "codexsync-0.2.0a1",
+  "projects": {
+    "alpha": {
+      "createdAt": 1,
+      "id": "alpha",
+      "name": "Project alpha",
+      "rootPaths": [
+        "D:\\Projects\\codexSync\\test-sandbox\\a1\\proj\\alpha"
+      ],
+      "updatedAt": 2
+    },
+    "beta": {
+      "createdAt": 1,
+      "id": "beta",
+      "name": "Project beta",
+      "rootPaths": [
+        "D:\\Projects\\codexSync\\test-sandbox\\a1\\proj\\beta"
+      ],
+      "updatedAt": 2
+    }
+  },
+  "published_at_utc": "2026-10-06T12:46:24Z",
+  "schema_id": "electron-v2"
+}

@@ -20,7 +20,7 @@ class CliManualConfirmationTests(unittest.TestCase):
     @patch("codexsync.cli.build_context", return_value=_ctx())
     @patch("codexsync.cli.load_config", side_effect=ConfigError("skip verbose config load"))
     def test_sync_without_flag_passes_none_override(self, _load_cfg, build_ctx, _run_sync) -> None:
-        code = main(["-c", "config.toml", "sync", "--dry-run"])
+        code = main(["-c", "config.toml", "sync", "--scope", "settings", "--dry-run"])
         self.assertEqual(code, 0)
         self.assertEqual(build_ctx.call_args.kwargs["manual_terminate_confirmation_override"], None)
 

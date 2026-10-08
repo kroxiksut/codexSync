@@ -150,8 +150,8 @@ class FakeController(Controller):
     def preview_sync(self) -> Outcome:
         return self._answer("preview_sync", Outcome(value=SyncPreview(("a",), ("b", "c"), (), False)))
 
-    def sync(self, *, dry_run: bool) -> Outcome:
-        self.calls.append(("sync", dry_run))
+    def sync(self, *, dry_run: bool, direction=None) -> Outcome:
+        self.calls.append(("sync", dry_run) + ((direction,) if direction is not None else ()))
         return self._answer("sync", Outcome(value=SyncResult(applied=not dry_run, actions=3, conflicts=0)))
 
     def chats(self, *, source_machine=None, target_machine=None, progress=None) -> Outcome:
@@ -337,8 +337,11 @@ class FakeController(Controller):
     def handoff(self) -> Outcome:
         return self._answer("handoff", Outcome(failure=Failure.CONFIGURATION, message="not in this test"))
 
-    def handoff_now(self, *, progress=None, conflict_policy=None) -> Outcome:
-        self.calls.append(("handoff_now",) + ((conflict_policy,) if conflict_policy is not None else ()))
+    def handoff_now(self, *, progress=None, conflict_policy=None, direction=None) -> Outcome:
+        self.calls.append(
+            ("handoff_now",) + ((conflict_policy,) if conflict_policy is not None else ())
+            + ((("direction", direction),) if direction is not None else ())
+        )
         return self._answer("handoff_now", Outcome(failure=Failure.CODEX_NOT_STOPPED, message="open"))
 
     def remember_conflict_policy(self, policy) -> Outcome:
@@ -3282,6 +3285,18 @@ class SyncHistoryTests(_WindowTestCase):
         _window, controller, screen = self._history()
         screen.start_run(dry_run=True)
         self.assertIsNotNone(screen.model.history)
+
+    def test_this_runs_direction_goes_with_the_run_and_survives_a_rebuild(self) -> None:
+        window, controller, screen = self._history()
+        self.assertEqual(screen.run_direction.currentData(), "", "the setting decides until chosen")
+        screen.run_direction.setCurrentIndex(screen.run_direction.findData("to_cloud"))
+        screen.start_run(dry_run=False)
+        self.assertIn(("handoff_now", ("direction", "to_cloud")), controller.calls)
+        screen.start_run(dry_run=True)
+        self.assertIn(("sync", True, "to_cloud"), controller.calls)
+        window.set_language("ru")
+        rebuilt = window.screen("sync")
+        self.assertEqual(rebuilt.run_direction.currentData(), "to_cloud", "kept on the model")
 
     def test_the_overview_names_the_last_run_and_links_to_the_history(self) -> None:
         controller = FakeController()

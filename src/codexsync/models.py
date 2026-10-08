@@ -33,6 +33,13 @@ class SyncConfig:
     dry_run_default: bool = True
     delete_policy: str = "never"
     session_mode: str | None = None
+    #: What `codexsync sync` carries: ``full`` -- settings, chats and projects,
+    #: the window's Synchronise -- or ``settings``, the files under
+    #: `targets.include_roots` only (D-028).
+    scope: str = "full"
+    #: Ask Codex to quit when a sync starts while it is open (D-029). Never
+    #: forced; off unless the person turns it on.
+    close_codex: bool = False
 
 
 @dataclass(slots=True)

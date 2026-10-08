@@ -59,7 +59,7 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 
 - **本地优先。** codexSync 没有自己的服务：共享状态只经过你选择的文件夹。
 - **你的登录信息绝不外传。** `auth.json` 和其他凭据文件在任何层级都不会被复制。
-- **只在 Codex 关闭时写入。** 无法确定时，什么都不写。
+- **只在 Codex 关闭时写入。** 无法确定时，什么都不写。如果你允许，同步会先请求 Codex 退出——绝不强制。
 - **没有经过校验的备份，什么都不会被替换**；每次写入都记入事务日志，被中断的写入可以
   继续完成或回滚。
 
@@ -68,15 +68,15 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 ## 安装
 
 **Windows，无需 Python：** 从 [Releases](https://github.com/kroxiksut/codexSync/releases)
-下载 `codexsync-gui-…-windows-amd64.zip`，解压后运行 `codexsync-gui.exe`。它同时也是命令行。
+下载 `codexsync-gui-…-windows-amd64.zip`（或 `…-arm64.zip`），解压后运行 `codexsync-gui.exe`。同一个可执行文件也能运行命令行子命令。需要 Windows 10（1809）或更新版本。
 
-**使用 Python 3.11+**，在 Windows 或 macOS 上：
+**使用 Python 3.11+**，在 Windows 或 macOS 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1：
 
 ```powershell
-pip install "codexsync[gui]"    # 窗口和命令行
-codexsync-gui                   # 首次启动时会和你一起创建 config.toml
+pip install --pre "codexsync[gui]"    # 窗口和命令行
+codexsync-gui                         # 首次启动时，窗口会帮你创建或打开 config.toml
 
-pip install codexsync           # 只有命令行，没有依赖
+pip install --pre codexsync           # 只有命令行，没有依赖
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
@@ -102,7 +102,17 @@ codexsync -c config.toml doctor
 
 ## 状态
 
-0.2 —— 第一个在命令行之外带上窗口（`codexsync[gui]` 或 `codexsync-gui.exe`）的版本。
+**0.2.0 alpha 1** —— 第一个在命令行之外带上窗口（`codexsync[gui]` 或 `codexsync-gui.exe`）的版本。
+之所以是 alpha，是因为 0.2 理解并修改的 Codex 状态比 0.1 多得多：它已在日常使用中，每次写入仍然经过锁、
+日志和经过校验的备份，但在 0.2.0 之前，它需要在比我们更多的机器上运行。如果你在两台或更多机器上使用 Codex，
+请试用并[告诉我们](https://github.com/kroxiksut/codexSync/issues/new/choose)结果。alpha 写入的数据，
+之后的每个版本都能读取。
+
+**从 0.1 升级。** codexSync 0.2 能识别 0.1 创建的配置，并就地升级它——在窗口里，或用
+`config check` 和 `config upgrade`：0.1 的少数取值会被所有写入命令拒绝，升级会在修改前
+逐项展示每个改动。现有状态保持不变，之前的配置保存在 `config-history/` 中。
+→ [升级配置](docs/zh/CONFIGURATION.md#升级来自旧版本的配置)
+
 有几项运行时行为被刻意暂不使用，直到受控实验把它们记录下来 —— 见
 [还没有被验证的部分](docs/zh/README.md#还没有被验证的部分)。
 

@@ -1,0 +1,38 @@
+[identity]
+machine_id = "desk"
+
+[sync]
+mode = "cold"
+session_mode = "all"
+
+[paths]
+workspace_root_dir = "D:/Projects/codexSync/test-sandbox/a1/ws"
+local_state_dir = "D:/Projects/codexSync/test-sandbox/a1/desk/codex"
+cloud_root_dir = "D:/Projects/codexSync/test-sandbox/a1/ws/mirror"
+backup_dir = "D:/Projects/codexSync/test-sandbox/a1/ws/bk"
+temp_dir = "D:/Projects/codexSync/test-sandbox/a1/ws/t"
+
+[guardian]
+root_dir = "D:/Projects/codexSync/test-sandbox/a1/ws/guardian"
+
+[semantic]
+root_dir = "D:/Projects/codexSync/test-sandbox/a1/ws/semantic"
+
+[targets]
+include_roots = ["sessions", "skills"]
+
+[backup]
+backup_before_overwrite = true
+compression = "none"
+
+[state]
+manifest_file = "D:/Projects/codexSync/test-sandbox/a1/ws/manifest.json"
+
+[conflict]
+policy = "prefer_newer_mtime"
+
+[state_backup]
+root_dir = "D:/Projects/codexSync/test-sandbox/a1/copies"
+
+[handoff]
+root_dir = "D:/Projects/codexSync/test-sandbox/a1/ws/handoff"

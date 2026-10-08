@@ -31,7 +31,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `config history` | 否 | `config.toml` 的已保存版本 | [见下](#窗口与控制台) |
 | `doctor` / `preflight` | 否 | 环境诊断；两者相同且无副作用 | [见下](#上手) |
 | `plan` | 否 | 显示一次同步会复制什么（Codex 开着时标记为 `volatile`） | [同步](SYNC.md) |
-| `sync` | **是** | 双向复制状态，先备份 | [同步](SYNC.md) |
+| `sync` | **是** | 设置、对话和项目，与“同步”按钮相同（`[sync] scope`；`--scope settings` 只复制文件；`--direction` 单次指定方向），先备份 | [同步](SYNC.md) |
 | `restore` | **是** | 从经过校验的备份还原文件 | [恢复](RECOVERY.md#还原一份备份) |
 | `guardian watch` | 否 | 在 Codex 运行期间持续拍摄全局状态的快照 | [守护](GUARDIAN.md) |
 | `guardian snapshot --once` | 否 | 立即拍一张快照 | [守护](GUARDIAN.md) |

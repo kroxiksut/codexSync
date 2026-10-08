@@ -41,6 +41,9 @@ codexsync -c config.toml restore --target cloud --apply                 # 改为
 - 试运行会逐个文件与备份清单核对。
 - 没有清单的旧格式备份需要明确给出 `--from` 以及 `--allow-legacy-snapshot`，并且不能
   还原语义层拥有的状态（会话、会话索引、全局状态）。
+- 0.1 做的备份没有清单，所以就是这种旧格式备份：只含设置文件。如果希望对话也能还原，
+  请用这个版本重新做一份备份——同步在每次覆盖前都会做一份，而 `.codex` 副本
+  （[配置](CONFIGURATION.md#codex-副本)）包含全部内容。
 
 想从守护的快照把 `.codex-global-state.json` 写回去，见
 [守护 → 还原一张快照](GUARDIAN.md#还原一张快照)。

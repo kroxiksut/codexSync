@@ -1,0 +1,23 @@
+{
+  "binding_count": 3,
+  "created_at_utc": "2026-10-06T12:46:26.678941Z",
+  "generation": 1,
+  "hash_algorithm": "sha256",
+  "machine_id": "desk",
+  "manifest_version": 1,
+  "previous_good_sha256": null,
+  "previous_good_snapshot_id": null,
+  "producer_version": "codexsync-0.2.0a1",
+  "project_count": 2,
+  "schema_id": "electron-v2",
+  "sha256": "fc93425d4eedaac3360f33caf9ab487976fef0b3e5f89133f576f5926c1b0c0b",
+  "snapshot_id": "20261006T124626.678941Z-89e70a26-3ba5-4184-9f12-b8dfc265839d-fc93425d4eed",
+  "source_file_id_after": "2a1033d01033a1ad:20000000008a22",
+  "source_file_id_before": "2a1033d01033a1ad:20000000008a22",
+  "source_mtime_ns_after": 1791290780862861600,
+  "source_mtime_ns_before": 1791290780862861600,
+  "source_name": ".codex-global-state.json",
+  "source_size": 973,
+  "validation_codes": [],
+  "validation_status": "PASS"
+}

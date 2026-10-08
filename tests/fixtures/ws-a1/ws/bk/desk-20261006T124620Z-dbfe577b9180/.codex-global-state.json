@@ -1,0 +1,43 @@
+{
+  "electron-main-window-bounds": {
+    "x": 10,
+    "y": 10
+  },
+  "local-projects": {
+    "alpha": {
+      "createdAt": 1,
+      "id": "alpha",
+      "name": "Project alpha",
+      "rootPaths": [
+        "D:\\Projects\\codexSync\\test-sandbox\\a1\\proj\\alpha"
+      ],
+      "updatedAt": 2
+    },
+    "beta": {
+      "createdAt": 1,
+      "id": "beta",
+      "name": "Project beta",
+      "rootPaths": [
+        "D:\\Projects\\codexSync\\test-sandbox\\a1\\proj\\beta"
+      ],
+      "updatedAt": 2
+    }
+  },
+  "project-order": [
+    "alpha",
+    "beta"
+  ],
+  "pinned-project-ids": [
+    "alpha"
+  ],
+  "thread-project-assignments": {
+    "0199a1a1-0000-7000-8000-00000000000a": {
+      "projectKind": "local",
+      "projectId": "alpha"
+    },
+    "0199a1a1-0000-7000-8000-00000000000c": {
+      "projectKind": "local",
+      "projectId": "beta"
+    }
+  }
+}

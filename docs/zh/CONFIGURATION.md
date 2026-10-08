@@ -160,7 +160,7 @@ interval_seconds = 1800      # 300（5 分钟）到 2678400（31 天）；默认
 run_at_login = true
 startup_delay_seconds = 0
 jitter_seconds = 0
-sync_at_login = false        # 单独的任务：登录后同步一次设置
+sync_at_login = false        # 单独的任务：登录后同步一次（内容由 [sync] scope 决定）
 ```
 
 ```powershell
@@ -172,13 +172,19 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
 
 - 周期任务只能执行安全作业：`guardian_snapshot`、`preflight` 或 `sync_dry_run`。修复、
   传输、还原或回滚都无法排入计划，而且计划中的试运行在 Codex 开着时同样会被拒绝。
-- **登录后同步**（`sync_at_login = true`，即「登录后同步设置」复选框）是唯一的例外，默认
+- **登录后同步**（`sync_at_login = true`，即「登录后同步」复选框）是唯一的例外，默认
   关闭。它会安装第二个任务，在您登录后等待 `startup_delay_seconds`，执行一次
-  `sync --apply --unattended`，之后不再重复。它经过与手动同步相同的检查：Codex 打开时
-  会被拒绝（退出码 3），冲突与任何一次运行一样由 `conflict.policy` 裁决；策略未能裁决的
-  冲突会在写入前停止它（退出码 2）。它只同步设置目录 —— 任务从不传输会话。如果 Codex 随
-  Windows 启动，任务运行时它已经打开，同步会直接跳过；若希望它生效，请把 Codex 从自启动
-  中移除。窗口会显示该任务的上次运行及其结果含义。
+  `sync --apply --unattended`，之后不再重复。它同步 `[sync] scope` 所指定的内容——默认是
+  全部（设置、对话、项目），或只有设置文件——并经过与手动同步相同的检查：冲突与任何一次
+  运行一样由 `conflict.policy` 裁决，策略未能裁决的冲突会在写入前停止它（退出码 2）。
+  Codex 开着时会被拒绝（退出码 3）——除非允许为同步关闭 Codex（见下一条）。窗口会显示该
+  任务的上次运行及其结果含义。
+- **为同步关闭 Codex**（`[sync] close_codex = true`，即“自动化”页面上的「同步开始时若
+  Codex 开着，则关闭它」复选框；默认关闭）。任何一次同步如果发现 Codex（ChatGPT 应用）
+  开着，会先像 Windows 为更新关闭程序那样请求它退出，并最多等待一分钟直到它消失。绝不
+  强制：如果 Codex 拒绝或仍在运行，什么都不写入，同步会说明原因。正在进行的智能体回合会被
+  中断，所以请让 Codex 处于空闲；终端中运行的 Codex CLI 从不会被关闭；交接监视器和试运行
+  从不请求关闭。已在 Windows 上验证；在 macOS 上保持关闭，直到在 Mac 上验证可用。
 - 它是用户级任务 —— Windows 上是任务计划程序，macOS 上是 LaunchAgent，Linux 上是
   `systemd --user` —— 绝不是系统服务。
 - `automation run` 的退出码与该作业本身一致：成功、或者已有另一个守护在运行时为 `0`，
@@ -186,7 +192,10 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
 
 **已废弃：** `guardian scheduler` 和 `scripts/scheduler/{windows,macos}` 把计划任务的
 设置放在 `config.toml` 之外，将来会被移除。如果你曾用那些脚本装过任务，请先用它们卸载，
-以免两个任务同时运行。
+以免两个任务同时运行。`automation status` 和“自动化”页面会指出这样的任务（默认名
+`codexSyncSync`、LaunchAgent `com.codexsync.sync`，或任何运行 `run-codexsync` 的任务），
+并给出删除它的命令：它运行的是 `codexsync sync`，而在 0.2 中这只同步设置、不含对话。
+它不会被自动删除。
 
 **每个账户一个任务，以及搬了家的可执行文件。** Windows 任务注册在 `\CodexSync\`
 文件夹下，名字是 `CodexSync Job (<用户>)`：在 0.2 之前所有账户共用一个名字，于是

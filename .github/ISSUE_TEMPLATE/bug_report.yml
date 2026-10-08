@@ -18,7 +18,7 @@ body:
     attributes:
       label: codexSync version
       description: "`codexsync --version`, or the About page in the window"
-      placeholder: "codexsync 0.2.0"
+      placeholder: "codexsync 0.2.0a1"
     validations:
       required: true
   - type: dropdown
@@ -26,8 +26,11 @@ body:
     attributes:
       label: How it is installed
       options:
-        - codexsync-gui.exe (Windows release)
-        - codexsync.exe (Windows release, console only)
+        - codexsync-gui.exe (Windows release, x64)
+        - codexsync-gui.exe (Windows release, ARM64)
+        - codexsync.exe (Windows release, console only, x64)
+        - codexsync.exe (Windows release, console only, ARM64)
+        - codexsync.exe (Windows release, console only, 32-bit)
         - pip install codexsync[gui]
         - pip install codexsync
         - from source

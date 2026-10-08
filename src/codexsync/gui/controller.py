@@ -37,6 +37,7 @@ import tomllib
 from typing import Any, Callable, TypeVar
 
 from ..app import (
+    close_codex_for_sync,
     known_machines,
     session_pair_name,
     __version__,
@@ -638,7 +639,7 @@ class Controller:
 
     # --- mutating: always a plan first, then its id ----------------------
 
-    def sync(self, *, dry_run: bool) -> Outcome:
+    def sync(self, *, dry_run: bool, direction: str | None = None) -> Outcome:
         """Run a sync through the same context the CLI builds.
 
         ``enforce_safety`` stays on. A GUI that turned it off to show a nicer
@@ -647,7 +648,9 @@ class Controller:
         """
 
         def go() -> SyncResult:
-            context = build_context(self._config_path, enforce_safety=True)
+            if not dry_run:
+                close_codex_for_sync(self._config_path)
+            context = build_context(self._config_path, enforce_safety=True, direction=direction)
             run_sync(context, dry_run=dry_run, origin="window")
             return SyncResult(
                 applied=not dry_run,
@@ -854,6 +857,7 @@ class Controller:
 
     def handoff_now(
         self, *, progress: ProgressCallback | None = None, conflict_policy: str | None = None,
+        direction: str | None = None,
     ) -> Outcome:
         """Load what others handed off, then hand off this machine.
 
@@ -861,11 +865,11 @@ class Controller:
         is refused at once with how much of it has, and the watcher is the
         one that waits. ``conflict_policy`` decides this run's conflicts by
         one rule instead of `[conflict] policy` -- the buttons a stopped sync
-        offers (D-027).
+        offers (D-027). ``direction`` is this run's choice over `sync.direction`.
         """
         return run(lambda: run_handoff(
             self._config_path, origin="window", wait_seconds=0, progress=progress,
-            conflict_policy=conflict_policy,
+            conflict_policy=conflict_policy, direction=direction,
         ))
 
     def remember_conflict_policy(self, policy: str) -> Outcome:

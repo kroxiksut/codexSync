@@ -37,12 +37,15 @@ files, no `state_*.sqlite` databases, no `config.toml` with your paths, no
 logs with chat titles. If a reproduction needs files, describe their shape or
 make a small invented example.
 
-Once a fix is released, the report is published as an advisory, crediting you
-unless you ask otherwise.
+After a fix is released, a confirmed vulnerability may be published as a
+security advisory. We will credit the reporter unless they prefer to remain
+anonymous.
 
 ## Supported versions
 
 | Version | Fixes |
 |---|---|
-| 0.2.x | yes |
-| 0.1.x | no — upgrade to 0.2 |
+| 0.2.0 pre-releases (alphas, release candidates) and main | yes |
+| 0.1.x | yes, until 0.2.0 is released |
+
+<!-- At the 0.2.0 release: "0.2.x | yes" and "0.1.x | no — upgrade to 0.2". -->

@@ -21,6 +21,15 @@ codexsync -c config.toml sync --apply      # the real sync
 `sync` without a flag follows `sync.dry_run_default` (`true` in the template),
 so a real sync always needs `--apply`.
 
+**What `sync` carries** is `[sync] scope`. At `full` (the default) it is the
+window's *Synchronise*: settings files, chats and projects — the same run as
+[`handoff sync`](#handing-work-over), and the dry run builds every one of
+those plans. At `settings` it copies only the files under
+`targets.include_roots`, which is all `sync` did before 0.2. `--scope` chooses
+for one run, and `--direction` (`bidirectional`, `to_cloud`, `to_local`)
+overrides `sync.direction` for one run — the *This run* box beside
+*Synchronise* does the same. The sign-in task runs `sync`, so it follows the same setting.
+
 A plan built while Codex is open is marked `volatile` and is only a preview:
 `sync --apply` builds its plan again at the moment it writes.
 

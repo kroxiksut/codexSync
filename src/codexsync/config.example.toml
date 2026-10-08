@@ -22,6 +22,15 @@ equal_mtime_action = "skip"
 delete_policy = "never"
 # Enable dry-run by default
 dry_run_default = true
+# What `codexsync sync` carries: full|settings
+# full = settings, chats and projects, the same as the window's Synchronise;
+# settings = only the files under targets.include_roots
+scope = "full"
+# A sync started while Codex (the ChatGPT app) is open: true asks Codex to quit
+# first, the way Windows closes an app for an update -- never forced; if it
+# does not quit, nothing is written. The handoff watcher never asks.
+# Ask Codex to save its work before: a running agent turn is interrupted.
+close_codex = false
 # Session mode:
 # all|last_date_only (latest date folder under sessions/, if date-based layout is detected)
 # Keep "all": last_date_only can discard branches, so every mutation command

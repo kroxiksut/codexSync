@@ -46,6 +46,11 @@ codexsync -c config.toml restore --target cloud --apply                 # into t
 - A legacy backup without a manifest needs an explicit `--from` plus
   `--allow-legacy-snapshot`, and cannot restore semantic-owned state (sessions,
   the session index, the global state).
+- Backups taken by 0.1 have no manifest, so they are such legacy backups:
+  settings files only. If you want chats to be restorable too, take a new
+  backup with this version — a sync takes one before every overwrite, and a
+  copy of `.codex` ([Configuration](CONFIGURATION.md#copies-of-codex)) holds
+  everything.
 
 To put back `.codex-global-state.json` from a Guardian snapshot, see
 [Guardian → Restoring a snapshot](GUARDIAN.md#restoring-a-snapshot).

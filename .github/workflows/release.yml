@@ -1,0 +1,223 @@
+name: Release
+
+# Manual on purpose: a release uploads to PyPI, where a version number can be
+# used only once, and attaches Windows builds to a GitHub release. Push the tag
+# first, then run this workflow with it. Steps, and the one-time PyPI setup:
+# docs/dev/PUBLISHING.md.
+#
+# A rehearsal before tagging: give `ref: main` and leave both publishing
+# switches off -- everything is checked, tested and built, and the builds are
+# downloadable from the run. Nothing is published from anything but the tag.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to release, already pushed (v0.2.0-alpha.1, v0.2.0)"
+        required: true
+        type: string
+      ref:
+        description: "Build this branch or commit instead of the tag (a rehearsal; publishes nothing)"
+        required: false
+        default: ""
+        type: string
+      publish_pypi:
+        description: "Upload the wheel and sdist to PyPI (cannot be undone: a version is uploaded once)"
+        required: true
+        default: false
+        type: boolean
+      github_release:
+        description: "Create the GitHub release with the builds attached"
+        required: true
+        default: true
+        type: boolean
+      draft:
+        description: "Create the GitHub release as a draft, to read it before anyone sees it"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag }}
+
+jobs:
+  # Everything else waits for this: the tag must mean the version pyproject.toml
+  # declares, and CHANGELOG.md must have a dated section for it.
+  meta:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || inputs.release_tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag, pyproject.toml and CHANGELOG.md agree
+        run: python scripts/release_meta.py check --tag "$RELEASE_TAG"
+      - id: meta
+        run: python scripts/release_meta.py outputs --tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Release notes
+        run: python scripts/release_meta.py notes --tag "$RELEASE_TAG" --out release-notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  # One wheel and one sdist for every platform: the package is pure Python.
+  dist:
+    name: Wheel and sdist
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || inputs.release_tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Pin README links to the tag (PyPI shows the file without the repository)
+        run: python scripts/release_meta.py pypi-readme --tag "$RELEASE_TAG"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - name: The wheel installs with no dependency and reports its version
+        run: |
+          python -m venv /tmp/wheel-check
+          /tmp/wheel-check/bin/pip install dist/*.whl
+          test "$(/tmp/wheel-check/bin/pip list --format=freeze | grep -vi '^codexsync=' | grep -vi '^pip=' | wc -l)" = "0"
+          test "$(/tmp/wheel-check/bin/codexsync --version)" = "codexsync ${{ needs.meta.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+
+  # Portable builds. The window needs Qt, and Qt 6 has no 32-bit Windows build,
+  # so x86 gets the command line only. Each build runs the suite with its own
+  # interpreter first: x86 and arm64 are not in the everyday CI matrix.
+  exe:
+    name: Windows ${{ matrix.arch }}
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-latest
+            python_arch: x64
+            gui: true
+          - arch: arm64
+            runner: windows-11-arm
+            python_arch: arm64
+            gui: true
+          - arch: x86
+            runner: windows-latest
+            python_arch: x86
+            gui: false
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || inputs.release_tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_arch }}
+      - name: Install
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if ("${{ matrix.gui }}" -eq "true") { pip install -e ".[gui]" pytest pyinstaller }
+          else { pip install -e . pytest pyinstaller }
+      - name: Test suite
+        run: python -m pytest -q
+      - name: Build
+        shell: pwsh
+        run: |
+          python -m PyInstaller --clean --noconfirm codexsync.spec
+          if ("${{ matrix.gui }}" -eq "true") { python -m PyInstaller --clean --noconfirm codexsync-gui.spec }
+      - name: Check the builds
+        shell: pwsh
+        run: |
+          $expected = "codexsync ${{ needs.meta.outputs.version }}"
+          $actual = (& dist/codexsync.exe --version).Trim()
+          if ($actual -ne $expected) { Write-Error "codexsync.exe reports '$actual', expected '$expected'"; exit 1 }
+          $exes = @("dist/codexsync.exe")
+          if ("${{ matrix.gui }}" -eq "true") { $exes += "dist/codexsync-gui.exe" }
+          python scripts/check_exe_version.py @exes
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Pack
+        shell: pwsh
+        run: |
+          $builds = @(@{ Exe = "codexsync.exe"; Zip = "codexsync-$env:RELEASE_TAG-windows-${{ matrix.arch }}.zip" })
+          if ("${{ matrix.gui }}" -eq "true") {
+            $builds += @{ Exe = "codexsync-gui.exe"; Zip = "codexsync-gui-$env:RELEASE_TAG-windows-${{ matrix.arch }}.zip" }
+          }
+          New-Item -ItemType Directory -Force release | Out-Null
+          foreach ($build in $builds) {
+            Compress-Archive -Path "dist/$($build.Exe)", LICENSE -DestinationPath "release/$($build.Zip)" -Force
+            $hash = (Get-FileHash "release/$($build.Zip)" -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($build.Zip)" | Out-File -FilePath "release/$($build.Zip).sha256" -Encoding ascii
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: release/*
+
+  # Only after every build above succeeded, so PyPI never holds a version whose
+  # Windows builds failed. Trusted publishing: no token is stored anywhere.
+  pypi:
+    name: Publish to PyPI
+    needs: [meta, dist, exe]
+    if: ${{ inputs.publish_pypi && inputs.ref == '' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/codexsync/${{ needs.meta.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub release
+    needs: [meta, dist, exe]
+    if: ${{ inputs.github_release && inputs.ref == '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+      # GitHub's own CLI rather than a third-party action: this job can write
+      # to the repository, so it runs nothing that is not GitHub's or ours.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); else flags+=(--latest); fi
+          if [ "$DRAFT" = "true" ]; then flags+=(--draft); fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "codexSync $RELEASE_TAG" \
+            --notes-file assets/release-notes/release-notes.md \
+            "${flags[@]}" \
+            assets/windows-*/* assets/python-dist/*

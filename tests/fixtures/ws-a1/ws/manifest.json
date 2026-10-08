@@ -1,0 +1,34 @@
+{
+  "data_version": 1,
+  "format": "codexsync-sync-manifest-v2",
+  "machines": {
+    "desk": {
+      "files": {
+        "skills/note.md": {
+          "cloud": {
+            "mtime_ns": 1791290774538326000,
+            "size": 18
+          },
+          "local": {
+            "mtime_ns": 1791290774538326000,
+            "size": 18
+          }
+        }
+      }
+    },
+    "lap": {
+      "files": {
+        "skills/note.md": {
+          "cloud": {
+            "mtime_ns": 1791290774538326000,
+            "size": 18
+          },
+          "local": {
+            "mtime_ns": 1791290774538326000,
+            "size": 18
+          }
+        }
+      }
+    }
+  }
+}

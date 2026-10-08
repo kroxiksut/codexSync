@@ -186,6 +186,16 @@ class ConflictBundleTests(unittest.TestCase):
         second = self.store.conflict_bundle(self.left, self.right, session_id="s", common_records=0)
         self.assertEqual(first, second)
 
+    def test_the_other_machine_finds_the_bundle_with_its_sides_swapped(self) -> None:
+        # The conflict id sorts the pair, so the second machine to decide the
+        # same conflict reaches the first one's bundle with its own branch on
+        # the left. Comparing by position refused it, and every later sync on
+        # that machine stopped with exit 5 (found writing the 0.2.0a1 fixture).
+        first = self.store.conflict_bundle(self.left, self.right, session_id="s", common_records=0)
+        other = SemanticStore(self.root / "store", "machine-b")
+        second = other.conflict_bundle(self.right, self.left, session_id="s", common_records=0)
+        self.assertEqual(first, second)
+
     def test_the_bundle_manifest_names_no_session_id(self) -> None:
         bundle = self.store.conflict_bundle(self.left, self.right, session_id="s", common_records=0)
         self.assertNotIn(

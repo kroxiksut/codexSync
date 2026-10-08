@@ -92,6 +92,7 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("targets", "include_roots", "lines", []),
         Field("filters", "exclude_globs", "lines", []),
         Field("sync", "direction", "choice", "bidirectional", ("bidirectional", "to_cloud", "to_local")),
+        Field("sync", "scope", "choice", "full", ("full", "settings")),
         Field("sync", "delete_policy", "choice", "never", ("never", "propagate")),
         Field(
             "sync", "session_mode", "choice", "all", ("all", "last_date_only"),

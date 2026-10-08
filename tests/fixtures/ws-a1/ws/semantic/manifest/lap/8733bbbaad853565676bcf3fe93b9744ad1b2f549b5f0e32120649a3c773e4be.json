@@ -1,0 +1,19 @@
+{
+  "base_record_count": 2,
+  "base_sha256": "c33086229fd82d3c2151ef73f293a675905ccdf821c84a2f6430ebc2beb59625",
+  "branch_id": "588ae24d6aa78ee092225171c14d5404b71f6f1ec9e377f3387a5fffbef2ef72",
+  "byte_count": 385,
+  "entry_digest": "5ce68d16cbfbecdbcfffb26e4c263259560e2e0ba53d2a29edc8c25c074071d7",
+  "format": "codexsync-semantic-manifest-v1",
+  "generation": 2,
+  "machine_id": "lap",
+  "parent_hash": null,
+  "peers": {
+    "desk": 1
+  },
+  "record_count": 2,
+  "recorded_at_utc": "2026-10-06T12:46:24.318041Z",
+  "session_hash": "8733bbbaad853565676bcf3fe93b9744ad1b2f549b5f0e32120649a3c773e4be",
+  "sha256": "c33086229fd82d3c2151ef73f293a675905ccdf821c84a2f6430ebc2beb59625",
+  "state": "ACTIVE"
+}

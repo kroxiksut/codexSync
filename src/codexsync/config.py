@@ -41,6 +41,10 @@ from .models import (
 #: new substitution cannot be documented in one language and forgotten in the
 #: other -- or documented and never implemented.
 PATH_SUBSTITUTIONS: tuple[str, ...] = ("${workspace_root}",)
+#: `[sync] scope`: what `codexsync sync` carries (D-028). ``full`` is the
+#: window's Synchronise -- settings, chats, projects; ``settings`` is the files
+#: under `targets.include_roots` only, which is all `sync` did before D-028.
+SYNC_SCOPES: tuple[str, ...] = ("full", "settings")
 
 
 def preview_path(
@@ -265,6 +269,8 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         equal_mtime_action=str(sync_raw.get("equal_mtime_action", "skip")).strip().lower(),
         dry_run_default=_bool_value(sync_raw, "dry_run_default", True, "sync.dry_run_default"),
         delete_policy=sync_raw.get("delete_policy", "never"),
+        scope=str(sync_raw.get("scope", "full")).strip().lower(),
+        close_codex=_bool_value(sync_raw, "close_codex", False, "sync.close_codex"),
         session_mode=(
             str(sync_raw.get("session_mode")).strip().lower()
             if sync_raw.get("session_mode") is not None
@@ -636,6 +642,9 @@ def _validate_config(cfg: AppConfig) -> None:
 
     if cfg.sync.delete_policy not in {"never", "propagate"}:
         raise ConfigError("sync.delete_policy must be one of: never, propagate")
+
+    if cfg.sync.scope not in SYNC_SCOPES:
+        raise ConfigError("sync.scope must be one of: " + ", ".join(SYNC_SCOPES))
 
     if cfg.sync.time_tolerance_seconds < 0:
         raise ConfigError("sync.time_tolerance_seconds must be >= 0")

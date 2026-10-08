@@ -285,6 +285,23 @@ class RunHandoffTests(_Workspace):
             board.pending("laptop")[0].machine, "desktop", "the other machine learns of the handoff"
         )
 
+    def test_a_full_preview_sees_files_and_chats_and_writes_nothing(self) -> None:
+        # `sync --dry-run` at `[sync] scope = "full"` (D-028).
+        desktop, desktop_codex = self.machine("desktop")
+        self.write(desktop_codex / "skills" / "tool.md", "from the desktop")
+        self.session(desktop_codex, "11111111-1111-1111-1111-111111111111")
+        preview = app_module.preview_full_sync(desktop)
+        self.assertEqual(preview.machine, "desktop")
+        self.assertEqual(preview.files.plan.action_count, 1, "the skill file")
+        self.assertEqual(
+            sum(1 for item in preview.chats.items if app_module.transfer_direction(item) == "mirror"), 1,
+        )
+        # As `sync --dry-run` always has, codexSync's own empty folders and
+        # manifest may be prepared; no file and no chat is copied.
+        copied = [path for path in self.cloud.rglob("*") if path.is_file()]
+        self.assertEqual(copied, [], "nothing copied into the cloud folder")
+        self.assertEqual(read_board(self.handoff_root).records, {}, "no handoff is recorded")
+
     def test_each_later_step_builds_its_plan_once(self) -> None:
         desktop, desktop_codex = self.machine("desktop")
         self.session(desktop_codex, "11111111-1111-1111-1111-111111111111")

@@ -67,7 +67,7 @@ Neither an integration with Codex internals nor a real-time sync:
 - **Your sign-in never travels.** `auth.json` and other credential files are
   never copied, at any depth.
 - **Writes only while Codex is closed.** When that cannot be determined, nothing
-  is written.
+  is written. If you allow it, a sync asks Codex to quit first — never forcibly.
 - **Nothing is replaced without a verified backup**, and every write is
   journaled, so an interrupted one can be resumed or rolled back.
 
@@ -76,16 +76,18 @@ Found a security or data-safety problem? See [SECURITY.md](./SECURITY.md).
 ## Install
 
 **Windows, no Python needed:** download `codexsync-gui-…-windows-amd64.zip`
-from [Releases](https://github.com/kroxiksut/codexSync/releases), unpack it and
-run `codexsync-gui.exe`. It is the command line too.
+(or `…-arm64.zip`) from [Releases](https://github.com/kroxiksut/codexSync/releases),
+unpack it and run `codexsync-gui.exe`. The same executable can also run CLI
+subcommands. Windows 10 (1809) or later.
 
-**With Python 3.11+**, on Windows or macOS:
+**With Python 3.11+**, on Windows or macOS — `--pre` while 0.2 is an alpha,
+or pip installs 0.1:
 
 ```powershell
-pip install "codexsync[gui]"    # the window and the command line
-codexsync-gui                   # the first start sets up config.toml with you
+pip install --pre "codexsync[gui]"    # the window and the command line
+codexsync-gui                         # on first launch, the window helps you create or open config.toml
 
-pip install codexsync           # the command line only, no dependencies
+pip install --pre codexsync           # the command line only, no dependencies
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
@@ -113,8 +115,22 @@ Every page in one place: [docs/](docs/README.md). For contributors:
 
 ## Status
 
-0.2 — the first release with the window (`codexsync[gui]` or `codexsync-gui.exe`)
-next to the command line. A few runtime behaviours are deliberately left unused
+**0.2.0 alpha 1** — the first release with the window (`codexsync[gui]` or
+`codexsync-gui.exe`) next to the command line. It is an alpha because 0.2
+understands and changes far more of Codex's state than 0.1: it is in daily use,
+and every write still goes through the lock, journal and verified backup, but it
+needs more machines than ours before 0.2.0. If you use Codex on two or more
+machines, please try it and [tell us](https://github.com/kroxiksut/codexSync/issues/new/choose)
+what happened. Data an alpha writes stays readable by every later version.
+
+**Upgrading from 0.1.** codexSync 0.2 recognises configurations created by 0.1
+and upgrades them in place, from the window or with `config check` and
+`config upgrade`: a few 0.1 values are refused by every command that writes,
+and the upgrade shows each change before making it. Existing state is kept, and
+the previous configuration is preserved in `config-history/`.
+→ [Upgrading a config](docs/en/CONFIGURATION.md#upgrading-a-config-from-an-earlier-version)
+
+A few runtime behaviours are deliberately left unused
 until a controlled experiment records them — see
 [what is not proven yet](docs/en/README.md#what-is-not-proven-yet).
 

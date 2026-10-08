@@ -1,0 +1,2 @@
+codexsync 0.2.0a1, scripts/make_a1_fixture.py, at D:/Projects/codexSync/test-sandbox/a1.
+Frozen: never regenerate (D-030). Every name, chat and project in it is invented.

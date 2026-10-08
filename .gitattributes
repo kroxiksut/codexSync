@@ -1,3 +1,6 @@
 .gitattributes text eol=lf
 scripts/scheduler/macos/*.sh text eol=lf
 scripts/scheduler/windows/*.ps1 text eol=crlf
+# The frozen 0.2.0a1 workspace (D-030) is hashed byte for byte: never convert
+# its line endings on checkout (Windows runners default to core.autocrlf=true).
+tests/fixtures/ws-a1/** -text

@@ -45,18 +45,23 @@ an error.
 ## Install
 
 The core and the command line have no dependencies. The window is an optional
-extra.
+extra. While 0.2 is an alpha, pip needs `--pre`; without it, it installs 0.1.
 
 ```powershell
-pip install "codexsync[gui]"    # the command line and the window (PySide6)
-pip install codexsync           # the command line only
+pip install --pre "codexsync[gui]"    # the command line and the window (PySide6)
+pip install --pre codexsync           # the command line only
 ```
 
 On Windows you can instead download a build from
-[Releases](https://github.com/kroxiksut/codexSync/releases), neither of which
-needs Python installed: `codexsync-gui-<tag>-windows-amd64.zip` (the window,
-which is also the command line) or `codexsync-<tag>-windows-amd64.zip` (command
-line only, without Qt).
+[Releases](https://github.com/kroxiksut/codexSync/releases), none of which
+needs Python installed:
+
+| Build | Windows |
+|---|---|
+| `codexsync-gui-<tag>-windows-amd64.zip`, `…-arm64.zip` — the window, which also runs every command | x64, ARM64 |
+| `codexsync-<tag>-windows-amd64.zip`, `…-arm64.zip`, `…-x86.zip` — the command line only, without Qt | x64, ARM64, 32-bit |
+
+There is no 32-bit window: Qt 6 has no 32-bit Windows build.
 
 From source, for development or an unreleased change:
 
@@ -137,7 +142,12 @@ in the cloud folder: those are the user's responsibility.
   until it has been run against a live Codex, the platform reports itself as
   unsupported: the process state reads as undetermined and every command that
   writes refuses.
-- **Linux** runtime support is out of scope for now.
+- **Linux** runtime support is out of scope for now. Codex itself reached Linux
+  in August 2026, as a preview of the desktop app; codexSync does not detect or
+  write to it yet.
+- **Minimum versions:** Windows 10 (1809) or later, Python 3.11 or later with
+  pip; the window on macOS needs macOS 13 or later (what the current PySide6
+  supports).
 - CI runs the test suite on `windows-latest` and `macos-latest` with Python
   3.11, 3.12 and 3.13.
 

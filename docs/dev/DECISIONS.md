@@ -697,3 +697,82 @@ console works the same without the window". Decided:
 
 This amends `AI_RULES.md` §6 ("conflict: no writes, manual resolution"): that
 remains the behaviour of `manual_abort`, which is still one setting away.
+
+## D-028: `sync` carries everything by default, as in 0.1
+In 0.1 `codexsync sync` copied `sessions/` whole, so one command carried the
+chats. 0.2 made sessions semantic-owned and carried them through `handoff
+sync` and the window's *Synchronise*, which left `sync` copying settings files
+only — a 0.1 user, and every task that runs `sync`, silently stopped carrying
+chats (owner, 2026-10-06: "make sync copy the sessions as in 0.1").
+
+Copying `sessions/` by modification time is not brought back: it is what lost a
+history continued on two machines, it cannot see Codex's own September rewrite,
+and a copied file Codex's catalogue does not list stays invisible (D-015,
+D-024). Instead `[sync] scope` decides what `sync` carries: `full` (the
+default) runs exactly the full sync — `run_handoff`, settings, chats, projects,
+names, the catalogue request, the handoff record — and `settings` keeps the
+pre-0.2 files-only run. `--scope` overrides it for one run; the dry run of a
+full sync (`preview_full_sync`) builds the same plans `run_handoff` would and
+writes nothing. The window's *Synchronise* always runs the full sync. Amends
+D-016: the sign-in task runs `sync`, so it follows `[sync] scope` too.
+
+## D-029: Codex may be asked to quit before a sync, never forced
+0.1 could stop Codex with `taskkill /T /F` on request; 0.2 removed that because
+a forced stop is a crash to Codex -- the global state and its SQLite catalogue
+can be left half written, and a running agent turn is lost -- and `AI_RULES` 2
+made closing Codex the person's step. On 2026-10-06 the owner asked to have it
+back: a person who starts a sync with Codex open, and has set things up that
+way, wants Codex closed for them.
+
+What came back is a request, not a stop. With `[sync] close_codex = true` (off
+by default; on the Automation page, where automation is set up) a sync that
+finds Codex open asks it once to quit and waits up to a minute for the process
+check to see it gone; if it declines or stays, the sync is refused with why and
+writes nothing. On Windows the desktop app is `ChatGPT.exe` from the
+`OpenAI.Codex_` package (one window for ChatGPT and Codex since 26.930); its
+close button only hides it to the tray, so the request is the Restart Manager's
+-- what Windows uses to close an app for an update -- with `RmShutdown` flags 0,
+never `RmForceShutdown`, aimed at the app's root process. Observed on the
+reference machine before it was written (`PROVEN_CLOSERS`): answer 0, all
+twelve `ChatGPT.exe` and both `codex.exe` gone in two seconds, the state intact.
+macOS asks the app to quit by bundle id and stays gated until seen on a Mac. A
+Codex CLI in a terminal is never asked. The handoff watcher never asks: it acts
+when Codex closes, and a Codex open at its start is the person's. A dry run
+never asks. Amends `AI_RULES` 2 and the "codexSync never starts or stops
+Codex" rule: it still never stops Codex; it may ask Codex to stop itself.
+
+
+## D-030: On-disk formats are a compatibility promise from 0.2.0a1
+0.2 ships as a series of alphas, and the people running them keep real work in
+the folders codexSync writes. A later alpha that cannot read what an earlier
+one wrote would cost exactly the people who are helping (owner, 2026-10-06:
+"compatibility between alphas is needed -- we will keep building on it").
+
+From 0.2.0a1 on, everything codexSync writes into the shared workspace and its
+own folders stays readable by every later version: the sync manifest with its
+per-machine baselines, handoff records, the peer boards (`projects/`,
+`chat-names/`, `project-files/`), the semantic store (manifest entries,
+conflict bundles, `superseded/`), mutation journals and the thread-catalogue
+marker beside them, stored plans and working sets, Guardian snapshots, the
+latest-good pointer and quarantine, backup snapshots and their manifests,
+copies of `.codex` and `config-history/`. A format changes only by adding a
+field an older reader ignores, or by a new format name or version **with a
+reader kept for the old one**; a field is never given a new meaning. A file a
+reader refuses is a refusal with a reason, never a silent fresh start.
+
+It is enforced, not just promised: `tests/fixtures/ws-a1/` was written once by
+the 0.2.0a1 code through its real writers (`scripts/make_a1_fixture.py`, two
+invented machines, invented chats and projects), and `tests/test_a1_compat.py`
+holds today's readers to it. The fixture is frozen -- regenerating it with a
+later version would test that version against itself. A change that makes the
+test fail is the bug; the fixture is never edited to fit it. `superseded/`
+(a record-format migration) is the one kind the fixture does not contain, as
+producing it needs two record formats of one chat.
+
+Going back is not covered. 0.1.2 reads the per-machine manifest as having no
+baseline at all (it knows only a top-level `files` table), so its next sync is
+a first sync decided by modification time, with `sessions/` copied whole as
+0.1 always did -- beside the mirror's compressed copies -- and its save
+rewrites the manifest as one unkeyed `files` table, dropping every machine's
+0.2 baseline; the next 0.2 run then starts from a first sync too. A machine
+that has synchronised with 0.2 should stay on 0.2.

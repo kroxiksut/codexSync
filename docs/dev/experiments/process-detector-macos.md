@@ -1,6 +1,6 @@
 # Experiment: does the POSIX process detector see a running Codex?
 
-**Status: not run.** `PROVEN_DETECTORS` in `src/codexsync/process_detector.py`
+**Status: not run on a Mac; the GitHub runner workflow below is the stand-in.** `PROVEN_DETECTORS` in `src/codexsync/process_detector.py`
 is empty, so on macOS and Linux `capability()` reports `supported=False`, every
 process reading is `UNKNOWN`, and `safety.fail_on_unknown` turns that into a
 refusal. Every mutating command therefore exits 3 on those platforms. That is
@@ -72,6 +72,37 @@ On a Mac (Apple Silicon, `AI_RULES` 4) with Codex installed:
    With Codex open this must be non-empty; with Codex closed it must be empty.
    Repeat the closed case twice: a helper that lingers for a few seconds after
    quitting is a real finding and belongs in the notes.
+
+## On a GitHub runner, without a Mac
+
+The project has no Mac, so the same observation runs on GitHub's macOS
+runners: `.github/workflows/macos-detector.yml`, started by hand (Actions ->
+macOS process detector -> Run workflow). It installs the real Codex CLI from
+npm and runs `scripts/ci/macos_detector_probe.py`, which asks the detector --
+through `collect_process_snapshot`, with the names the shipped template
+configures -- whether Codex is running:
+
+1. before anything starts (must be stopped);
+2. while the Codex CLI runs (`codex app-server`, else `mcp-server`, else the
+   interactive screen under a pty; must be running), and after it is stopped
+   (must be stopped again, and how long a helper lingers is recorded);
+3. while a stand-in program runs from a `ChatGPT.app/Contents/MacOS/` bundle
+   (must be running: the desktop app's path marker), and while the same program
+   runs as `ChatGPT` outside any bundle (must be stopped: that is the ordinary
+   ChatGPT app).
+
+The job summary and the `detector-report-*` artifact hold the result.
+
+What it does not observe: the desktop app itself, and the helpers it starts
+while a command runs in a chat. A runner cannot install it. So an entry made
+from this run says so, and the first observation on a real Mac replaces it:
+
+```python
+PROVEN_DETECTORS = {
+    "darwin": "GitHub macos-14/15 runner, Codex CLI 0.x via npm, observed 2026-10-07; "
+              "desktop app matched by its bundle path with a stand-in, not observed",
+}
+```
 
 ## What to write down afterwards
 

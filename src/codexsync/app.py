@@ -253,12 +253,19 @@ from .handoff import (
     record_handoff,
 )
 from .notifications import Notifier
+from .codex_closer import CloseOutcome, ask_codex_to_quit
 from .version import PRODUCER_VERSION, __version__
 
 LOG = logging.getLogger(__name__)
 
 __all__ = [
     "MAPPING_KEYS",
+    "CloseOutcome",
+    "close_codex_for_sync",
+    "SYNC_DIRECTIONS",
+    "with_run_choices",
+    "FullSyncPreview",
+    "preview_full_sync",
     "ConfigChange",
     "change_config_value",
     "change_path_mappings",
@@ -468,13 +475,33 @@ def with_conflict_policy(cfg: AppConfig, policy: str | None) -> AppConfig:
     return replace(cfg, conflict=replace(cfg.conflict, policy=policy))
 
 
+#: `[sync] direction` values; ``direction`` below overrides it for one run.
+SYNC_DIRECTIONS = ("bidirectional", "to_cloud", "to_local")
+
+
+def with_run_choices(cfg: AppConfig, policy: str | None, direction: str | None) -> AppConfig:
+    """``cfg`` with this run's conflict rule and direction, where one was chosen.
+
+    The direction is the person's choice for one run -- "this machine wrote
+    nothing, only send" -- and decides files and chats alike, as the setting
+    does (D-012, D-027).
+    """
+    cfg = with_conflict_policy(cfg, policy)
+    if direction is None:
+        return cfg
+    if direction not in SYNC_DIRECTIONS:
+        raise ConfigError(f"direction must be one of: {', '.join(SYNC_DIRECTIONS)}")
+    return replace(cfg, sync=replace(cfg.sync, direction=direction))
+
+
 def build_context(
     config_path: Path,
     manual_terminate_confirmation_override: bool | None = None,
     enforce_safety: bool = True,
     conflict_policy: str | None = None,
+    direction: str | None = None,
 ) -> AppContext:
-    cfg = with_conflict_policy(load_config(config_path), conflict_policy)
+    cfg = with_run_choices(load_config(config_path), conflict_policy, direction)
     safety_gate = _make_safety_gate(cfg)
     if enforce_safety:
         _require_mutation_compatible_config(cfg)
@@ -1662,6 +1689,7 @@ def scan_session_transfer(
     progress: ProgressCallback | None = None,
     scope: SessionScope | None = None,
     conflict_policy: str | None = None,
+    direction: str | None = None,
 ) -> TransferPlan:
     """Classify every session branch on both sides. Reads only.
 
@@ -1675,9 +1703,10 @@ def scan_session_transfer(
 
     A divergence is decided by `[conflict] policy` and `sync.direction`
     (D-027), or by ``conflict_policy`` for this one plan; the rule is frozen
-    into the plan, so its apply decides the same way.
+    into the plan, so its apply decides the same way. ``direction`` replaces
+    `sync.direction` for this one plan the same way.
     """
-    cfg = with_conflict_policy(load_config(config_path), conflict_policy)
+    cfg = with_run_choices(load_config(config_path), conflict_policy, direction)
     local_dir = locate_local_state_dir(cfg)
     cloud_dir = cfg.paths.cloud_root_dir
     decision = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN)
@@ -2554,6 +2583,8 @@ class HandoffResult:
     #: logged: ``projects``, ``chat_names``, ``catalogue`` (`HANDOFF_STEPS`).
     #: The handoff itself happened; the next sync does them again.
     steps_not_done: tuple[str, ...] = ()
+    #: Codex was open and quit when asked (`[sync] close_codex`, D-029).
+    codex_closed: bool = False
     #: The other machine the chats were paired with, so a page can open
     #: Sessions for exactly this pair.
     source: str | None = None
@@ -2734,6 +2765,8 @@ def run_handoff(
     on_wait: Callable[[Sequence[Delivery]], None] | None = None,
     progress: ProgressCallback | None = None,
     conflict_policy: str | None = None,
+    direction: str | None = None,
+    close_codex: bool = True,
 ) -> HandoffResult:
     """One full sync with nobody deciding anything, then the handoff record.
 
@@ -2754,6 +2787,10 @@ def run_handoff(
     root = _handoff_root(cfg)
     machine = _handoff_machine(cfg)
     _require_mutation_compatible_config(cfg)
+    # `[sync] close_codex` (D-029): asked once, never forced. The watcher
+    # passes ``close_codex=False`` -- it reacts to Codex closing and must
+    # never close it under someone who just opened it.
+    closed = close_codex_for_sync(config_path) if close_codex else None
     # Waiting for the cloud is pointless while Codex is open: every write that
     # follows would be refused anyway.
     _make_safety_gate(cfg).require(OperationKind.SYNC)
@@ -2779,20 +2816,12 @@ def run_handoff(
 
     # Chats first, and read-only: a decision found here stops the run before
     # the settings sync has written anything.
-    source = _handoff_source(board, machine, pending)
+    source, plan, resolutions_path = _full_sync_chat_plan(
+        config_path, cfg, board, machine, pending, progress=progress, conflict_policy=conflict_policy,
+        direction=direction,
+    )
     plans = _plans_dir(cfg)
     pair = session_pair_name(source, machine)
-    resolutions = plans / f"sessions-resolutions-{pair}.json"
-    resolutions_path = resolutions if resolutions.is_file() else None
-    stored_scope = read_working_set(config_path, source_machine=source, target_machine=machine)
-    scope = None if stored_scope.is_empty else build_working_set(
-        config_path, projects=stored_scope.projects, chats=stored_scope.chats,
-    )
-    plan = scan_session_transfer(
-        config_path, source_machine=source, target_machine=machine,
-        resolutions_path=resolutions_path, progress=progress, scope=scope,
-        conflict_policy=conflict_policy,
-    )
     if plan.volatile:
         raise SafetyPreconditionError("Codex started while the chats were being read; nothing was written")
     # Exactly what the Sessions page lists under "needs a decision", and what
@@ -2819,7 +2848,7 @@ def run_handoff(
     save_transfer_plan(plan, plan_path)
 
     report_progress(progress, "sync_settings", 0, 0)
-    ctx = build_context(config_path, enforce_safety=True, conflict_policy=conflict_policy)
+    ctx = build_context(config_path, enforce_safety=True, conflict_policy=conflict_policy, direction=direction)
     run_sync(ctx, dry_run=False, origin=origin)
     report_progress(progress, "sync_chats", 0, 0)
     session_actions = apply_session_transfer(
@@ -2908,6 +2937,7 @@ def run_handoff(
         chat_names_kept=names.plan.kept if names else 0,
         chat_names_waiting=names.plan.waiting if names else 0,
         steps_not_done=tuple(skipped),
+        codex_closed=bool(closed and closed.accepted),
         project_files_behind=files_report.warnings if files_report else (),
         chats_not_loaded=left_behind,
         new_chats_kept_in_cloud=sum(
@@ -2925,6 +2955,130 @@ def run_handoff(
         record=record,
         waited_seconds=waited,
     )
+
+
+def _full_sync_chat_plan(
+    config_path: Path,
+    cfg: AppConfig,
+    board: Board,
+    machine: str,
+    pending: Sequence[HandoffRecord],
+    *,
+    progress: ProgressCallback | None,
+    conflict_policy: str | None,
+    direction: str | None = None,
+):
+    """The chat plan a full sync applies: the pair, resolutions and working set it uses.
+
+    One place, so a preview (`preview_full_sync`) shows the very plan
+    `run_handoff` would build. Returns ``(source, plan, resolutions_path)``.
+    """
+    source = _handoff_source(board, machine, pending)
+    pair = session_pair_name(source, machine)
+    resolutions = _plans_dir(cfg) / f"sessions-resolutions-{pair}.json"
+    resolutions_path = resolutions if resolutions.is_file() else None
+    stored_scope = read_working_set(config_path, source_machine=source, target_machine=machine)
+    scope = None if stored_scope.is_empty else build_working_set(
+        config_path, projects=stored_scope.projects, chats=stored_scope.chats,
+    )
+    plan = scan_session_transfer(
+        config_path, source_machine=source, target_machine=machine,
+        resolutions_path=resolutions_path, progress=progress, scope=scope,
+        conflict_policy=conflict_policy, direction=direction,
+    )
+    return source, plan, resolutions_path
+
+
+@dataclass(frozen=True, slots=True)
+class FullSyncPreview:
+    """What a full sync would do now, built read-only (`sync --dry-run`, D-028)."""
+
+    machine: str
+    #: The machine whose chats are paired with this one's.
+    source: str
+    files: AppContext
+    chats: TransferPlan
+    #: ``None`` when this state's project list cannot be carried.
+    projects: "ProjectSyncResult | None"
+    #: Other machines' handoffs not fully in the cloud copy yet; a real run
+    #: waits for them first.
+    waiting_for: tuple[str, ...] = ()
+
+
+def preview_full_sync(
+    config_path: Path,
+    *,
+    conflict_policy: str | None = None,
+    direction: str | None = None,
+    progress: ProgressCallback | None = None,
+) -> FullSyncPreview:
+    """Everything `run_handoff` would plan, and nothing written.
+
+    Codex must be closed, as for the run itself: a preview taken while it
+    writes would describe a state the run will not find.
+    """
+    cfg = load_config(config_path)
+    _require_mutation_compatible_config(cfg)
+    machine = _handoff_machine(cfg)
+    board = read_board(_handoff_root(cfg))
+    pending = board.pending(machine)
+    files = build_context(config_path, enforce_safety=True, conflict_policy=conflict_policy, direction=direction)
+    source, chats, _ = _full_sync_chat_plan(
+        config_path, cfg, board, machine, pending, progress=progress, conflict_policy=conflict_policy,
+        direction=direction,
+    )
+    try:
+        projects = sync_projects(config_path)
+    except ProjectsNotCarried as exc:
+        LOG.warning("projects would not be carried: %s", exc)
+        projects = None
+    current = Fingerprinter().files(cfg) if pending else {}
+    waiting = tuple(
+        item.machine for item in (delivery(record, current) for record in pending) if not item.delivered
+    )
+    return FullSyncPreview(machine, source, files, chats, projects, waiting)
+
+
+#: How long a sync waits for Codex to be gone after asking it to quit.
+CLOSE_CODEX_WAIT_SECONDS = 60.0
+
+
+def close_codex_for_sync(
+    config_path: Path,
+    *,
+    ask: Callable[[], CloseOutcome] = ask_codex_to_quit,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    wait_seconds: float = CLOSE_CODEX_WAIT_SECONDS,
+) -> CloseOutcome | None:
+    """When `[sync] close_codex` is on and Codex is open, ask it to quit (D-029).
+
+    ``None`` when nothing was asked: the setting is off, or Codex is not
+    running. Otherwise the app is asked once -- never forced -- and this waits
+    until the process check sees it stopped. If it declines, or is still
+    running after ``wait_seconds``, the sync is refused here with why, and
+    nothing has been written. The gate inside every write checks again anyway.
+    """
+    cfg = load_config(config_path)
+    if not cfg.sync.close_codex:
+        return None
+    gate = _make_safety_gate(cfg)
+    if gate.check(OperationKind.SYNC).process_state is not ProcessState.RUNNING:
+        return None
+    outcome = ask()
+    LOG.warning("Codex is open and [sync] close_codex is on; asked it to quit: %s", outcome.detail)
+    if not outcome.accepted:
+        raise SafetyPreconditionError(f"Codex is open and was not closed: {outcome.detail}. Nothing was written.")
+    deadline = monotonic() + wait_seconds
+    while gate.check(OperationKind.SYNC).process_state is not ProcessState.STOPPED:
+        if monotonic() >= deadline:
+            raise SafetyPreconditionError(
+                f"Codex was asked to quit but is still running after {int(wait_seconds)} s; "
+                "close it from the tray. Nothing was written."
+            )
+        sleep(1.0)
+    LOG.warning("Codex quit when asked; the sync goes on")
+    return outcome
 
 
 def _codex_state(config_path: Path) -> ProcessState:
@@ -2960,7 +3114,9 @@ def watch_handoff(
     machine = _handoff_machine(cfg)
     notify = notifier if notifier is not None else Notifier(enabled=bool(cfg.handoff.notify))
     sample = probe if probe is not None else (lambda: _codex_state(config_path))
-    act = handoff if handoff is not None else run_handoff
+    # The watcher never asks Codex to quit: it acts when Codex closes, and at
+    # start a Codex that is open is the person's, not a sync's (D-029).
+    act = handoff if handoff is not None else (lambda path: run_handoff(path, close_codex=False))
 
     def attempt(closing: bool) -> None:
         try:

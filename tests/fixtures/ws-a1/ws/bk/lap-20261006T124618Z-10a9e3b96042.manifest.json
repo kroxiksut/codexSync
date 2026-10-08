@@ -1,0 +1,13 @@
+{
+  "committed": true,
+  "entries": [
+    {
+      "relative_path": ".codex-global-state.json",
+      "sha256": "f3dd4682fb9998e2d7b89eaf57874278df737b8045b49c192fc49c6342d56779",
+      "side": "local",
+      "size": 527
+    }
+  ],
+  "format": "codexsync-backup-v1",
+  "snapshot": "lap-20261006T124618Z-10a9e3b96042"
+}

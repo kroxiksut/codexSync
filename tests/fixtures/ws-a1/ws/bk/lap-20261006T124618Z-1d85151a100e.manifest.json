@@ -1,0 +1,13 @@
+{
+  "committed": true,
+  "entries": [
+    {
+      "relative_path": "state_5.sqlite",
+      "sha256": "b9c999dc184337c2548f3f5ba48cba6bff4c6396533d933fc37cd3b61411524a",
+      "side": "local",
+      "size": 16384
+    }
+  ],
+  "format": "codexsync-backup-v1",
+  "snapshot": "lap-20261006T124618Z-1d85151a100e"
+}

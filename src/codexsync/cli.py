@@ -63,6 +63,9 @@ from .app import (
     preview_config_migration,
     change_config_value,
     change_path_mappings,
+    preview_full_sync,
+    close_codex_for_sync,
+    SYNC_DIRECTIONS,
     list_backup_snapshots,
     list_config_history,
     list_sync_candidates,
@@ -75,7 +78,7 @@ from .app import (
 )
 from .chat_directory import Association, ChatDirectory, ChatEntry, search_chats
 from .chat_move import ChatMovePlan
-from .config import load_config
+from .config import SYNC_SCOPES, load_config
 from .config_locations import (
     ConfigChoice,
     choose_config_path,
@@ -92,7 +95,7 @@ from .app import _UNRESOLVED_TRANSFER_BLOCKS
 from .repair_plan import save_repair_plan
 from .safety_gate import OperationKind
 from .scheduler import render_scheduler_templates, write_scheduler_templates
-from .semantic_transfer import CWD_ABSENT_HERE, FORMAT_MIGRATION, OLDER_FORMAT_HAS_LATER_RECORDS
+from .semantic_transfer import CWD_ABSENT_HERE, FORMAT_MIGRATION, OLDER_FORMAT_HAS_LATER_RECORDS, transfer_direction
 from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK
 from .version import __version__
 
@@ -366,6 +369,13 @@ def print_automation_status(view: AutomationView) -> None:
             f"  handoff_task: {watcher.task_name}; starts at sign-in"
             + ("" if watcher.definition_matches is not False else "; differs from config.toml")
         )
+    for task in view.legacy_tasks:
+        safe_print(
+            f"Task left by codexSync 0.1: {task.name} -- it still runs `codexsync sync` on its own timer, "
+            "which in 0.2 carries settings only, never chats."
+        )
+        safe_print(f"  remove it: {task.remove_command}")
+        print("  then use [handoff] enabled = true and `codexsync automation apply` for the full sync.")
     print("Operating system task")
     status = view.status
     if status is None:
@@ -470,6 +480,11 @@ def _conflict_policy_argument(parser: argparse.ArgumentParser) -> None:
         "[conflict] policy: prefer_newer_mtime keeps the newer copy (a chat: its later last "
         "record), prefer_local this machine's, prefer_cloud the cloud's, manual_abort stops. "
         "The copy not kept is backed up first (a chat: whole, in the conflict bundle)",
+    )
+    parser.add_argument(
+        "--direction", choices=SYNC_DIRECTIONS, default=None,
+        help="For this run, instead of [sync] direction: bidirectional, to_cloud (this machine "
+        "only sends; a chat changed on both keeps this machine's copy) or to_local (only receives)",
     )
 
 
@@ -649,6 +664,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--unattended",
         action="store_true",
         help="Nobody is watching (the sign-in task); recorded as the run's origin",
+    )
+    sync.add_argument(
+        "--scope", choices=SYNC_SCOPES, default=None,
+        help=(
+            "What to carry for this run instead of [sync] scope: full -- settings, chats and "
+            "projects, as the window's Synchronise -- or settings, the files under "
+            "targets.include_roots only"
+        ),
     )
     _conflict_policy_argument(sync)
 
@@ -1106,6 +1129,118 @@ def _run_config_edit(args: argparse.Namespace, config_path: Path) -> int:
         }
         return _print_config_change(change_path_mappings(config_path, add=rule, dry_run=args.dry_run))
     return _print_config_change(change_path_mappings(config_path, remove=args.rule_id, dry_run=args.dry_run))
+
+
+def _run_full_sync(args: argparse.Namespace, config_path: Path) -> int:
+    """`sync` at `[sync] scope = "full"` (D-028): the window's Synchronise.
+
+    Settings, chats and projects, as `handoff sync` carries them; a dry run
+    builds every plan and writes nothing.
+    """
+    dry_run = load_config(config_path).sync.dry_run_default
+    if args.dry_run:
+        dry_run = True
+    if args.apply:
+        dry_run = False
+    origin = "unattended" if args.unattended else "cli"
+    if not dry_run:
+        _print_handoff_result(run_handoff(
+            config_path, origin=origin, conflict_policy=args.conflict_policy, direction=args.direction,
+            on_wait=lambda late: print(
+                "Waiting for the cloud: " + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
+            ),
+        ))
+        return int(ExitCode.OK)
+    preview = preview_full_sync(config_path, conflict_policy=args.conflict_policy, direction=args.direction)
+    run_sync(preview.files, dry_run=True, origin=origin)
+    plan = preview.chats
+    to_cloud = sum(1 for item in plan.items if transfer_direction(item) == "mirror")
+    to_codex = sum(1 for item in plan.items if transfer_direction(item) == "local")
+    decide = [item for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS]
+    print(f"Full sync dry run on {preview.machine} (chats paired with {preview.source}); nothing was written.")
+    print(f"  files: {preview.files.plan.action_count} action(s)")
+    print(f"  chats: {to_cloud} to the cloud copy, {to_codex} into .codex")
+    if decide:
+        print(
+            f"  chats that need a decision first: {len(decide)} "
+            "(the run would stop before writing; `sessions scan` lists them)"
+        )
+    if preview.projects is None:
+        print("  projects: not carried from this state (see the log)")
+    else:
+        print(
+            f"  projects: {len(preview.projects.plan.added)} to add, "
+            f"{preview.projects.plan.action_count} change(s) to the project list"
+        )
+    if preview.waiting_for:
+        print(
+            "  waiting for the cloud to deliver: " + ", ".join(preview.waiting_for)
+            + " (a real run waits up to [handoff] delivery_wait_minutes)"
+        )
+    print("Apply with: codexsync -c " + str(config_path) + " sync --apply")
+    return int(ExitCode.OK)
+
+
+def _print_handoff_result(result) -> None:
+    """What a full sync did: `handoff sync`, and `sync` at `[sync] scope = "full"`."""
+    if getattr(result, "codex_closed", False):
+        print("Codex was open and quit when asked ([sync] close_codex).")
+    print(f"Handoff finished on {result.machine}.")
+    print(f"  loaded from: {', '.join(result.taken) or 'nothing new'}")
+    print(f"  files written: {result.sync_actions}, chats written: {result.session_actions}")
+    if result.chats_decided_by_rule:
+        print(
+            f"  chats changed on both machines, decided by [conflict] policy: "
+            f"{result.chats_decided_by_rule} (the copy not kept is in the conflict bundle)"
+        )
+    if result.new_chats_written:
+        print(
+            f"  chats new to this machine written into Codex: {result.new_chats_written} "
+            "(start Codex, then `doctor` says whether it lists them: session_visibility)"
+        )
+    if result.new_chats_kept_in_cloud:
+        print(
+            f"  chats new to this machine kept in the cloud copy: {result.new_chats_kept_in_cloud} "
+            '(set [semantic] new_chats = "same_path" to copy them into Codex)'
+        )
+    others = result.chats_not_loaded - result.new_chats_kept_in_cloud
+    if others > 0:
+        print(
+            f"  other chats left in the cloud copy only: {others} "
+            "(`sessions scan` says why for each)"
+        )
+    print(
+        f"  projects added: {result.projects_added}, project list changes: {result.project_changes}"
+    )
+    if result.projects_missing_folders:
+        print(
+            f"  added projects whose folder does not exist here: {result.projects_missing_folders} "
+            "(create the folder, or add a [[path_mappings]] rule)"
+        )
+    if result.chat_names_set or result.chat_names_kept or result.chat_names_waiting:
+        print(
+            f"  chat names taken from other machines: {result.chat_names_set}"
+            f" (named differently here, kept: {result.chat_names_kept};"
+            f" waiting for Codex to list the chat: {result.chat_names_waiting})"
+        )
+    if result.project_files_behind:
+        print("  project folders that did not come along (`projects files` lists every file):")
+        _print_project_files(result.project_files_behind, limit=20, indent="    ")
+    if result.chats_codex_will_list:
+        print(
+            f"  chats Codex lists after its next start: {result.chats_codex_will_list} "
+            "(it rebuilds its chat list from the files; that start takes longer)"
+        )
+    if result.chats_codex_ignores:
+        print(
+            f"  chat files Codex still does not list after rebuilding: {result.chats_codex_ignores} "
+            "(the files are in place; `sessions catalogue` lists them)"
+        )
+    for name in result.steps_not_done:
+        print(f"  not done this time, the next sync tries again (the log says why): {name}")
+    print(
+        "  handed off: " + (result.record.handoff_id if result.handed_off else "nothing new")
+    )
 
 
 def _print_backups(snapshots, config_path: Path, *, as_json: bool) -> int:
@@ -1999,7 +2134,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_machine=args.target_machine,
                 resolutions_path=Path(args.resolutions).expanduser().resolve() if args.resolutions else None,
                 scope=scope,
-                conflict_policy=args.conflict_policy,
+                conflict_policy=args.conflict_policy, direction=args.direction,
             )
             counts: dict[str, int] = {}
             for item in plan.items:
@@ -2345,64 +2480,9 @@ def main(argv: list[str] | None = None) -> int:
                         "Waiting for the cloud: "
                         + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
                     ),
-                    conflict_policy=args.conflict_policy,
+                    conflict_policy=args.conflict_policy, direction=args.direction,
                 )
-                print(f"Handoff finished on {result.machine}.")
-                print(f"  loaded from: {', '.join(result.taken) or 'nothing new'}")
-                print(f"  files written: {result.sync_actions}, chats written: {result.session_actions}")
-                if result.chats_decided_by_rule:
-                    print(
-                        f"  chats changed on both machines, decided by [conflict] policy: "
-                        f"{result.chats_decided_by_rule} (the copy not kept is in the conflict bundle)"
-                    )
-                if result.new_chats_written:
-                    print(
-                        f"  chats new to this machine written into Codex: {result.new_chats_written} "
-                        "(start Codex, then `doctor` says whether it lists them: session_visibility)"
-                    )
-                if result.new_chats_kept_in_cloud:
-                    print(
-                        f"  chats new to this machine kept in the cloud copy: {result.new_chats_kept_in_cloud} "
-                        '(set [semantic] new_chats = "same_path" to copy them into Codex)'
-                    )
-                others = result.chats_not_loaded - result.new_chats_kept_in_cloud
-                if others > 0:
-                    print(
-                        f"  other chats left in the cloud copy only: {others} "
-                        "(`sessions scan` says why for each)"
-                    )
-                print(
-                    f"  projects added: {result.projects_added}, project list changes: {result.project_changes}"
-                )
-                if result.projects_missing_folders:
-                    print(
-                        f"  added projects whose folder does not exist here: {result.projects_missing_folders} "
-                        "(create the folder, or add a [[path_mappings]] rule)"
-                    )
-                if result.chat_names_set or result.chat_names_kept or result.chat_names_waiting:
-                    print(
-                        f"  chat names taken from other machines: {result.chat_names_set}"
-                        f" (named differently here, kept: {result.chat_names_kept};"
-                        f" waiting for Codex to list the chat: {result.chat_names_waiting})"
-                    )
-                if result.project_files_behind:
-                    print("  project folders that did not come along (`projects files` lists every file):")
-                    _print_project_files(result.project_files_behind, limit=20, indent="    ")
-                if result.chats_codex_will_list:
-                    print(
-                        f"  chats Codex lists after its next start: {result.chats_codex_will_list} "
-                        "(it rebuilds its chat list from the files; that start takes longer)"
-                    )
-                if result.chats_codex_ignores:
-                    print(
-                        f"  chat files Codex still does not list after rebuilding: {result.chats_codex_ignores} "
-                        "(the files are in place; `sessions catalogue` lists them)"
-                    )
-                for name in result.steps_not_done:
-                    print(f"  not done this time, the next sync tries again (the log says why): {name}")
-                print(
-                    "  handed off: " + (result.record.handoff_id if result.handed_off else "nothing new")
-                )
+                _print_handoff_result(result)
                 return int(ExitCode.OK)
             watch_handoff(config_path)
             return int(ExitCode.OK)
@@ -2438,11 +2518,16 @@ def main(argv: list[str] | None = None) -> int:
             return int(ExitCode.OK)
 
         if args.command == "sync":
+            scope = args.scope or load_config(config_path).sync.scope
+            if scope == "full":
+                return _run_full_sync(args, config_path)
+            if args.apply and close_codex_for_sync(config_path):
+                print("Codex was open and quit when asked ([sync] close_codex).")
             ctx = build_context(
                 config_path,
                 manual_terminate_confirmation_override=args.manual_terminate_confirmation_override,
                 enforce_safety=True,
-                conflict_policy=args.conflict_policy,
+                conflict_policy=args.conflict_policy, direction=args.direction,
             )
             dry_run = ctx.config.sync.dry_run_default
             if args.dry_run:

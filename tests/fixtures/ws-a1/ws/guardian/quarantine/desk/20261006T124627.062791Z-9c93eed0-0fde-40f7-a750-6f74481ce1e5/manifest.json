@@ -1,0 +1,18 @@
+{
+  "binding_count": 0,
+  "category": "INDETERMINATE",
+  "created_at_utc": "2026-10-06T12:46:27.112787Z",
+  "drop_key": "fb661537dc061f3dcd32220b4b0298909fbd53d15cf35926d3e30af8575fca62",
+  "event_id": "20261006T124627.062791Z-9c93eed0-0fde-40f7-a750-6f74481ce1e5",
+  "explanation": "Guardian validation rejected the source state.",
+  "first_event_id": null,
+  "machine_id": "desk",
+  "occurrences": 1,
+  "payload_saved": true,
+  "project_count": 0,
+  "reason_codes": [
+    "BASELINE_SCHEMA_MISMATCH"
+  ],
+  "sha256": "e799b63eac2c4b817d96a7f46846b6ab4e69e5aa6b2d3608d0b86a3f887de824",
+  "source_size": 178
+}

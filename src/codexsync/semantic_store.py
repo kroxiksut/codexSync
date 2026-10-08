@@ -348,7 +348,9 @@ class SemanticStore:
         conflicts = self.root / "conflicts"
         destination = conflicts / conflict_id
         for candidate in (destination, conflicts / legacy_id):
-            if _bundle_holds(candidate, left_hash, right_hash):
+            # The id sorts the pair, so the other machine's bundle of this same
+            # conflict holds its own branch on the left.
+            if _bundle_holds(candidate, left_hash, right_hash) or _bundle_holds(candidate, right_hash, left_hash):
                 return candidate
         if destination.is_dir():
             if (destination / "COMMITTED").exists():

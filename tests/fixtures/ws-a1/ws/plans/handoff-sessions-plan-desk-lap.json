@@ -1,0 +1,60 @@
+{
+  "canonical_version": "canonical-json-v1",
+  "codes": [
+    "RESOLVED_BY_RULE",
+    "RULE_NEWER",
+    "MIRROR_DESTINATION"
+  ],
+  "conflict_rule": "newer",
+  "created_at_utc": "2026-10-06T12:46:23.531682Z",
+  "format": "codexsync-session-transfer-v1",
+  "items": [
+    {
+      "action": "NOOP",
+      "codes": [],
+      "conflict_id": null,
+      "local_records": 2,
+      "local_sha256": "79b3b3551ba1ebde4f23d7c8264da50aa06b1242e2d3f018f8708b860731558d",
+      "relation": "IDENTICAL",
+      "remote_records": 2,
+      "remote_sha256": "79b3b3551ba1ebde4f23d7c8264da50aa06b1242e2d3f018f8708b860731558d",
+      "session_hash": "01c8993bbf071bb6de02a56ce56d4228dd1eac434a7c9bd125d0a09441df4db2",
+      "target_relative_path": null
+    },
+    {
+      "action": "NOOP",
+      "codes": [],
+      "conflict_id": null,
+      "local_records": 2,
+      "local_sha256": "c33086229fd82d3c2151ef73f293a675905ccdf821c84a2f6430ebc2beb59625",
+      "relation": "IDENTICAL",
+      "remote_records": 2,
+      "remote_sha256": "c33086229fd82d3c2151ef73f293a675905ccdf821c84a2f6430ebc2beb59625",
+      "session_hash": "8733bbbaad853565676bcf3fe93b9744ad1b2f549b5f0e32120649a3c773e4be",
+      "target_relative_path": null
+    },
+    {
+      "action": "FAST_FORWARD_REMOTE",
+      "codes": [
+        "RESOLVED_BY_RULE",
+        "RULE_NEWER",
+        "MIRROR_DESTINATION"
+      ],
+      "conflict_id": "9a6d4688d1531174c610f352b55408abfde9ac55705073bffb7c530837730b4d",
+      "local_records": 3,
+      "local_sha256": "30ec42590832ce429026c7daa11a7db98e56748388783a654831418b3fcb2303",
+      "relation": "DIVERGED",
+      "remote_records": 3,
+      "remote_sha256": "867d1a1a41526208747dfce36e785c249cd450eaf434b854629fa70797b88142",
+      "session_hash": "346091ac0dc719f25bc53da994bc62a9183ee68fa87f67730bc1c2a0ddadb499",
+      "target_relative_path": "sessions/2026/10/01/rollout-2026-10-01T09-00-00-0199a1a1-0000-7000-8000-00000000000c.jsonl.xz"
+    }
+  ],
+  "layout_id": "codex-same-relative-path-v1",
+  "mirror_layout_id": "codexsync-mirror-xz-v1",
+  "plan_id": "36921c5525962ca7bbba6d939e13ed676c721224ff20b07a2a774e4cc7663515",
+  "source_machine": "desk",
+  "target_machine": "lap",
+  "version": 1,
+  "volatile": false
+}

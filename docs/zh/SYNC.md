@@ -20,6 +20,12 @@ codexsync -c config.toml sync --apply      # 真正的同步
 不带参数的 `sync` 遵循 `sync.dry_run_default`（模板中为 `true`），因此真正的同步
 始终需要 `--apply`。
 
+**`sync` 同步什么**由 `[sync] scope` 决定。设为 `full`（默认）时，它就是窗口里的“同步”：
+设置文件、对话和项目——与 [`handoff sync`](#在电脑之间交接工作) 是同一次运行，试运行会构建
+其中每一个计划。设为 `settings` 时，只复制 `targets.include_roots` 下的文件，也就是
+0.2 之前 `sync` 所做的全部。`--scope` 只对一次运行生效，`--direction`（`bidirectional`、`to_cloud`、`to_local`）则在一次运行中替代 `sync.direction`——“同步”按钮旁的「本次运行」下拉框作用相同。登录时的任务运行的是 `sync`，
+因此遵循同一设置。
+
 在 Codex 开着时构建的计划会被标记为 `volatile`，只是预览：`sync --apply` 会在写入的
 那一刻重新构建它的计划。
 

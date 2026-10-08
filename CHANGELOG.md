@@ -2,14 +2,97 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.2.0] - Unreleased
+## [0.2.0a1] - 2026-10-08
 
-The window, Guardian, a safety spine for every mutation, machine handoff
-repair, semantic session transfer and chats. Every build reports its own
-version through `codexsync.__version__`, which is read from installed package
-metadata.
+**The first alpha of 0.2.** codexSync now hands your Codex work between
+machines as one guarded step — settings, chats, chat names and projects — and
+comes with a window next to the command line.
+
+This is an alpha because 0.2 substantially expands the state that codexSync
+understands and modifies. The safety model is intentional and tested, but wider
+real-world validation across Codex installations and machine handoffs is still
+needed. "Alpha" does not mean it barely runs: it is in daily use on Windows,
+and every write still goes through the lock, journal and verified backup.
+
+**What is new, in short**
+- The window (`codexsync[gui]`, or `codexsync-gui.exe`) — every screen also has
+  a command, so automation never needs the window.
+- A full sync by default: settings, chats and projects in one run, by hand or
+  on its own when Codex closes; each machine knows what the other handed off.
+- Chats continued on two machines are never merged: one whole copy is kept, by
+  your rule or your choice, and the other is saved.
+- Guardian snapshots of the global state while Codex runs; restore, recovery of
+  interrupted writes, history of every sync, verified copies of `.codex`.
+
+**Install**
+- `pip install --pre "codexsync[gui]"` — pip skips an alpha unless asked, so
+  `pip install -U codexsync` leaves an existing 0.1 install as it is.
+- Windows builds, no Python needed: `codexsync-gui-<tag>-windows-amd64.zip` or
+  `-arm64.zip` (the window, which also runs every command) and
+  `codexsync-<tag>-windows-amd64|arm64|x86.zip` (the command line only).
+- Needs Windows 10 (1809) or later; the window needs x64 or ARM64, since Qt 6
+  has no 32-bit Windows build. With pip: Python 3.11+, and for the window on
+  macOS, macOS 13 or later.
+
+**Upgrading from 0.1.** Configurations written by 0.1 are recognised; a few
+0.1 values are refused by every command that writes, and `config check` /
+`config upgrade` (or the window) shows each change before making it and keeps
+the previous file in `config-history/`. A task the 0.1 scheduler scripts
+installed is named on the Automation page with the command that removes it.
+A machine that has synced with 0.2 should stay on 0.2: 0.1 does not know the
+per-machine baselines, starts over with a sync decided by modification time,
+and its save drops every machine's 0.2 baseline.
+
+**Data written by this alpha stays readable.** Everything 0.2.0a1 writes into
+the workspace — manifests, handoff records, journals, Guardian snapshots, the
+session store — is read by every later alpha and by 0.2.0 (`D-030`).
+
+**Known limits.** Validated in practice Windows → Windows only. On macOS the
+code and CI run, but every write is refused until the process detector has
+been observed against a live Codex. Linux is not supported yet (Codex for Linux
+is in preview). Some Codex behaviours are deliberately left unused until an
+experiment records them:
+[what is not proven yet](https://github.com/kroxiksut/codexSync/blob/main/docs/en/README.md#what-is-not-proven-yet).
+
+**Please try it** if you use Codex on two or more machines, and tell us what
+happened in an [issue](https://github.com/kroxiksut/codexSync/issues/new/choose).
+Never attach real chats, `auth.json`, databases or your `config.toml` — see
+[SECURITY.md](https://github.com/kroxiksut/codexSync/blob/main/SECURITY.md).
 
 ### Added
+- **Builds for ARM64 and 32-bit Windows, and PyPI from the release workflow.**
+  `.github/workflows/release.yml` (was `release-exe.yml`) checks that the tag,
+  `pyproject.toml` and this file name one version (`scripts/release_meta.py`),
+  runs the suite with each build's own interpreter, builds the command line for
+  x64, ARM64 and x86 and the window for x64 and ARM64, checks each exe's
+  version, and only then uploads to PyPI (trusted publishing) and creates the
+  GitHub release — marked pre-release for an alpha, beta or rc tag. The README
+  PyPI shows has its links and pictures pinned to the tag. A rehearsal on a
+  branch builds everything and publishes nothing.
+- **Data written by 0.2.0a1 is a compatibility promise** (`D-030`): a frozen
+  workspace written by this version is part of the suite, and every later
+  version must read it.
+- **A sync can ask Codex to quit first** (`[sync] close_codex`, off by default,
+  on the Automation page; `D-029`). When a sync — the button, the sign-in task,
+  `codexsync sync` — finds Codex open, it asks the app to quit the way Windows
+  closes an app for an update (the Restart Manager, never its force flag),
+  waits up to a minute, and goes on once Codex is gone; if Codex declines or
+  stays, nothing is written and the sync says why. A Codex CLI in a terminal is
+  never closed, and the handoff watcher and dry runs never ask. Proven on
+  Windows; off on macOS until seen on a Mac. 0.1's forced `taskkill` is not back.
+- **A direction for one run.** `--direction` on `sync`, `handoff sync` and
+  `sessions scan`, and a *This run* box beside *Synchronise*, override
+  `sync.direction` once — files and chats alike.
+- **A task left by 0.1 is named.** The 0.1 scheduler scripts installed a task
+  (`codexSyncSync`, or the LaunchAgent `com.codexsync.sync`) that runs
+  `codexsync sync` on its own timer — in 0.2 a settings-only sync, so it carried
+  no chat and nothing said so. `automation status` and the Automation page now
+  name it with the command that removes it; it is never removed for you.
+- **The macOS process detector can be observed on a GitHub runner**
+  (`.github/workflows/macos-detector.yml`, run by hand): the real Codex CLI is
+  started and the detector must see it, see it go, and tell the desktop app's
+  bundle apart from the ordinary ChatGPT app. Writing on macOS stays refused
+  until a run is recorded in `PROVEN_DETECTORS`.
 - **A security policy and issue forms.** `SECURITY.md` says what counts as a
   security or data-safety problem and how to report it privately (GitHub's
   private reporting is on); the bug form asks for version, install, platform
@@ -449,6 +532,13 @@ metadata.
   The project entry's own `rootPaths` key now settles it in both directions.
 
 ### Changed
+- **`sync` carries everything by default, as it did in 0.1** (`D-028`). With
+  `[sync] scope = "full"` (the default) `codexsync sync` is the window's
+  *Synchronise* — settings files, chats and projects, the same run as
+  `handoff sync` — and its dry run builds every one of those plans and writes
+  nothing. `scope = "settings"` keeps the files-only run; `--scope` chooses for
+  one run. The sign-in task follows the same setting. Chats are carried by the
+  safe transfer, never by copying `sessions/` by modification time.
 - **`conflict.policy` defaults to `prefer_newer_mtime`** (was `manual_abort`),
   and an unattended run follows it instead of forcing `manual_abort`
   (`D-027`, amends `D-016`). Set `manual_abort` to keep the old behaviour.
@@ -502,6 +592,12 @@ metadata.
   termination flow it belonged to.
 
 ### Fixed
+- **A chat decided by the rule on both machines no longer stops every later
+  sync.** The conflict bundle's id sorts the two branches, but finding an
+  existing bundle compared them by position, so the second machine to decide
+  the same conflict — its own branch on the other side — was refused with
+  `FailSafeError` (exit 5) on every sync after. Found by the frozen 0.2.0a1
+  workspace (`D-030`); either order is now accepted.
 
 - **A full sync that had delivered everything could end without telling the
   other machine.** Projects, chat names and the request for Codex to list new

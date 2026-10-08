@@ -176,7 +176,7 @@ interval_seconds = 1800      # 300 (5 min) to 2678400 (31 days); default 1800 (3
 run_at_login = true
 startup_delay_seconds = 0
 jitter_seconds = 0
-sync_at_login = false        # a separate task: sync settings once after sign-in
+sync_at_login = false        # a separate task: one sync after sign-in ([sync] scope decides what)
 ```
 
 ```powershell
@@ -189,17 +189,25 @@ codexsync -c config.toml automation run      # run the configured job once, now
 - The periodic task can run only a safe job: `guardian_snapshot`, `preflight` or
   `sync_dry_run`. A repair, a transfer, a restore or a rollback cannot be
   scheduled, and a scheduled dry run is still refused while Codex is open.
-- **Sync after sign-in** (`sync_at_login = true`, the *Sync settings after
-  signing in* checkbox) is the one exception and is off by default. It installs
-  a second task that runs `sync --apply --unattended` once after you sign in,
-  after `startup_delay_seconds`, and never repeats. It goes through the same
-  checks as a manual sync: it is refused while Codex is open (exit 3), and a
-  conflict is decided by `conflict.policy` as in any run; one the policy leaves
-  open stops it before any write (exit 2). It syncs the settings tree only — sessions
-  are never transferred by a task. If Codex starts with Windows, it will be open
-  by the time the task runs and the sync will simply be skipped; take Codex out
-  of autostart if you want this to work. The window shows the task's last run
-  and what its result meant.
+- **Sync after sign-in** (`sync_at_login = true`, the *Sync after signing in*
+  checkbox) is the one exception and is off by default. It installs a second
+  task that runs `sync --apply --unattended` once after you sign in, after
+  `startup_delay_seconds`, and never repeats. It carries what `[sync] scope`
+  says — everything (settings, chats, projects) by default, or settings files
+  only — and goes through the same checks as a manual sync: a conflict is
+  decided by `conflict.policy` as in any run, and one the policy leaves open
+  stops it before any write (exit 2). If Codex is open it is refused (exit 3),
+  unless Codex may be closed for a sync (next point). The window shows the
+  task's last run and what its result meant.
+- **Closing Codex for a sync** (`[sync] close_codex = true`, the *Close Codex
+  when a sync starts while it is open* checkbox on the Automation page; off by
+  default). Any sync that finds Codex — the ChatGPT app — open asks it to quit
+  first, the way Windows closes an app for an update, and waits up to a minute
+  for it to be gone. It is never forced: if Codex declines or stays, nothing is
+  written and the sync says why. A running agent turn is interrupted, so leave
+  Codex idle; a Codex CLI running in a terminal is never closed; the handoff
+  watcher and dry runs never ask. Proven on Windows; on macOS it stays off until
+  it has been seen to work on a Mac.
 - It is a user-level task — Task Scheduler on Windows, a LaunchAgent on macOS,
   `systemd --user` on Linux — never a service.
 - `automation run` exits like the job would: `0` on success or when another
@@ -209,7 +217,10 @@ codexsync -c config.toml automation run      # run the configured job once, now
 **Deprecated:** `guardian scheduler` and `scripts/scheduler/{windows,macos}` keep
 scheduler settings outside `config.toml` and will be removed. If you installed a
 task with those scripts, uninstall it with them first so that two tasks do not
-run.
+run. `automation status` and the Automation page name such a task (the default
+`codexSyncSync`, the LaunchAgent `com.codexsync.sync`, or any task that runs
+`run-codexsync`) with the command that removes it: it runs `codexsync sync`,
+which in 0.2 carries settings only, never chats. It is never removed for you.
 
 **One task per account, and an executable that moved.** The Windows task is
 registered as `CodexSync Job (<user>)` in the `\CodexSync\` folder: before

@@ -69,6 +69,8 @@ class SyncModel(Model):
         #: rebuilds the widgets without losing the view the user set up.
         self.search = ""
         self.direction = "all"
+        #: This run's direction; "" follows `[sync] direction` in the config.
+        self.run_direction = ""
         self.root = ""
         self.view = "plan"
         self.history: Outcome | None = None
@@ -90,7 +92,20 @@ class SyncScreen(Screen):
         self.dry_button.clicked.connect(lambda: self.start_run(dry_run=True))
         self.apply_button = button(self.t("sync.apply"), primary=True)
         self.apply_button.clicked.connect(lambda: self.start_run(dry_run=False))
-        self.body.addLayout(row(self.check_button, self.dry_button, self.apply_button))
+        # A choice for this run only, over the setting: "this machine wrote
+        # nothing, only send" is a decision about today, not a new rule.
+        self.run_direction = QComboBox()
+        self.run_direction.addItem(self.t("sync.run_direction.config"), "")
+        for value in RUN_DIRECTIONS:
+            self.run_direction.addItem(self.t(f"settings.choice.sync.direction.{value}"), value)
+        self.run_direction.setCurrentIndex(max(0, self.run_direction.findData(self.model.run_direction)))
+        self.run_direction.currentIndexChanged.connect(
+            lambda _index: setattr(self.model, "run_direction", self.run_direction.currentData() or "")
+        )
+        self.body.addLayout(row(
+            self.check_button, self.dry_button, self.apply_button,
+            label(self.t("sync.run_direction.label"), "muted"), self.run_direction,
+        ))
         self.caption = label(self.t("sync.caption"), "muted", wrap=True)
         self.body.addWidget(self.caption)
 
@@ -294,14 +309,18 @@ class SyncScreen(Screen):
                 # A real run -- finished or not -- may have left a journal.
                 model.history = None
 
+        direction = self.model.run_direction or None
         if dry_run:
-            self.run(lambda: controller.sync(dry_run=True), apply)
+            self.run(lambda: controller.sync(dry_run=True, direction=direction), apply)
             return
         # The real thing is the full sync the handoff runs (CS-334): settings,
         # then chats, then projects, one confirmation for all of it -- a button
         # called "Synchronise" that left the chats and the project list behind
         # is how a laptop ended up with its own sidebar after a sync.
-        self.host.run(self.page, lambda progress=None: controller.handoff_now(progress=progress), apply, progress=True)
+        self.host.run(
+            self.page, lambda progress=None: controller.handoff_now(progress=progress, direction=direction),
+            apply, progress=True,
+        )
 
     def decide(self, policy: str) -> None:
         """Run the full sync again with this run's conflicts decided by ``policy``.
@@ -332,7 +351,9 @@ class SyncScreen(Screen):
                 saved = controller.remember_conflict_policy(policy)
                 if not saved.ok:
                     return saved
-            return controller.handoff_now(progress=progress, conflict_policy=policy)
+            return controller.handoff_now(
+                progress=progress, conflict_policy=policy, direction=self.model.run_direction or None,
+            )
 
         def apply(model: SyncModel, outcome: Outcome) -> None:
             model.run_busy = False
@@ -537,6 +558,9 @@ class SyncScreen(Screen):
 
 #: A full sync stopped on chats a person has to decide (`ChatDecisionsNeeded`).
 DECISIONS_CODE = "CHAT_DECISIONS_NEEDED"
+#: Directions a run may be given instead of `[sync] direction` (the setting's own values).
+RUN_DIRECTIONS = ("bidirectional", "to_cloud", "to_local")
+
 #: A run refused because an earlier journal is still open (`RecoveryPendingError`).
 RECOVERY_CODE = "RECOVERY_PENDING"
 
@@ -588,6 +612,8 @@ def full_sync_notes(screen: Screen, result) -> list[str]:
         notes.append(screen.p("sync.note.names_waiting", result.chat_names_waiting))
     if result.chat_names_kept:
         notes.append(screen.p("sync.note.names_kept", result.chat_names_kept))
+    if getattr(result, "codex_closed", False):
+        notes.append(screen.t("sync.note.codex_closed"))
     # A step after the settings and chats that failed; the handoff still happened.
     for name in getattr(result, "steps_not_done", ()):
         notes.append(screen.t(f"sync.note.not_done.{name}"))

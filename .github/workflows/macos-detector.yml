@@ -1,0 +1,51 @@
+name: macOS process detector
+
+# The observation `docs/dev/experiments/process-detector-macos.md` asks for,
+# on a GitHub macOS runner because the project has no Mac: start the real
+# Codex CLI and check the detector sees it, sees it go, and tells the desktop
+# app's bundle apart from the ordinary ChatGPT app. Run by hand; it installs
+# the Codex CLI from npm, so it is kept out of the hermetic CI.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Detector against a live Codex (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-14]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the Codex CLI and codexSync
+        run: |
+          npm install -g @openai/codex
+          python -m pip install -e .
+          codex --version || true
+
+      - name: Probe the detector
+        run: python scripts/ci/macos_detector_probe.py
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: detector-report-${{ matrix.os }}
+          path: detector-report.json
+          if-no-files-found: warn

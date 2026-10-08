@@ -1,0 +1,32 @@
+{
+  "accepted": {
+    "desk": "8eaf4f33a40045c092475d02815df079"
+  },
+  "entry_digest": "85daccddd805f6a7e271d342532fdee0b156a5aacc796bea474572a7b5ceb88e",
+  "files": {
+    "0cc5e3dea93fe79e45244f3ca6a6bf651d67cb80ba626ac798a3f1b4623d2ed6": {
+      "sha256": "70d9092d569108a2b1627cc041e47266686eb9af3495d4b5c1aace7e87bc4e95",
+      "size": 308
+    },
+    "25ceff07bc5ccc09abc4b72eb6d6c716bd135cb17d99af8df98485c4be5689c8": {
+      "sha256": "5cd529f9d8b7b733d4510b37b71142fbb6e4937e15ac9441b631aa12d3b3f081",
+      "size": 308
+    },
+    "a3c874f0819b1e4e598d362cb928142339004a744e8042d4cf75355363a78198": {
+      "sha256": "ec2dd475ad69bafdce27572b203ab1340df66ff6bdf3fa5dffd03d515afc680d",
+      "size": 332
+    },
+    "f6463587ddac6c616b462d817320b78f09149b46b6f849fb6bb0415819dfdc8e": {
+      "sha256": "5d5e9c58e9d2b2d035433e4412dcbd500b823aa68f510f0dde4d9c0807e928de",
+      "size": 18
+    }
+  },
+  "format": "codexsync-handoff-v1",
+  "generation": 2,
+  "handed_off_at_utc": "2026-10-06T12:46:24Z",
+  "handoff_id": "91f436d24e3f47e29f5690d7a038be04",
+  "machine": "lap",
+  "producer_version": "codexsync-0.2.0a1",
+  "state": "handed_off",
+  "state_since_utc": "2026-10-06T12:46:24Z"
+}

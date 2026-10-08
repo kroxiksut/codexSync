@@ -1,0 +1,13 @@
+{
+  "committed": true,
+  "entries": [
+    {
+      "relative_path": "sessions/2026/10/01/rollout-2026-10-01T09-00-00-0199a1a1-0000-7000-8000-00000000000c.jsonl.xz",
+      "sha256": "ae3b7289ebe6b1a7a63fd30de0daa805f2e5636a7f598ad9875a8a4ed399b10f",
+      "side": "cloud",
+      "size": 304
+    }
+  ],
+  "format": "codexsync-backup-v1",
+  "snapshot": "desk-20261006T124622Z-52601028bbb9"
+}

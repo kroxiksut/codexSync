@@ -124,7 +124,9 @@ The cloud → local and local → cloud plan.
   chats, projects added — when it ends. The plan and the dry run cover the
   settings files.
 - Search, direction and folder filters change only what is shown: a sync always
-  applies the whole plan.
+  applies the whole plan. **This run** beside the buttons is different: it sets
+  the direction of the next dry run or sync only (`--direction` on the command
+  line), and *direction as in Settings* returns to the setting.
 - Files changed on both sides are listed as conflicts and decided by
   [`conflict.policy`](SYNC.md#conflicts). A sync that stopped on a conflict
   of a file or a chat offers *Keep the newer copies*, *Keep this machine's* and
@@ -272,8 +274,11 @@ removes what is off.
   never a write; its interval, start after sign-in and random delay; whether the
   installed task matches the config, its last and next run, and what the last
   exit code meant. **Run now** runs the job in the window.
-- **After signing in** — the delay for everything that starts at sign-in, and
-  the one-time settings sync.
+- **After signing in** — the delay for everything that starts at sign-in, the
+  one-time sync, and **Close Codex when a sync starts while it is open**
+  (`[sync] close_codex`): Codex is asked to quit the way Windows closes an app
+  for an update, never forced; if it does not quit, nothing is written. See
+  [Configuration](CONFIGURATION.md#automation).
 - **Copies of `.codex`** — the folder (your choice; nothing is proposed), a copy
   after signing in and/or every N hours, how many to keep, the copies that
   exist, and **Make a copy now**, which is refused while Codex is open: the task

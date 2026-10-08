@@ -49,6 +49,10 @@ PERIODIC_FIELDS: tuple[Field, ...] = (
 LOGIN_FIELDS: tuple[Field, ...] = (
     Field("scheduler", "startup_delay_seconds", "int", 0, maximum=24 * 3600),
     Field("scheduler", "sync_at_login", "bool", False),
+    # Where automation is set up is where this choice has to be seen (D-029):
+    # it decides what happens when a sync -- this task's or anyone's -- finds
+    # Codex open.
+    Field("sync", "close_codex", "bool", False),
 )
 BACKUP_FIELDS: tuple[Field, ...] = (
     Field("state_backup", "root_dir", "path", ""),
@@ -515,6 +519,9 @@ class AutomationScreen(ConfigFormScreen):
         if view.ignored:
             names = ", ".join(self.t(f"settings.field.scheduler.{name}") for name in view.ignored)
             lines.append(self.t("automation.ignored", settings=names))
+        # A task 0.1 installed: named with the command that removes it, never touched.
+        for task in getattr(view, "legacy_tasks", ()):
+            lines.append(self.t("automation.task.legacy_01", name=task.name, command=task.remove_command))
         self.task_details.setText("\n".join(lines))
         self.task_command.setText(" ".join(quote_part(part) for part in view.argv))
         self.task_command.setVisible(True)

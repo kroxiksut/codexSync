@@ -1,0 +1,29 @@
+{
+  "electron-main-window-bounds": {
+    "x": 10,
+    "y": 10
+  },
+  "local-projects": {
+    "beta": {
+      "createdAt": 1,
+      "id": "beta",
+      "name": "Project beta",
+      "rootPaths": [
+        "D:\\Projects\\codexSync\\test-sandbox\\a1\\proj\\beta"
+      ],
+      "updatedAt": 2
+    }
+  },
+  "project-order": [
+    "beta"
+  ],
+  "pinned-project-ids": [
+    "beta"
+  ],
+  "thread-project-assignments": {
+    "0199a1a1-0000-7000-8000-00000000000b": {
+      "projectKind": "local",
+      "projectId": "beta"
+    }
+  }
+}

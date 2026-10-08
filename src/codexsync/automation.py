@@ -14,6 +14,7 @@ cannot disagree about what the job does.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,11 +30,13 @@ from .system_scheduler import (
     STATE_BACKUP_MODE,
     STATE_BACKUP_SLOT,
     JobDefinition,
+    LegacyTask,
     ScheduledJob,
     SchedulerError,
     SchedulerStatus,
     SystemScheduler,
     default_protected_roots,
+    find_01_tasks,
     job_command,
     system_scheduler,
 )
@@ -76,6 +79,9 @@ class AutomationView:
     handoff_argv: tuple[str, ...] = ()
     handoff_status: SchedulerStatus | None = None
     handoff_status_error: str | None = None
+    #: Tasks the 0.1 scheduler scripts installed, still running `codexsync sync`
+    #: on their own timer; found so they can be named, never touched.
+    legacy_tasks: tuple[LegacyTask, ...] = ()
 
     @property
     def backup_scheduled(self) -> bool:
@@ -159,9 +165,17 @@ def automation_status(
     login_scheduler: SystemScheduler | None = None,
     backup_scheduler: SystemScheduler | None = None,
     handoff_scheduler: SystemScheduler | None = None,
+    find_legacy: Callable[[], tuple[LegacyTask, ...]] | None = None,
 ) -> AutomationView:
-    """What `[scheduler]` asks for, and what the OS actually has. Reads only."""
+    """What `[scheduler]` asks for, and what the OS actually has. Reads only.
+
+    Tasks 0.1 installed are looked for only against the real OS: with the
+    adapters injected (a test) and no ``find_legacy``, none are reported, so a
+    fake scheduler never comes with a real PowerShell call beside it.
+    """
     _require_all(scheduler, login_scheduler, backup_scheduler, handoff_scheduler)
+    if find_legacy is None:
+        find_legacy = find_01_tasks if scheduler is None else (lambda: ())
     cfg = load_config(config_path)
     login_definition = login_sync_definition(cfg, config_path)
     login_status: SchedulerStatus | None = None
@@ -229,6 +243,7 @@ def automation_status(
         handoff_argv=tuple(watcher_definition.argv()),
         handoff_status=watcher_status,
         handoff_status_error=watcher_error,
+        legacy_tasks=find_legacy(),
     )
 
 
@@ -323,6 +338,8 @@ def apply_automation(
     return automation_status(
         config_path, scheduler=adapter, login_scheduler=login_adapter, backup_scheduler=backup_adapter,
         handoff_scheduler=handoff_adapter,
+        # The real OS was asked above only when nothing was injected.
+        find_legacy=find_01_tasks if scheduler is None else None,
     )
 
 

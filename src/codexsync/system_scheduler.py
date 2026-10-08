@@ -1757,7 +1757,113 @@ def _normalise_unit_text(text: str) -> list[str]:
     return [line.rstrip() for line in text.replace("\r\n", "\n").strip().split("\n")]
 
 
+
+# --- what 0.1 installed ----------------------------------------------------------
+
+#: The task `scripts/scheduler/windows/install-task.ps1` registered in 0.1, and
+#: the LaunchAgent label `scripts/scheduler/macos/install-launchd.sh` used. Both
+#: ran `codexsync sync` on a timer, with their settings outside `config.toml`.
+#: Under 0.2 that is a settings-only sync -- chats are carried by `handoff sync`
+#: -- so such a task keeps running and carries no chat, and nothing says so
+#: unless it is found. Found by its default name, or by the runner script it
+#: calls, since the name was editable. Never written or removed by this version.
+LEGACY_01_WINDOWS_TASK = "codexSyncSync"
+LEGACY_01_LAUNCHD_LABEL = "com.codexsync.sync"
+_LEGACY_01_RUNNERS = ("run-codexsync.ps1", "run-codexsync.sh")
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyTask:
+    """A scheduled task left by 0.1, and the command that removes it."""
+
+    name: str
+    remove_command: str
+
+
+def find_01_tasks(
+    platform: str | None = None,
+    *,
+    run: Runner = _default_run,
+    home: Path | None = None,
+) -> tuple[LegacyTask, ...]:
+    """Tasks the 0.1 scheduler scripts installed for this user. Reads only.
+
+    A failure to look is an empty answer, never an error: this is advice
+    printed beside the real status, and a broken query must not hide that.
+    """
+    try:
+        key = _platform_key(platform)
+    except ValueError:
+        return ()
+    if key == "windows":
+        return _find_01_windows(run)
+    if key == "macos":
+        return _find_01_launchd(home if home is not None else Path.home())
+    return ()  # 0.1 shipped no Linux scripts
+
+
+def _find_01_windows(run: Runner) -> tuple[LegacyTask, ...]:
+    # Task Scheduler's own objects, not `schtasks` columns: those are localized.
+    script = (
+        "$ErrorActionPreference='Stop'; "
+        "@(Get-ScheduledTask | Where-Object { $t = $_; "
+        f"$t.TaskName -eq '{LEGACY_01_WINDOWS_TASK}' -or "
+        "($t.Actions | Where-Object { \"$($_.Execute) $($_.Arguments)\" -match 'run-codexsync\\.ps1' }) "
+        "} | Select-Object TaskPath,TaskName) | ConvertTo-Json -Compress"
+    )
+    powershell = _windows_tool("WindowsPowerShell\\v1.0\\powershell.exe", "powershell")
+    try:
+        result = _invoke(run, [powershell, "-NoProfile", "-NonInteractive", "-Command", script])
+    except (OSError, SchedulerError):
+        return ()
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return ()
+    try:
+        rows = json.loads(result.stdout)
+    except ValueError:
+        return ()
+    if isinstance(rows, dict):
+        rows = [rows]
+    found = []
+    for row in rows if isinstance(rows, list) else ():
+        if not isinstance(row, dict) or not row.get("TaskName"):
+            continue
+        name = f"{row.get('TaskPath') or chr(92)}{row['TaskName']}"
+        found.append(LegacyTask(name, f'schtasks /Delete /TN "{name}" /F'))
+    return tuple(sorted(found, key=lambda item: item.name))
+
+
+def _find_01_launchd(home: Path) -> tuple[LegacyTask, ...]:
+    agents = home / "Library" / "LaunchAgents"
+    try:
+        candidates = sorted(agents.glob("*.plist"))
+    except OSError:
+        return ()
+    found = []
+    for plist in candidates:
+        try:
+            data = plist.read_bytes()
+        except OSError:
+            continue
+        if plist.name != f"{LEGACY_01_LAUNCHD_LABEL}.plist" and not any(
+            runner.encode() in data for runner in _LEGACY_01_RUNNERS
+        ):
+            continue
+        try:
+            label = str(plistlib.loads(data).get("Label") or plist.stem)
+        except Exception:  # noqa: BLE001 - a plist we cannot parse is still named by its file
+            label = plist.stem
+        found.append(LegacyTask(
+            str(plist), f'launchctl bootout "gui/$(id -u)/{label}" && rm "{plist}"',
+        ))
+    return tuple(found)
+
+
 __all__ = [
+    "LEGACY_01_LAUNCHD_LABEL",
+    "LEGACY_01_WINDOWS_TASK",
+    "LegacyTask",
+    "find_01_tasks",
     "HANDOFF_MODE",
     "HANDOFF_SLOT",
     "JOB_MODES",

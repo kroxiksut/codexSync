@@ -1,0 +1,46 @@
+{
+  "canonical_version": "canonical-json-v1",
+  "codes": [],
+  "conflict_rule": "newer",
+  "created_at_utc": "2026-10-06T12:46:15.479613Z",
+  "format": "codexsync-session-transfer-v1",
+  "items": [
+    {
+      "action": "FAST_FORWARD_REMOTE",
+      "codes": [
+        "SESSION_ON_ONE_SIDE_ONLY",
+        "MIRROR_DESTINATION"
+      ],
+      "conflict_id": null,
+      "local_records": 2,
+      "local_sha256": "79b3b3551ba1ebde4f23d7c8264da50aa06b1242e2d3f018f8708b860731558d",
+      "relation": "FAST_FORWARD_REMOTE",
+      "remote_records": 0,
+      "remote_sha256": "",
+      "session_hash": "01c8993bbf071bb6de02a56ce56d4228dd1eac434a7c9bd125d0a09441df4db2",
+      "target_relative_path": "sessions/2026/10/01/rollout-2026-10-01T09-00-00-0199a1a1-0000-7000-8000-00000000000a.jsonl.xz"
+    },
+    {
+      "action": "FAST_FORWARD_REMOTE",
+      "codes": [
+        "SESSION_ON_ONE_SIDE_ONLY",
+        "MIRROR_DESTINATION"
+      ],
+      "conflict_id": null,
+      "local_records": 2,
+      "local_sha256": "f2eb0625a61bb45c47747f11e1b4664d02da1fddf9c9f2428f21c8be1b2be97f",
+      "relation": "FAST_FORWARD_REMOTE",
+      "remote_records": 0,
+      "remote_sha256": "",
+      "session_hash": "346091ac0dc719f25bc53da994bc62a9183ee68fa87f67730bc1c2a0ddadb499",
+      "target_relative_path": "sessions/2026/10/01/rollout-2026-10-01T09-00-00-0199a1a1-0000-7000-8000-00000000000c.jsonl.xz"
+    }
+  ],
+  "layout_id": "codex-same-relative-path-v1",
+  "mirror_layout_id": "codexsync-mirror-xz-v1",
+  "plan_id": "3172c432aebff8874bbc6ca100e050342f1b50754ebf5751ab31cea91c107f42",
+  "source_machine": "desk",
+  "target_machine": "desk",
+  "version": 1,
+  "volatile": false
+}

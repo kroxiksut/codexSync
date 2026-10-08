@@ -32,7 +32,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `config history` | no | Saved versions of `config.toml` | [below](#the-window-from-the-console) |
 | `doctor` / `preflight` | no | Environment diagnostics; identical and side-effect free | [below](#getting-started) |
 | `plan` | no | Show what a sync would copy (marked `volatile` if Codex is open) | [Sync](SYNC.md) |
-| `sync` | **yes** | Copy state both ways, backup first | [Sync](SYNC.md) |
+| `sync` | **yes** | Settings, chats and projects, as *Synchronise* does (`[sync] scope`; `--scope settings` copies files only; `--direction` for one run), backup first | [Sync](SYNC.md) |
 | `restore` | **yes** | Restore files from a verified backup | [Recovery](RECOVERY.md#restoring-a-backup) |
 | `guardian watch` | no | Keep taking snapshots of the global state while Codex runs | [Guardian](GUARDIAN.md) |
 | `guardian snapshot --once` | no | Take one snapshot now | [Guardian](GUARDIAN.md) |
