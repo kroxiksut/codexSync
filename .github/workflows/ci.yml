@@ -6,15 +6,19 @@ on:
       - main
   pull_request:
 
+# Linux is experimental (D-031): its jobs run on every push, but a red one
+# does not fail the run, until the Linux process detector has been observed
+# against a live Codex and recorded in PROVEN_DETECTORS.
 jobs:
   test:
-    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}${{ matrix.os == 'ubuntu-latest' && ' (experimental)' || '' }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Checkout
@@ -37,18 +41,27 @@ jobs:
   # therefore skips every GUI test. This one installs the optional extra and
   # runs them headless, so the window cannot break unnoticed.
   gui:
-    name: GUI on ${{ matrix.os }}
+    name: GUI on ${{ matrix.os }}${{ matrix.os == 'ubuntu-latest' && ' (experimental)' || '' }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     env:
       QT_QPA_PLATFORM: offscreen
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Even offscreen, Qt loads EGL, xkbcommon, fontconfig and D-Bus, which a
+      # bare runner image need not carry.
+      - name: Qt libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
 
       - name: Setup Python
         uses: actions/setup-python@v5

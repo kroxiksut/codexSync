@@ -5,7 +5,7 @@
 <h1 align="center">codexSync</h1>
 
 <p align="center">
-  Move your Codex work safely between personal machines — chats, projects,
+  Move your Codex work safely between personal machines — chats, project lists,
   configuration and local state — with guarded handoff, conflict handling,
   verified backups and recovery.
 </p>
@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
-  <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13">
+  <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform: Windows | macOS">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Runtime dependencies: 0">
   <img src="https://img.shields.io/badge/GUI-PySide6%2C%20optional-41CD52?logo=qt&logoColor=white" alt="GUI: PySide6, optional">
@@ -41,12 +41,14 @@ state as a guarded handoff, not as ordinary file synchronisation.
 ## What it does
 
 - **Hands your work over between machines** — one click, or on its own when
-  Codex closes: settings, chats and projects go to the cloud folder, the next
+  Codex closes: settings, chats and the project list go to the cloud folder, the next
   machine loads them, and each knows what the other handed off.
   → [Synchronisation](docs/en/SYNC.md#handing-work-over)
 - **Carries chats and projects** — chat history, chat names and project
   bindings arrive where Codex looks for them, even when a project folder has
-  another path on the other machine. → [Projects and chats](docs/en/PROJECTS.md)
+  another path on the other machine. A project's own files are not copied: a
+  full sync compares the folders and says what is missing.
+  → [Projects and chats](docs/en/PROJECTS.md)
 - **Never merges two histories** — every session branch is classified; a chat
   continued on both machines keeps one whole copy, by your rule or your choice,
   and the other is saved. → [Sessions](docs/en/SESSIONS.md)
@@ -57,7 +59,8 @@ state as a guarded handoff, not as ordinary file synchronisation.
 - **Can run on its own** — the handoff watcher, copies of `.codex` and periodic
   snapshots are ordinary tasks of your OS. → [Automation](docs/en/CONFIGURATION.md#automation)
 
-Neither an integration with Codex internals nor a real-time sync:
+Not a Codex client and not a real-time sync. It never terminates Codex by
+force, and edits Codex's databases only in two narrow, backed-up ways:
 [what it does not do](docs/en/README.md#what-it-does-not-do).
 
 ## Privacy and safety
@@ -81,13 +84,15 @@ unpack it and run `codexsync-gui.exe`. The same executable can also run CLI
 subcommands. Windows 10 (1809) or later.
 
 **With Python 3.11+**, on Windows or macOS — `--pre` while 0.2 is an alpha,
-or pip installs 0.1:
+or pip installs 0.1, and `--upgrade` so that an installed 0.1 is replaced too.
+On macOS every read and plan works, but writes are refused until the process
+detector is proven there ([platforms](docs/en/README.md#platforms)):
 
 ```powershell
-pip install --pre "codexsync[gui]"    # the window and the command line
-codexsync-gui                         # on first launch, the window helps you create or open config.toml
+python -m pip install --upgrade --pre "codexsync[gui]"    # the window and the command line
+codexsync-gui                                             # on first launch, the window helps you create or open config.toml
 
-pip install --pre codexsync           # the command line only, no dependencies
+python -m pip install --upgrade --pre codexsync           # the command line only, no dependencies
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
@@ -100,7 +105,7 @@ From source, and the first run step by step:
 | | |
 |---|---|
 | [Overview](docs/en/README.md) | How it works, install, first run, design principles, platforms |
-| [The window](docs/en/GUI.md) | All eleven screens with screenshots |
+| [The window](docs/en/GUI.md) | All thirteen screens with screenshots |
 | [Command line](docs/en/CLI.md) | Every command, global options, exit codes |
 | [Configuration](docs/en/CONFIGURATION.md) | `config.toml` section by section, automation |
 | [Synchronisation](docs/en/SYNC.md) | `plan` and `sync`: comparison, conflicts, direction, deletions |

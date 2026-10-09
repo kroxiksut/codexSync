@@ -385,8 +385,8 @@ def _blocking_findings(document: dict[str, Any]) -> Iterable[ConfigFinding]:
     if process.get("allow_terminate_if_running") is True:
         yield ConfigFinding(
             TERMINATE_FLAG_SET, BLOCKER,
-            "process_detection.allow_terminate_if_running = true: codexSync never stops Codex, "
-            "and every mutating command refuses this config",
+            "process_detection.allow_terminate_if_running = true: codexSync never terminates Codex by force "
+            "([sync] close_codex asks it to quit), and every mutating command refuses this config",
             (ConfigEdit("set", "process_detection", "allow_terminate_if_running", False),),
         )
     backup = _table(document, "backup")

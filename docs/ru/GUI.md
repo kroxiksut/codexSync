@@ -26,10 +26,13 @@
 ## Запуск
 
 ```powershell
-pip install ".[gui]"
+python -m pip install --upgrade --pre "codexsync[gui]"
 codexsync-gui                      # открывает конфигурацию, открытую в прошлый раз
 codexsync-gui -c config.toml       # или: python -m codexsync.gui -c config.toml
 ```
+
+Из исходников вместо этого — `pip install -e ".[gui]"`
+([установка](README.md#установка)).
 
 Без `-c` окно открывает конфигурацию, с которой работало в прошлый раз; если её
 нет — `config.toml` в текущей папке или рядом с исполняемым файлом. Если нет ни

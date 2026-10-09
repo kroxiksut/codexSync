@@ -346,7 +346,7 @@ class DemoController(Controller):
             chat_count=31, total_bytes=148 * 1024 * 1024,
         ))
 
-    def scan_sessions(self, *, source_machine, target_machine, progress=None) -> Outcome:
+    def scan_sessions(self, *, source_machine, target_machine, progress=None, conflict_policy=None) -> Outcome:
         plans = Path(WORKSPACE) / "plans"
         return Outcome(value=SessionScan(
             _transfer_plan(), plans / "sessions.json", plans / "resolutions.json", False,

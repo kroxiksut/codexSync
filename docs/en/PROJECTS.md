@@ -11,7 +11,8 @@ repairing a handoff and moving a project's files. In the window these are the
 [Chat bindings](GUI.md#chat-bindings) and [Projects](GUI.md#projects) screens.
 
 > [!NOTE]
-> Codex also keeps projects in `state_*.sqlite`, which codexSync never writes.
+> Codex also keeps projects in `state_*.sqlite`, and codexSync never modifies
+> those project records.
 > Moving or remapping a project therefore rewrites the root in
 > `.codex-global-state.json` only, and deleting or merging projects is not offered.
 > `doctor` reports this on every run
@@ -98,8 +99,8 @@ codexsync -c config.toml projects sync --confirm-plan <id>    # Codex closed: me
 The write goes through the same envelope as every other change to the global
 state: Codex closed, a verified backup first, and a rollback through
 [`recover`](RECOVERY.md#interrupted-mutations) if anything fails. Codex also
-keeps projects in `state_*.sqlite`, which codexSync never writes; the sidebar
-follows the JSON file.
+keeps projects in `state_*.sqlite`, whose project records codexSync never
+modifies; the sidebar follows the JSON file.
 
 ### Project folders
 

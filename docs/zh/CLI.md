@@ -161,7 +161,9 @@ codexsync -c config.toml backups list
 
 ## 进程安全
 
-- codexSync 从不启动或结束 Codex。旧的「结束进程」开关会以退出码 `4` 被拒绝，对会写入
+- codexSync 从不启动 Codex，也从不强制结束它。设置 `[sync] close_codex = true` 时，同步会请求
+  桌面应用退出，只有在进程检查再也看不到它之后才继续；它没有退出时，同步以退出码 `3` 停止，
+  什么都不写。旧的「结束进程」开关会以退出码 `4` 被拒绝，对会写入
   的命令而言 `allow_terminate_if_running = true` 同样如此。
 - 一次写入要求 Codex 已经连续停止两秒，另加提交前和提交过程中的直接检查。
 - 同一个 Codex 文件夹同一时间只能有一条会写入的命令在工作，不论它是哪一种；第二条会以

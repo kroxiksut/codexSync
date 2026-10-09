@@ -30,7 +30,6 @@ body:
         - codexsync-gui.exe (Windows release, ARM64)
         - codexsync.exe (Windows release, console only, x64)
         - codexsync.exe (Windows release, console only, ARM64)
-        - codexsync.exe (Windows release, console only, 32-bit)
         - pip install codexsync[gui]
         - pip install codexsync
         - from source

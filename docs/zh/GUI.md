@@ -21,10 +21,12 @@
 ## 启动
 
 ```powershell
-pip install ".[gui]"
+python -m pip install --upgrade --pre "codexsync[gui]"
 codexsync-gui                      # 打开上次用过的配置
 codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.toml
 ```
+
+从源码检出安装时，请改用 `pip install -e ".[gui]"`（[安装](README.md#安装)）。
 
 不带 `-c` 时，窗口会打开上次用过的配置；找不到时，则依次尝试当前文件夹和可执行文件旁边
 的 `config.toml`。如果一个都没有，它会停在「首次运行」页面，其他页面则提供打开已有的

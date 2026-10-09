@@ -23,7 +23,8 @@ So this gate exists, and it is empty:
 * **The moves that *are* implemented are narrower than they look.**
   `project_move` and `REMAP_ROOT` rewrite `rootPaths` in the JSON; the matching
   `project_roots.path` row in SQLite keeps the old value, because codexSync
-  does not write SQLite at all. Whether Codex then starts a new chat in the new
+  never writes the project tables (its only SQLite writes are the thread
+  catalogue request and chat names, `D-024`/`D-025`). Whether Codex then starts a new chat in the new
   folder is unverified. It is reported by `doctor` rather than assumed.
 
 `docs/dev/experiments/project-registry-contract.md` says what to run to settle it.
@@ -60,7 +61,7 @@ def registry_note(schema_id: str | None) -> str:
     if proof:
         return f"JSON project registry confirmed for {schema_id}: {proof}"
     return (
-        "Projects also exist in state_*.sqlite, which codexSync never writes. "
+        "Projects also exist in state_*.sqlite, whose project records codexSync never modifies. "
         "Moving or remapping a project rewrites rootPaths in the JSON only; "
         "deleting or merging a project is not offered at all. See "
         "docs/dev/experiments/project-registry-contract.md"

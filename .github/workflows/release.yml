@@ -99,9 +99,10 @@ jobs:
           name: python-dist
           path: dist/*
 
-  # Portable builds. The window needs Qt, and Qt 6 has no 32-bit Windows build,
-  # so x86 gets the command line only. Each build runs the suite with its own
-  # interpreter first: x86 and arm64 are not in the everyday CI matrix.
+  # Portable builds, for the two architectures Codex itself is published for
+  # (x64 and ARM64; there is no 32-bit Codex, so a 32-bit build would have
+  # nothing to sync). Each build runs the suite with its own interpreter first:
+  # arm64 is not in the everyday CI matrix.
   exe:
     name: Windows ${{ matrix.arch }}
     needs: meta
@@ -118,10 +119,6 @@ jobs:
             runner: windows-11-arm
             python_arch: arm64
             gui: true
-          - arch: x86
-            runner: windows-latest
-            python_arch: x86
-            gui: false
     env:
       QT_QPA_PLATFORM: offscreen
     steps:

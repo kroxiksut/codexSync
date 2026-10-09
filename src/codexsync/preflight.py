@@ -194,7 +194,7 @@ def _check_project_registry() -> PreflightCheckResult:
     """Say plainly that a project root is rewritten in the JSON only.
 
     Codex keeps projects in `state_*.sqlite` as well, and codexSync never
-    writes there. Whether the runtime follows a JSON-only root change is
+    modifies those records. Whether the runtime follows a JSON-only root change is
     unverified, so a person deciding to move a project should be told before
     they rely on it, not after.
     """

@@ -24,6 +24,16 @@ title, preview and time do meanwhile, is still an observation. Record it in the
 third table below; a chat that does not show its continuation means `IN_PLACE`
 must be switched off until it is understood.
 
+Since `D-020` a session this machine never held is no longer blocked either, by
+default: `[semantic] new_chats = "same_path"` writes it at the path it has on
+the source machine and waives only the missing catalogue row, and `D-024` asks
+Codex to fill that row itself. That rule rests on the owner's 0.1 observation
+and the laptop run of 2026-10-04, not on this experiment. So what this
+experiment settles today is the *general* placement contract: once it is
+recorded, `PROVEN_LAYOUTS` can replace the special `same_path` rule, or widen
+what is allowed beyond it. `keep_in_cloud` keeps the old behaviour
+(`BLOCKED_UNPROVEN_LAYOUT`) for anyone who wants new chats left in the mirror.
+
 ## Why this cannot be settled by reading code
 
 A session file's path on the source machine records where that branch lived

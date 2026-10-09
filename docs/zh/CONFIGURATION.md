@@ -106,7 +106,8 @@ macOS 上的桌面版构建就叫 `ChatGPT`，而单写一个 `ChatGPT` 会把�
 匹配进来。
 
 `allow_terminate_if_running` 以及其他 `terminate_*` 键是 0.1 遗留下来的。codexSync
-从不结束 Codex，`allow_terminate_if_running = true` 会被拒绝。
+从不强制结束 Codex，`allow_terminate_if_running = true` 会被拒绝。若要让同步请求 Codex 退出，
+请使用下文的 `[sync] close_codex`。
 
 ## 升级来自旧版本的配置
 
@@ -132,7 +133,7 @@ codexsync -c config.toml config upgrade --confirm-plan <id>
 
 | 代码 | 级别 | 含义 |
 |---|---|---|
-| `TERMINATE_FLAG_SET` | 阻止写入 | `allow_terminate_if_running = true`；codexSync 从不结束 Codex |
+| `TERMINATE_FLAG_SET` | 阻止写入 | `allow_terminate_if_running = true`；codexSync 从不强制结束 Codex（见 `[sync] close_codex`） |
 | `SESSION_MODE_LAST_DATE` | 阻止写入 | `session_mode = "last_date_only"` 可能丢掉分支 |
 | `BACKUP_DISABLED` | 阻止写入 | `backup_before_overwrite = false` |
 | `DETECTION_LIST_OUTDATED` | 安全 | 你的列表里缺少本版本已知的 Codex 进程 |

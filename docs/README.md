@@ -13,7 +13,7 @@ English only.
 | Page | What it covers |
 |---|---|
 | [Overview](en/README.md) | How it works, install, first run, design principles, platforms |
-| [The window](en/GUI.md) | All eleven screens with screenshots |
+| [The window](en/GUI.md) | All thirteen screens with screenshots |
 | [Command line](en/CLI.md) | Every command, global options, exit codes |
 | [Configuration](en/CONFIGURATION.md) | `config.toml` section by section, automation |
 | [Synchronisation](en/SYNC.md) | `plan` and `sync`: comparison, conflicts, direction, deletions |

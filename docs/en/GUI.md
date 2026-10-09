@@ -24,10 +24,13 @@ The screenshots show invented demo data. They are rendered offscreen by
 ## Starting it
 
 ```powershell
-pip install ".[gui]"
+python -m pip install --upgrade --pre "codexsync[gui]"
 codexsync-gui                      # opens the config it used last
 codexsync-gui -c config.toml       # or: python -m codexsync.gui -c config.toml
 ```
+
+From a source checkout, use `pip install -e ".[gui]"` instead
+([installing](README.md#install)).
 
 Without `-c`, the window opens the config it used last; failing that, a
 `config.toml` in the current folder or beside the executable. If there is none,

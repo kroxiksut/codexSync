@@ -6,7 +6,7 @@
 
 | 页面 | 内容 |
 |---|---|
-| [窗口](GUI.md) | 全部十一个界面及截图 |
+| [窗口](GUI.md) | 全部十三个界面及截图 |
 | [命令行](CLI.md) | 每条命令、全局选项、退出码 |
 | [配置](CONFIGURATION.md) | 逐节讲解 `config.toml`，以及自动化 |
 | [同步](SYNC.md) | `plan` 与 `sync`：比较、冲突、方向、删除 |
@@ -42,11 +42,11 @@
 ## 安装
 
 内核和命令行没有任何依赖。窗口是可选的附加部分。0.2 处于 alpha 阶段时，pip 需要加 `--pre`；
-不加的话会安装 0.1。
+不加的话会安装 0.1。加上 `--upgrade`，同一条命令也会替换已安装的 0.1。
 
 ```powershell
-pip install --pre "codexsync[gui]"    # 命令行加窗口（PySide6）
-pip install --pre codexsync           # 只装命令行
+python -m pip install --upgrade --pre "codexsync[gui]"    # 命令行加窗口（PySide6）
+python -m pip install --upgrade --pre codexsync           # 只装命令行
 ```
 
 在 Windows 上也可以直接从
@@ -56,9 +56,9 @@ pip install --pre codexsync           # 只装命令行
 | 构建 | Windows |
 |---|---|
 | `codexsync-gui-<tag>-windows-amd64.zip`、`…-arm64.zip` —— 窗口，同时也能运行所有命令 | x64、ARM64 |
-| `codexsync-<tag>-windows-amd64.zip`、`…-arm64.zip`、`…-x86.zip` —— 只有命令行，不含 Qt | x64、ARM64、32 位 |
+| `codexsync-<tag>-windows-amd64.zip`、`…-arm64.zip` —— 只有命令行，不含 Qt | x64、ARM64 |
 
-没有 32 位的窗口版本：Qt 6 没有 32 位 Windows 的构建。
+没有 32 位版本：Codex 本身只为 x64 和 ARM64 发布。
 
 从源码安装，用于开发或尚未发布的改动：
 
@@ -100,8 +100,8 @@ codexsync -c config.toml sync --apply     # Codex 必须已关闭
   运行时行为 —— 每一种都以代码报告出来，而不是近似处理。
 - **先出计划，再按标识确认。** 每条会写入的命令都先给出计划或试运行，并且只执行你
   原样报回的那个计划标识。其间只要有任何变动，标识就不再匹配，也就什么都不会写入。
-- **不与 Codex 的内部实现打交道。** codexSync 从不启动或结束 Codex，不读取令牌，
-  也不写入 SQLite。
+- **只碰 Codex 的文件，并且边界很窄。** codexSync 不使用 Codex API，不读取令牌，
+  从不强制结束 Codex；对 Codex 的 SQLite 只做[它不做什么](#它不做什么)中列出的两处修改。
 - 内核与命令行**零运行时依赖**。
 
 ## 交接流程
@@ -119,9 +119,14 @@ codexSync 假定机器之间有严格的先后顺序：
 
 ## 它不做什么
 
-- 不与 Codex 的内部实现集成，不使用其 API，不拦截网络。
+- 不使用 Codex API，不拦截网络流量，也不修改 Codex 本身。
 - 不提取令牌：交接之后请重新登录 Codex。
-- 从不启动或结束 Codex，也从不写入 Codex 的 SQLite 数据库。
+- 从不强制结束 Codex。设置 `[sync] close_codex = true` 时，同步会以正常方式请求桌面应用退出，
+  并且只在进程检查确认它已停止之后才写入；它没有退出时，什么都不写。
+- 对 Codex 的 SQLite 数据库只做两处有限的修改，每一处都在 Codex 关闭、备份经过校验并且确有
+  需要时进行：请 Codex 根据对话文件重新建立对话列表（`backfill_state`），以及为本机没有名称的
+  对话设置另一台机器显示的名称。从不创建或删除对话记录，从不改写 `session_index.jsonl`，
+  也从不修改项目记录。
 - 没有实时同步：同一时间只有一台机器在工作。
 - 不检查云客户端，也不检查云文件夹的剩余空间。
 
@@ -132,11 +137,13 @@ codexSync 假定机器之间有严格的先后顺序：
   写好，并针对记录下来的 `ps` 输出做过测试，但在还没有对着真实运行的 Codex 跑过之前，
   该平台会把自己报告为不受支持：进程状态读作「无法判定」，因而每条会写入的命令都会
   拒绝执行。
-- **Linux** 的运行时支持目前不在范围内。Codex 本身在 2026 年 8 月以桌面应用预览版的形式登陆
-  Linux；codexSync 目前还不检测它，也不向它写入。
+- **Linux** 处于实验阶段，正如 Codex 自己的 Linux 桌面应用（自 2026 年 8 月起）仍是预览版。
+  codexSync 可以从 PyPI 安装，代码和 CI 都能在 Linux 上运行；但与 macOS 一样，在进程检测器
+  对着 Linux 上真实运行的 Codex 验证之前，每条会写入的命令都会拒绝执行。
 - **最低版本：** Windows 10（1809）或更新版本；通过 pip 安装需要 Python 3.11 或更新版本；
   在 macOS 上使用窗口需要 macOS 13 或更新版本（当前 PySide6 支持的范围）。
-- CI 在 `windows-latest` 和 `macos-latest` 上用 Python 3.11、3.12 和 3.13 跑测试。
+- CI 在 `windows-latest` 和 `macos-latest` 上用 Python 3.11、3.12、3.13 和 3.14 跑测试，
+  并在 `ubuntu-latest` 上作为实验性任务运行：它失败不会让整个运行失败。
 
 ## 还没有被验证的部分
 
@@ -145,7 +152,7 @@ Codex 运行时的某些行为无法从它的文件中推知，只能观察。�
 
 | 什么 | 如何表现 | 实验 |
 |---|---|---|
-| 把本机从未有过的会话写*入* `.codex`（本机已有的聊天会覆盖写入它自己的文件；`[semantic] new_chats = "same_path"` 会按来源路径写入新聊天） | `BLOCKED_UNPROVEN_LAYOUT` | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
+| Codex 期望本机从未有过的会话放在哪里的通用规则。在弄清之前，本机已有的对话会覆盖写入它自己的文件，新对话则按它在另一台机器上的路径写入（`[semantic] new_chats = "same_path"`，默认值） | 新对话按这一条规则写入，`doctor` 会统计 Codex 尚未列出的对话（`session_visibility`）；设为 `new_chats = "keep_in_cloud"` 时它们留在云端副本中（`BLOCKED_UNPROVEN_LAYOUT`） | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
 | 改写 `session_index.jsonl` | `UNPROVEN_CONSUMER_CONTRACT` | [session-index-contract](../dev/experiments/session-index-contract.md) |
 | 在 macOS 和 Linux 上检测 Codex | 平台不受支持，写入被拒绝 | [process-detector-macos](../dev/experiments/process-detector-macos.md) |
 | 存放在 `state_*.sqlite` 里的项目 | 搬移项目只改写 JSON；删除或合并项目根本不提供 | [project-registry-contract](../dev/experiments/project-registry-contract.md) |

@@ -6,14 +6,14 @@
 
 <p align="center">
   Безопасно переносит вашу работу в Codex между личными машинами — чаты,
-  проекты, настройки и локальное состояние — с защищённой передачей, решением
+  список проектов, настройки и локальное состояние — с защищённой передачей, решением
   конфликтов, проверенными резервными копиями и восстановлением.
 </p>
 
 <p align="center">
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
-  <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13">
+  <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Платформы: Windows | macOS">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Внешних зависимостей: 0">
   <img src="https://img.shields.io/badge/GUI-PySide6%2C%20optional-41CD52?logo=qt&logoColor=white" alt="Окно: PySide6, необязательно">
@@ -42,12 +42,14 @@ codexSync считает перенос этого состояния защищ
 ## Что делает
 
 - **Передаёт работу между машинами** — одной кнопкой или сам, когда Codex
-  закрыт: настройки, чаты и проекты уходят в облачную папку, следующая машина
+  закрыт: настройки, чаты и список проектов уходят в облачную папку, следующая машина
   их загружает, и каждая знает, что передала другая.
   → [Синхронизация](docs/ru/SYNC.md#передача-работы-между-машинами)
 - **Переносит чаты и проекты** — история чатов, их названия и привязки к
   проектам оказываются там, где их ищет Codex, даже если папка проекта на
-  другой машине лежит по другому пути. → [Проекты и чаты](docs/ru/PROJECTS.md)
+  другой машине лежит по другому пути. Сами файлы проекта не копируются:
+  полная синхронизация сравнивает папки и говорит, чего не хватает.
+  → [Проекты и чаты](docs/ru/PROJECTS.md)
 - **Никогда не сливает две истории** — каждая ветка сессии классифицируется;
   у чата, продолженного на обеих машинах, остаётся одна целая копия — по
   вашему правилу или выбору, — а другая сохраняется.
@@ -61,8 +63,9 @@ codexSync считает перенос этого состояния защищ
 - **Может работать сам** — наблюдатель передачи, копии `.codex` и регулярные
   снимки — обычные задачи вашей ОС. → [Автоматизация](docs/ru/CONFIGURATION.md#автоматизация)
 
-Ни интеграции во внутренности Codex, ни синхронизации в реальном времени:
-[чего не делает](docs/ru/README.md#чего-не-делает).
+Это не клиент Codex и не синхронизация в реальном времени. Codex никогда не
+завершается силой, а в его базы вносятся только две узкие правки, и обе после
+резервной копии: [чего не делает](docs/ru/README.md#чего-не-делает).
 
 ## Приватность и безопасность
 
@@ -87,13 +90,15 @@ codexSync считает перенос этого состояния защищ
 команды CLI. Нужна Windows 10 (1809) или новее.
 
 **С Python 3.11+**, на Windows или macOS — с `--pre`, пока 0.2 в альфе, иначе
-pip поставит 0.1:
+pip поставит 0.1, и с `--upgrade`, чтобы заменилась и уже установленная 0.1.
+На macOS работают все чтения и планы, но запись запрещена, пока определение
+процесса там не подтверждено ([платформы](docs/ru/README.md#платформы)):
 
 ```powershell
-pip install --pre "codexsync[gui]"    # окно и командная строка
-codexsync-gui                         # при первом запуске окно поможет создать или открыть config.toml
+python -m pip install --upgrade --pre "codexsync[gui]"    # окно и командная строка
+codexsync-gui                                             # при первом запуске окно поможет создать или открыть config.toml
 
-pip install --pre codexsync           # только командная строка, без зависимостей
+python -m pip install --upgrade --pre codexsync           # только командная строка, без зависимостей
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
@@ -106,7 +111,7 @@ codexsync -c config.toml doctor
 | | |
 |---|---|
 | [Обзор](docs/ru/README.md) | Как это работает, установка, первый запуск, принципы, платформы |
-| [Окно](docs/ru/GUI.md) | Все одиннадцать экранов со скриншотами |
+| [Окно](docs/ru/GUI.md) | Все тринадцать экранов со скриншотами |
 | [Командная строка](docs/ru/CLI.md) | Все команды, общие параметры, коды выхода |
 | [Конфигурация](docs/ru/CONFIGURATION.md) | `config.toml` по секциям, автоматизация |
 | [Синхронизация](docs/ru/SYNC.md) | `plan` и `sync`: сравнение, конфликты, направление, удаления |

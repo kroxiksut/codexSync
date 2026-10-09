@@ -117,7 +117,7 @@ def _require_mutation_compatible_config(cfg: AppConfig) -> None:
     if cfg.process_detection.allow_terminate_if_running:
         raise ConfigOutdatedError(
             "process_detection.allow_terminate_if_running=true is no longer supported for mutation commands; "
-            f"codexSync never stops Codex. {MIGRATION_HINT}",
+            f"codexSync never terminates Codex by force ([sync] close_codex asks it to quit). {MIGRATION_HINT}",
             setting="process_detection.allow_terminate_if_running",
         )
     if not cfg.backup.backup_before_overwrite:

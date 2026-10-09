@@ -33,6 +33,9 @@ These checks are out of scope and owned by the user.
 CI runs on Windows and macOS runners (`windows-latest`, `macos-latest`).
 Linux CI is intentionally disabled for MVP until Linux runtime support is explicitly in scope.
 
+Amendment (D-031, 2026-10-09): Linux is in scope as experimental; `ubuntu-latest`
+runs every job with `continue-on-error`, and Python 3.14 joins the matrix.
+
 ## D-010: Preflight diagnostics mode
 The CLI provides `doctor` and `preflight` commands (equivalent behavior).
 These checks are read-only and validate runtime readiness before sync:
@@ -776,3 +779,25 @@ a first sync decided by modification time, with `sessions/` copied whole as
 rewrites the manifest as one unkeyed `files` table, dropping every machine's
 0.2 baseline; the next 0.2 run then starts from a first sync too. A machine
 that has synchronised with 0.2 should stay on 0.2.
+
+## D-031: Linux is experimental from 0.2.0a1
+Codex's desktop app has been on Linux as a preview since 2026-08-11 (Ubuntu
+24.04/26.04, Debian 13, Fedora 43/44, Arch; x64 and ARM64; `.deb`/`.rpm`).
+The owner wants Linux in the first alpha, even at the cost of a short delay
+(2026-10-09), and amends D-006 and D-009 to "Windows first, macOS and Linux
+experimental".
+
+Experimental means the same thing it means on macOS: the code and the suite
+run, the package installs from PyPI (it is pure Python, so no separate Linux
+build), and every command that writes is refused until the process detector
+has been observed against a live Codex on Linux and recorded in
+`PROVEN_DETECTORS` -- an unproven detector is a gate that guesses whether Codex
+is running, which is the one thing the safety spine may not do. The Linux
+desktop process names and where it keeps its state come from observing the
+app, never from reasoning.
+
+CI runs `ubuntu-latest` for every job with `continue-on-error`, so a Linux
+failure is visible on every push without blocking the Windows and macOS
+matrix; it becomes a required job when Linux stops being experimental. Python
+3.14 joins the matrix on all three systems as a supported version: the Ubuntu
+26.04 machine the Linux checks run on ships it.

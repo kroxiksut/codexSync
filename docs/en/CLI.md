@@ -183,7 +183,10 @@ only together with `--confirm`.
 
 ## Process safety
 
-- codexSync never starts or terminates Codex. The old termination flags are
+- codexSync never starts Codex and never terminates it by force. With
+  `[sync] close_codex = true` a sync asks the desktop app to quit and goes on
+  only once the process check no longer sees it; if it does not quit, the sync
+  stops with exit code `3` and writes nothing. The old termination flags are
   rejected with exit code `4`, as is `allow_terminate_if_running = true` for
   commands that write.
 - A write requires Codex to have been stopped continuously for two seconds, plus

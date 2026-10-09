@@ -117,8 +117,9 @@ Codex. Процесс, работающий всегда, сообщает од�
 ChatGPT.
 
 Ключ `allow_terminate_if_running` и остальные `terminate_*` остались от 0.1.
-codexSync никогда не завершает Codex, и `allow_terminate_if_running = true`
-отклоняется.
+codexSync никогда не завершает Codex силой, и `allow_terminate_if_running = true`
+отклоняется. Чтобы синхронизация просила Codex закрыться, есть
+`[sync] close_codex` (ниже).
 
 ## Обновление конфигурации от предыдущей версии
 
@@ -151,7 +152,7 @@ codexsync -c config.toml config upgrade --confirm-plan <id>
 
 | Код | Уровень | Что это значит |
 |---|---|---|
-| `TERMINATE_FLAG_SET` | блокирует запись | `allow_terminate_if_running = true`; codexSync никогда не завершает Codex |
+| `TERMINATE_FLAG_SET` | блокирует запись | `allow_terminate_if_running = true`; codexSync никогда не завершает Codex силой (см. `[sync] close_codex`) |
 | `SESSION_MODE_LAST_DATE` | блокирует запись | `session_mode = "last_date_only"` может отбросить ветви |
 | `BACKUP_DISABLED` | блокирует запись | `backup_before_overwrite = false` |
 | `DETECTION_LIST_OUTDATED` | безопасность | в ваших списках нет процессов Codex, о которых знает эта версия |

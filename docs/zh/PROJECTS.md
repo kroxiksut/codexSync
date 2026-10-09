@@ -10,7 +10,7 @@
 [对话归属](GUI.md#对话归属)和[项目](GUI.md#项目)两个页面。
 
 > [!NOTE]
-> Codex 同时还把项目放在 `state_*.sqlite` 里，而 codexSync 从不写入它。因此搬移项目或
+> Codex 同时还把项目放在 `state_*.sqlite` 里，而 codexSync 从不修改其中的项目记录。因此搬移项目或
 > 重新指定根目录只会改写 `.codex-global-state.json` 中的根目录，删除或合并项目则根本
 > 不提供。`doctor` 每次运行都会报告这一点
 > （[实验](../dev/experiments/project-registry-contract.md)，英文）。
@@ -85,7 +85,7 @@ codexsync -c config.toml projects sync --confirm-plan <id>    # Codex 关闭：�
 
 写入与全局状态的其他任何修改走同一套流程：Codex 关闭、先做经过验证的备份，出错时可通过
 [`recover`](RECOVERY.md#被中断的写操作) 回滚。Codex 还把项目保存在 `state_*.sqlite` 中，codexSync
-从不写入它；侧边栏以 JSON 文件为准。
+从不修改其中的项目记录；侧边栏以 JSON 文件为准。
 
 ### 项目文件夹
 

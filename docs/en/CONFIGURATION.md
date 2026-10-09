@@ -115,8 +115,9 @@ desktop build is called `ChatGPT`, and a bare `ChatGPT` would also match the
 ordinary ChatGPT app.
 
 The keys `allow_terminate_if_running` and the other `terminate_*` keys are left
-from 0.1. codexSync never terminates Codex, and `allow_terminate_if_running =
-true` is refused.
+from 0.1. codexSync never terminates Codex by force, and
+`allow_terminate_if_running = true` is refused. To have a sync ask Codex to
+quit, use `[sync] close_codex` (below).
 
 ## Upgrading a config from an earlier version
 
@@ -146,7 +147,7 @@ still refused, so there is no half-migrated state to be left in.
 
 | Code | Level | What it means |
 |---|---|---|
-| `TERMINATE_FLAG_SET` | blocks writes | `allow_terminate_if_running = true`; codexSync never stops Codex |
+| `TERMINATE_FLAG_SET` | blocks writes | `allow_terminate_if_running = true`; codexSync never terminates Codex by force (see `[sync] close_codex`) |
 | `SESSION_MODE_LAST_DATE` | blocks writes | `session_mode = "last_date_only"` can drop branches |
 | `BACKUP_DISABLED` | blocks writes | `backup_before_overwrite = false` |
 | `DETECTION_LIST_OUTDATED` | safety | Codex processes this version knows are missing from your lists |

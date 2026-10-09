@@ -6,7 +6,7 @@
 
 | Page | What it covers |
 |---|---|
-| [The window](GUI.md) | All eleven screens with screenshots |
+| [The window](GUI.md) | All thirteen screens with screenshots |
 | [Command line](CLI.md) | Every command, global options, exit codes |
 | [Configuration](CONFIGURATION.md) | `config.toml` section by section, automation |
 | [Synchronisation](SYNC.md) | `plan` and `sync`: comparison, conflicts, direction, deletions |
@@ -46,10 +46,11 @@ an error.
 
 The core and the command line have no dependencies. The window is an optional
 extra. While 0.2 is an alpha, pip needs `--pre`; without it, it installs 0.1.
+`--upgrade` makes the same command replace an installed 0.1.
 
 ```powershell
-pip install --pre "codexsync[gui]"    # the command line and the window (PySide6)
-pip install --pre codexsync           # the command line only
+python -m pip install --upgrade --pre "codexsync[gui]"    # the command line and the window (PySide6)
+python -m pip install --upgrade --pre codexsync           # the command line only
 ```
 
 On Windows you can instead download a build from
@@ -59,9 +60,9 @@ needs Python installed:
 | Build | Windows |
 |---|---|
 | `codexsync-gui-<tag>-windows-amd64.zip`, `…-arm64.zip` — the window, which also runs every command | x64, ARM64 |
-| `codexsync-<tag>-windows-amd64.zip`, `…-arm64.zip`, `…-x86.zip` — the command line only, without Qt | x64, ARM64, 32-bit |
+| `codexsync-<tag>-windows-amd64.zip`, `…-arm64.zip` — the command line only, without Qt | x64, ARM64 |
 
-There is no 32-bit window: Qt 6 has no 32-bit Windows build.
+There is no 32-bit build: Codex itself is published for x64 and ARM64 only.
 
 From source, for development or an unreleased change:
 
@@ -108,8 +109,10 @@ Every command and its options are in [the command line](CLI.md); the file
 - **Plan, then confirm by id.** Every command that writes shows a plan or a dry
   run first and applies only the exact plan id you quote back. If anything
   changed in between, the id no longer matches and nothing is written.
-- **No integration with Codex internals.** codexSync never starts or stops
-  Codex, reads no tokens and writes no SQLite.
+- **Codex's own files, and a narrow boundary in them.** codexSync uses no Codex
+  API, reads no tokens, never terminates Codex by force, and its only edits to
+  Codex's SQLite are the two listed under
+  [what it does not do](#what-it-does-not-do).
 - **Zero runtime dependencies** in the core and the command line.
 
 ## Handoff protocol
@@ -128,9 +131,17 @@ in the cloud folder: those are the user's responsibility.
 
 ## What it does not do
 
-- No integration with Codex internals, no API usage, no network interception.
+- No Codex API, no network interception, no change to Codex itself.
 - No token extraction: after a handoff you sign in to Codex again.
-- Never starts or stops Codex, and never writes Codex's SQLite databases.
+- Never terminates Codex by force. With `[sync] close_codex = true` a sync asks
+  the desktop app to quit the normal way and writes only after the process
+  check confirms it has stopped; if it does not quit, nothing is written.
+- Nothing in Codex's SQLite databases beyond two narrow edits, each made with
+  Codex closed, after a verified backup and only when needed: a request that
+  Codex rebuild its chat list from the chat files (`backfill_state`), and, for a
+  chat with no name here, the name the other machine shows. It never creates or
+  deletes chat rows, never rewrites `session_index.jsonl` and never modifies
+  project records.
 - No real-time sync: one machine works at a time.
 - No checks of the cloud client or of free space in the cloud folder.
 
@@ -142,14 +153,16 @@ in the cloud folder: those are the user's responsibility.
   until it has been run against a live Codex, the platform reports itself as
   unsupported: the process state reads as undetermined and every command that
   writes refuses.
-- **Linux** runtime support is out of scope for now. Codex itself reached Linux
-  in August 2026, as a preview of the desktop app; codexSync does not detect or
-  write to it yet.
+- **Linux** is experimental, as Codex's own desktop app for Linux is a preview
+  (since August 2026). codexSync installs from PyPI and its code and CI run
+  there, but just as on macOS every command that writes refuses until the
+  process detector has been checked against a live Codex on Linux.
 - **Minimum versions:** Windows 10 (1809) or later, Python 3.11 or later with
   pip; the window on macOS needs macOS 13 or later (what the current PySide6
   supports).
 - CI runs the test suite on `windows-latest` and `macos-latest` with Python
-  3.11, 3.12 and 3.13.
+  3.11, 3.12, 3.13 and 3.14, and on `ubuntu-latest` as an experimental job
+  whose failure does not fail the run.
 
 ## What is not proven yet
 
@@ -159,7 +172,7 @@ codexSync reports the case instead of guessing:
 
 | What | How it shows | Experiment |
 |---|---|---|
-| Writing a session this machine has never had *into* `.codex` (a chat it already has is written over its own file; `[semantic] new_chats = "same_path"` writes a new one at its source path) | `BLOCKED_UNPROVEN_LAYOUT` | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
+| A general rule for where Codex expects a session this machine has never had. Until then a chat it already has is written over its own file, and a new one at its path on the other machine (`[semantic] new_chats = "same_path"`, the default) | new chats are written by that one rule, and `doctor` counts chats Codex has not listed (`session_visibility`); with `new_chats = "keep_in_cloud"` they stay in the cloud copy (`BLOCKED_UNPROVEN_LAYOUT`) | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
 | Rewriting `session_index.jsonl` | `UNPROVEN_CONSUMER_CONTRACT` | [session-index-contract](../dev/experiments/session-index-contract.md) |
 | Detecting Codex on macOS and Linux | platform unsupported, writes refused | [process-detector-macos](../dev/experiments/process-detector-macos.md) |
 | Projects stored in `state_*.sqlite` | moving a project rewrites the JSON only; deleting or merging projects is not offered | [project-registry-contract](../dev/experiments/project-registry-contract.md) |

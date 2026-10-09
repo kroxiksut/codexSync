@@ -2,10 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.2.0a1] - 2026-10-08
+## [0.2.0a1] - 2026-10-09
 
 **The first alpha of 0.2.** codexSync now hands your Codex work between
-machines as one guarded step — settings, chats, chat names and projects — and
+machines as one guarded step — settings, chats, chat names and the project
+list — and
 comes with a window next to the command line.
 
 This is an alpha because 0.2 substantially expands the state that codexSync
@@ -17,22 +18,28 @@ and every write still goes through the lock, journal and verified backup.
 **What is new, in short**
 - The window (`codexsync[gui]`, or `codexsync-gui.exe`) — every screen also has
   a command, so automation never needs the window.
-- A full sync by default: settings, chats and projects in one run, by hand or
+- A full sync by default: settings, chats and the project list in one run, by hand or
   on its own when Codex closes; each machine knows what the other handed off.
 - Chats continued on two machines are never merged: one whole copy is kept, by
   your rule or your choice, and the other is saved.
 - Guardian snapshots of the global state while Codex runs; restore, recovery of
   interrupted writes, history of every sync, verified copies of `.codex`.
+- So that carried chats show up in Codex with their names, two narrow edits of
+  Codex's own database, each with Codex closed and after a verified backup: a
+  request to rebuild its chat list from the files, and a name for a chat that
+  has none here. Never a chat row of its own, never a project record. If you
+  turn it on, a sync asks Codex to quit first — never by force.
 
 **Install**
-- `pip install --pre "codexsync[gui]"` — pip skips an alpha unless asked, so
-  `pip install -U codexsync` leaves an existing 0.1 install as it is.
+- `python -m pip install --upgrade --pre "codexsync[gui]"` — the same command
+  installs it fresh or replaces 0.1. Without `--pre` pip skips an alpha, so
+  `pip install -U codexsync` alone leaves 0.1 as it is.
 - Windows builds, no Python needed: `codexsync-gui-<tag>-windows-amd64.zip` or
   `-arm64.zip` (the window, which also runs every command) and
-  `codexsync-<tag>-windows-amd64|arm64|x86.zip` (the command line only).
-- Needs Windows 10 (1809) or later; the window needs x64 or ARM64, since Qt 6
-  has no 32-bit Windows build. With pip: Python 3.11+, and for the window on
-  macOS, macOS 13 or later.
+  `codexsync-<tag>-windows-amd64|arm64.zip` (the command line only).
+- Needs Windows 10 (1809) or later on x64 or ARM64 — the two architectures
+  Codex is published for; there is no 32-bit build. With pip: Python 3.11+,
+  and for the window on macOS, macOS 13 or later.
 
 **Upgrading from 0.1.** Configurations written by 0.1 are recognised; a few
 0.1 values are refused by every command that writes, and `config check` /
@@ -49,8 +56,9 @@ session store — is read by every later alpha and by 0.2.0 (`D-030`).
 
 **Known limits.** Validated in practice Windows → Windows only. On macOS the
 code and CI run, but every write is refused until the process detector has
-been observed against a live Codex. Linux is not supported yet (Codex for Linux
-is in preview). Some Codex behaviours are deliberately left unused until an
+been observed against a live Codex. Linux is experimental in the same way
+(Codex for Linux is itself a preview, `D-031`): it installs and its CI runs,
+and writes stay refused until the detector is observed there. Some Codex behaviours are deliberately left unused until an
 experiment records them:
 [what is not proven yet](https://github.com/kroxiksut/codexSync/blob/main/docs/en/README.md#what-is-not-proven-yet).
 
@@ -60,11 +68,17 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
 [SECURITY.md](https://github.com/kroxiksut/codexSync/blob/main/SECURITY.md).
 
 ### Added
-- **Builds for ARM64 and 32-bit Windows, and PyPI from the release workflow.**
+- **Python 3.14, and Linux as an experimental platform** (`D-031`). CI runs
+  Python 3.11–3.14 on Windows and macOS, and every job on `ubuntu-latest` as
+  well, where a failure is shown but does not fail the run. On Linux the
+  package installs and reads; writes wait for the process detector to be
+  observed against a live Codex there.
+- **Builds for ARM64 Windows, and PyPI from the release workflow.**
   `.github/workflows/release.yml` (was `release-exe.yml`) checks that the tag,
   `pyproject.toml` and this file name one version (`scripts/release_meta.py`),
-  runs the suite with each build's own interpreter, builds the command line for
-  x64, ARM64 and x86 and the window for x64 and ARM64, checks each exe's
+  runs the suite with each build's own interpreter, builds the command line and
+  the window for x64 and ARM64 (the architectures Codex is published for; there
+  is no 32-bit Codex), checks each exe's
   version, and only then uploads to PyPI (trusted publishing) and creates the
   GitHub release — marked pre-release for an alpha, beta or rc tag. The README
   PyPI shows has its links and pictures pinned to the tag. A rehearsal on a
@@ -234,8 +248,10 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
   cache every chat scan refreshes (`%LOCALAPPDATA%\CodexSync\cache`, counts
   only) and are shown with the time they were taken.
 - **Both exes describe themselves.** Version, product name, description in
-  English, Russian and Chinese, and `© 2026 Fyodor Malkov — <project page>` in
-  the file's *Details*, generated at build time from the package metadata and
+  English, Russian and Chinese, and `© 2026 Fyodor Malkov — GPL-3.0-or-later — <project page>` in
+  the file's *Details*, the author as *Company*, a trademark notice that Codex
+  is OpenAI's and this project is independent, and the pre-release flag on an
+  alpha, beta or rc, generated at build time from the package metadata and
   the window's language files (`scripts/exe_version_info.py`);
   `scripts/check_exe_version.py` reads it back from a built exe.
 - **Sync history.** Every real sync's journal now records how many files went
@@ -324,8 +340,9 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
   nothing and is part of the plan id, so a folder created after the scan asks
   for a rescan. Plans whose folders all exist keep their id.
 - **The window.** `codexsync[gui]` is now a working interface over the same
-  core: eleven screens (overview, first run, synchronisation, chat bindings,
-  sessions, projects, snapshot guardian, backups, recovery, settings, about),
+  core: thirteen screens (home, overview, first run, synchronisation, chat
+  bindings, sessions, projects, snapshot guardian, backups, recovery,
+  automation, settings, about),
   English, Russian and Chinese from language files with per-language plural
   rules, a light and a dark theme from the design tokens, and the CodexSync
   icon. Every mutation is

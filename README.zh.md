@@ -5,14 +5,14 @@
 <h1 align="center">codexSync</h1>
 
 <p align="center">
-  在你自己的几台机器之间安全地搬运 Codex 工作 —— 对话、项目、配置和本地状态 ——
+  在你自己的几台机器之间安全地搬运 Codex 工作 —— 对话、项目列表、配置和本地状态 ——
   带有受保护的交接、冲突处理、经过校验的备份和恢复。
 </p>
 
 <p align="center">
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
-  <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13">
+  <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform: Windows | macOS">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Runtime dependencies: 0">
   <img src="https://img.shields.io/badge/GUI-PySide6%2C%20optional-41CD52?logo=qt&logoColor=white" alt="GUI: PySide6, optional">
@@ -38,11 +38,12 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 
 ## 它能做什么
 
-- **在机器之间交接工作** —— 点一下，或在 Codex 关闭时自动进行：设置、对话和项目
+- **在机器之间交接工作** —— 点一下，或在 Codex 关闭时自动进行：设置、对话和项目列表
   进入云文件夹，下一台机器载入它们，每台机器都知道另一台交接了什么。
   → [同步](docs/zh/SYNC.md#在电脑之间交接工作)
 - **搬运对话和项目** —— 对话历史、对话名称和项目归属会出现在 Codex 查找它们的
-  位置，即使项目文件夹在另一台机器上是另一条路径。→ [项目与对话](docs/zh/PROJECTS.md)
+  位置，即使项目文件夹在另一台机器上是另一条路径。项目自身的文件不会被复制：完整同步会
+  比较文件夹并指出缺少什么。→ [项目与对话](docs/zh/PROJECTS.md)
 - **绝不合并两段历史** —— 每个会话分支都会被分类；在两台机器上都被继续的对话只
   保留一份完整副本（按你的规则或选择），另一份被保存下来。→ [会话](docs/zh/SESSIONS.md)
 - **每次覆盖前先备份**，并能从被中断的写入中恢复 —— 锁、事务日志、经过校验的备份。
@@ -52,8 +53,8 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 - **可以自动运行** —— 交接监视器、`.codex` 副本和定期快照都是操作系统的普通任务。
   → [自动化](docs/zh/CONFIGURATION.md#自动化)
 
-它既不与 Codex 的内部实现集成，也不做实时同步：
-[它不做什么](docs/zh/README.md#它不做什么)。
+它不是 Codex 客户端，也不做实时同步。它从不强制结束 Codex，对 Codex 的数据库只做两处
+有限且先备份的修改：[它不做什么](docs/zh/README.md#它不做什么)。
 
 ## 隐私与安全
 
@@ -70,13 +71,15 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 **Windows，无需 Python：** 从 [Releases](https://github.com/kroxiksut/codexSync/releases)
 下载 `codexsync-gui-…-windows-amd64.zip`（或 `…-arm64.zip`），解压后运行 `codexsync-gui.exe`。同一个可执行文件也能运行命令行子命令。需要 Windows 10（1809）或更新版本。
 
-**使用 Python 3.11+**，在 Windows 或 macOS 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1：
+**使用 Python 3.11+**，在 Windows 或 macOS 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1；
+加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
+写入会被拒绝（[平台](docs/zh/README.md#平台)）：
 
 ```powershell
-pip install --pre "codexsync[gui]"    # 窗口和命令行
-codexsync-gui                         # 首次启动时，窗口会帮你创建或打开 config.toml
+python -m pip install --upgrade --pre "codexsync[gui]"    # 窗口和命令行
+codexsync-gui                                             # 首次启动时，窗口会帮你创建或打开 config.toml
 
-pip install --pre codexsync           # 只有命令行，没有依赖
+python -m pip install --upgrade --pre codexsync           # 只有命令行，没有依赖
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
@@ -88,7 +91,7 @@ codexsync -c config.toml doctor
 | | |
 |---|---|
 | [总览](docs/zh/README.md) | 工作方式、安装、首次运行、设计原则、平台 |
-| [窗口](docs/zh/GUI.md) | 全部十一个界面及截图 |
+| [窗口](docs/zh/GUI.md) | 全部十三个界面及截图 |
 | [命令行](docs/zh/CLI.md) | 每条命令、全局选项、退出码 |
 | [配置](docs/zh/CONFIGURATION.md) | 逐节讲解 `config.toml`，以及自动化 |
 | [同步](docs/zh/SYNC.md) | `plan` 与 `sync`：比较、冲突、方向、删除 |

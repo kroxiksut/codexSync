@@ -21,7 +21,7 @@ from exe_version_info import KINDS, version_fields  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def read_resource(path: Path) -> tuple[tuple[int, ...], list[tuple[int, int]], dict[str, dict[str, str]]]:
+def read_resource(path: Path) -> tuple[tuple[int, ...], int, list[tuple[int, int]], dict[str, dict[str, str]]]:
     version = ctypes.WinDLL("version", use_last_error=True)
     version.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, wintypes.LPDWORD]
     version.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
@@ -46,6 +46,7 @@ def read_resource(path: Path) -> tuple[tuple[int, ...], list[tuple[int, int]], d
     fixed = ctypes.string_at(address, length)
     ms, ls = struct.unpack_from("<II", fixed, 8)
     numeric = (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
+    (flags,) = struct.unpack_from("<I", fixed, 28)
 
     address, length = query("\\VarFileInfo\\Translation")
     raw = ctypes.string_at(address, length)
@@ -55,20 +56,23 @@ def read_resource(path: Path) -> tuple[tuple[int, ...], list[tuple[int, int]], d
     for language_id, codepage in translations:
         table: dict[str, str] = {}
         for name in ("FileDescription", "FileVersion", "InternalName", "LegalCopyright",
-                     "OriginalFilename", "ProductName", "ProductVersion", "CompanyName"):
+                     "LegalTrademarks", "OriginalFilename", "ProductName", "ProductVersion",
+                     "CompanyName"):
             address, length = query(f"\\StringFileInfo\\{language_id:04X}{codepage:04X}\\{name}")
             if address:
                 table[name] = ctypes.wstring_at(address, max(length - 1, 0))
         tables[f"{language_id:04X}"] = table
-    return numeric, translations, tables
+    return numeric, flags, translations, tables
 
 
 def check(path: Path, kind: str) -> list[str]:
     expected = version_fields(kind)
-    numeric, translations, tables = read_resource(path)
+    numeric, flags, translations, tables = read_resource(path)
     problems: list[str] = []
     if numeric != tuple(expected["numeric"]):
         problems.append(f"fixed version {numeric} != {expected['numeric']}")
+    if flags != expected["flags"]:
+        problems.append(f"file flags {flags:#x} != {expected['flags']:#x}")
     if translations != [tuple(item) for item in expected["translations"]]:
         problems.append(f"translations {translations} != {expected['translations']}")
     from exe_version_info import LANGUAGE_IDS

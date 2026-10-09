@@ -28,14 +28,47 @@ ambiguous; a failure is not. Some warnings are permanent by design and say so:
 Three scenarios are what the release is actually judged on, and all three need
 a real machine rather than the suite:
 
-1. **Codex open** — `sync --apply`, `restore --apply`, `repair-projects apply`,
-   `sessions apply`, `chats move --confirm` and `recover resume|rollback`
-   must each exit `3`, and `guardian snapshot --once` must still succeed.
+1. **Codex open, `[sync] close_codex = false`** — `sync --apply`,
+   `restore --apply`, `repair-projects apply`, `sessions apply`,
+   `chats move --confirm` and `recover resume|rollback` must each exit `3`, and
+   `guardian snapshot --once` must still succeed. With `close_codex = true` a
+   sync asks Codex to quit instead: it goes on once the gate sees Codex gone,
+   and exits `3` with nothing written if Codex stays open.
 2. **Codex closed** — a sync runs, a verified backup exists before the first
    overwrite, and the journal ends `COMMITTED`.
 3. **An interrupted mutation** — kill the process during a sync, then check
    that `recover inspect` reports it and that the Recovery screen offers
    inspect, resume and rollback, each behind a dry run of the same choice.
+
+0.2 carries more than files, so these define what a 0.2 release actually
+ships. Each needs two real machines (A and B) or a real 0.1 config; record the
+date and the Codex version when one is run, and say in the release notes which
+were not:
+
+4. **0.1 config upgrade** — a `config.toml` written by 0.1.2: `config check`
+   lists the findings, `config upgrade --confirm-plan` applies them, the old
+   file is in `config-history/`, and a sync then runs.
+5. **Full handoff A → B → A** — sync on A with Codex closed, wait for the
+   cloud, sync on B, work in Codex on B, close it, sync on B, sync on A. Each
+   side shows the other's work; `handoff status` agrees on both.
+6. **A new chat travels** — a chat created on A appears on B after the sync
+   and one Codex start (the catalogue rebuild, `D-024`); `doctor` on B reports
+   `session_visibility` with `not_listed=0`.
+7. **A chat name travels** — a chat renamed on A shows that name on B; a chat
+   already named on B keeps its own (`D-025`).
+8. **The project list** — a project added on A appears in B's sidebar with
+   its chats (`D-022`); a project folder missing on B is reported, not created
+   (`D-026`).
+9. **A conflict under the rule** — the same chat continued on both machines:
+   the newer one is kept under the default `prefer_newer_mtime`, the other is
+   in the conflict bundle, and `manual_abort` stops with exit `2` instead
+   (`D-027`).
+10. **Closing Codex on request** — `close_codex = true` with Codex open: the
+    desktop app quits normally, the sync runs, and Codex's state reads cleanly
+    on the next start (`D-029`).
+
+For an alpha, 1–3 must pass and 4–10 are recorded as run or not run; for a
+stable release all ten must pass on Windows.
 
 ### 2. Check the release metadata
 
@@ -136,7 +169,8 @@ GitHub's `> [!IMPORTANT]` alerts, which PyPI shows literally, into a bold label.
 ### 5. Verify after push
 
 1. CI workflow `CI` runs in `Actions` for `windows-latest` and `macos-latest`,
-   on Python 3.11, 3.12 and 3.13.
+   on Python 3.11, 3.12, 3.13 and 3.14 (green required), and for
+   `ubuntu-latest` (experimental, D-031: read its result, it does not block).
 2. All three READMEs and the `docs/en`/`docs/ru`/`docs/zh` pages render
    correctly on GitHub,
    badges and screenshots included.
@@ -216,13 +250,13 @@ Both executables are published by the same manual workflow.
   | `codexsync-gui-<tag>-windows-arm64.zip` | window + command line | `windows-11-arm` |
   | `codexsync-<tag>-windows-amd64.zip` | command line | `windows-latest` |
   | `codexsync-<tag>-windows-arm64.zip` | command line | `windows-11-arm` |
-  | `codexsync-<tag>-windows-x86.zip` | command line | `windows-latest`, 32-bit Python |
   | `codexsync-<version>-py3-none-any.whl`, `codexsync-<version>.tar.gz` | the package PyPI gets | `ubuntu-latest` |
 
-- There is no 32-bit window: PySide6 publishes no `win32` wheel, because Qt 6
-  has no 32-bit Windows build.
-- Each Windows job runs the whole suite with its own interpreter first (x86 and
-  ARM64 are not in the everyday CI matrix), then checks that `codexsync.exe
+- There is no 32-bit build: Codex itself is published for x64 and ARM64 only
+  (Microsoft Store catalogue, checked 2026-10-09), so a 32-bit codexSync would
+  have no Codex to sync. PySide6 has no `win32` wheel either.
+- Each Windows job runs the whole suite with its own interpreter first (ARM64
+  is not in the everyday CI matrix), then checks that `codexsync.exe
   --version` names the release and that `scripts/check_exe_version.py` reads the
   expected version resource back out of every exe.
 - Minimum versions the builds carry: Windows 10 (1809) or later for the window
