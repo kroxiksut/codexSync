@@ -71,6 +71,9 @@ from ..app import (
     build_context,
     build_guardian_runner,
     inspect_recovery,
+    check_codex,
+    refresh_thread_catalogue,
+    repair_codex,
     list_backup_snapshots,
     list_history,
     list_journals,
@@ -745,6 +748,20 @@ class Controller:
         return run(lambda: rollback_operation(
             self._config_path, operation_id, target=target, dry_run=dry_run
         ))
+
+    # --- Codex's own state (D-032) ------------------------------------------
+
+    def codex_check(self) -> Outcome:
+        """Why Codex may not start or show chats. Reads only; looks at the process list."""
+        return run(lambda: check_codex(self._config_path))
+
+    def codex_repair(self, *, confirm_plan: str) -> Outcome:
+        """Apply the repair the last check planned; refused if anything moved since."""
+        return run(lambda: repair_codex(self._config_path, confirm_plan=confirm_plan, origin="window"))
+
+    def catalogue_rebuild(self, *, confirm_plan: str | None) -> Outcome:
+        """Preview (``None``), or ask Codex to rebuild its chat list on its next start (D-024)."""
+        return run(lambda: refresh_thread_catalogue(self._config_path, confirm_plan=confirm_plan, origin="window"))
 
     # --- config.toml -------------------------------------------------------
 

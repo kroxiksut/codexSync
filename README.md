@@ -56,6 +56,9 @@ state as a guarded handoff, not as ordinary file synchronisation.
   and the other is saved. → [Sessions](docs/en/SESSIONS.md)
 - **Backs up before every overwrite** and recovers from an interrupted write —
   lock, journal, verified backup. → [Backups and recovery](docs/en/RECOVERY.md)
+- **Checks Codex and puts it right** — when Codex does not start or does not
+  show your chats, `codex check` says why and `codex repair` fixes what it can,
+  whoever caused it. → [When Codex does not start](docs/en/RECOVERY.md#when-codex-does-not-start)
 - **Guards the global state** with verified snapshots taken *while Codex runs*,
   written only outside `.codex`. → [Guardian](docs/en/GUARDIAN.md)
 - **Can run on its own** — the handoff watcher, copies of `.codex` and periodic
@@ -118,7 +121,7 @@ From source, and the first run step by step:
 | [Guardian](docs/en/GUARDIAN.md) | Snapshots of the global state, quarantine, restore, a new baseline |
 | [Sessions](docs/en/SESSIONS.md) | Session branches across machines, working set, mirror, index |
 | [Projects and chats](docs/en/PROJECTS.md) | Chat bindings, repair after a handoff, moving a project |
-| [Backups and recovery](docs/en/RECOVERY.md) | Backups, restore, interrupted mutations |
+| [Backups and recovery](docs/en/RECOVERY.md) | Backups, restore, interrupted mutations, when Codex does not start |
 
 Every page in one place: [docs/](docs/README.md). For contributors:
 [developer documents](docs/dev/README.md). Release notes:

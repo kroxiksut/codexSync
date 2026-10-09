@@ -320,7 +320,11 @@ class RunHandoffTests(_Workspace):
         self.assertEqual(sent.steps_not_done, ())
         for name, spy in calls.items():
             self.assertEqual(spy.call_count, 1, name)
-            self.assertIs(spy.call_args.kwargs["planned_here"], True, name)
+            if name == "refresh_thread_catalogue":
+                # Only read: a sync never asks Codex to rebuild its chat list (D-032).
+                self.assertEqual(spy.call_args.kwargs, {}, name)
+            else:
+                self.assertIs(spy.call_args.kwargs["planned_here"], True, name)
 
     def test_a_chat_started_on_the_other_machine_is_carried_by_default(self) -> None:
         # D-020 amendment (2026-10-03): carrying new chats is the job, so a

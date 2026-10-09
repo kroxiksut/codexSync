@@ -115,3 +115,30 @@ codexsync -c config.toml recover rollback <操作标识> --apply
   第一次替换之前记录 —— 所以没有什么需要撤销，日志直接关闭即可。
 - 同一个 Codex 文件夹同一时间只能有一条会写入的命令在工作，不论它是哪一种；第二条会以
   退出码 `5` 停下，而不是把自己的写入和前一条交错在一起。
+
+## Codex 无法启动时
+
+```powershell
+codexsync -c config.toml codex check
+codexsync -c config.toml codex repair
+codexsync -c config.toml codex repair --confirm-plan <plan-id>
+```
+
+`codex check` 读取 Codex 的状态并列出问题，无论是谁造成的；在窗口中是“恢复 → Codex 状态 →
+检查 Codex”。检查只读取，可以在 Codex 打开时运行。每一项发现都写明了修复方法：
+
+| 发现 | 含义 | 修复 |
+|---|---|---|
+| `CATALOGUE_REBUILD_STUCK` | Codex 无法启动：聊天列表的重建中途被中断，且没有进程在继续。Codex 显示“无法加载组织设置”。 | `codex repair` |
+| `CATALOGUE_REBUILD_PENDING` | 下次启动时 Codex 会遍历所有聊天文件重建聊天列表；在聊天出现之前请保持打开。 | `codex repair` 跳过重建 |
+| `CATALOGUE_REBUILDING` | Codex 正在重建。 | 保持打开 |
+| `CATALOGUE_MISSES_CHATS` | 聊天文件在原位，但 Codex 没有显示。 | `sessions catalogue` |
+| `GLOBAL_STATE_MISSING`、`GLOBAL_STATE_INVALID` | 项目、置顶或聊天所属项目丢失或已经脱节。 | `guardian restore` |
+| `OPEN_JOURNAL` | 某个 codexSync 操作中途停止，阻止所有写入。 | [被中断的写操作](#被中断的写操作) |
+
+重建为什么会卡住：Codex 在启动时根据聊天文件构建聊天列表，完成后才打开。如果这次启动被中途结束
+——窗口放弃等待，或 Codex 被关闭——重建会一直标记为“进行中”，之后的每次启动都会等待它然后退出。
+`codex repair` 把它设回“已完成”：只改一行，在 Codex 关闭时、数据库备份经过校验之后进行，并像
+所有写入一样记录日志（类别 `codex-repair`）。如果重建是 codexSync 自己请求的，会放回当时备份
+中的那一行。之后 Codex 会带着已列出的聊天启动；当你可以让 Codex 一直打开直到完成时，再用
+`sessions catalogue` 请求重建。`doctor` 在 `codex_startup` 中报告同一状态。

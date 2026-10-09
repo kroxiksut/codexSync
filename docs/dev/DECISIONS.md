@@ -548,6 +548,8 @@ own entry, so all follow the mirror into `archived_sessions/`, and 10 of them
 are byte-identical.
 
 ## D-024: Codex is asked to rebuild its chat list; one SQLite row is written
+Amended by D-032 (2026-10-09): a sync no longer asks; the request is a person's, and a stuck rebuild is put back to `complete` by `codex repair`.
+
 The worry recorded in D-020 came true on 2026-10-04. A full sync on the laptop
 wrote 197 chats into `.codex`, every project in Codex said "no chats", and
 `doctor` reported `not_listed=197 listed_at_another_path=11` with Codex
@@ -801,3 +803,57 @@ failure is visible on every push without blocking the Windows and macOS
 matrix; it becomes a required job when Linux stops being experimental. Python
 3.14 joins the matrix on all three systems as a supported version: the Ubuntu
 26.04 machine the Linux checks run on ships it.
+
+## D-032: A sync never asks Codex to rebuild its chat list; Codex's state can be checked and repaired
+On 2026-10-09 Codex stopped starting on the owner's main machine, with "could
+not load your organization's settings". The chain, each step proven on the
+machine: a full sync moved one chat out of the archive (D-023); the catalogue
+row still named the old file, so `thread_catalogue` found an unreachable chat
+and reset `backfill_state` to `pending` (D-024) -- the first time on that
+machine, with 306 chats and hundreds of megabytes of chat files. Codex's
+`app-server` runs the rebuild while it starts and answers nobody until it is
+done; the start was ended part-way, the row stayed `running`, and every later
+start printed "state db backfill is running ... waiting up to 30s" and exited
+with "timed out waiting for state db backfill". The lease is taken over about
+every 15 minutes, each take-over got a little further, and for a person Codex
+was simply broken. The behaviour is Codex's own (the same message is in
+codex.exe 0.130); D-024 had been checked only on a laptop with fewer chats.
+Nothing sanctioned could undo it: `recover rollback` refuses a COMMITTED
+journal and `restore` refuses SQLite, although the verified copy was there.
+It was repaired by putting the one row back from that copy, by hand.
+
+Three changes, the owner's decision the same day ("Codex must not break"):
+
+1. **A sync only counts.** `run_handoff` reads the catalogue and reports
+   `chats_codex_does_not_list`; it never writes `backfill_state`. The request
+   is a person's: `sessions catalogue --confirm-plan`, or Recovery -> Codex
+   state in the window, both of which say beforehand how many chat files the
+   rebuild walks and that Codex must be left open until the chats appear.
+   Carried chats are therefore not shown until someone asks -- the price of
+   never leaving Codex unable to start.
+2. **The rebuild can be put back.** `codex repair` (`app.repair_codex`) sets a
+   rebuild that is not `complete` back to `complete`: one row, the whole row
+   compared under the write lock with what the plan read (a Codex that moved it
+   is never overwritten), in the catalogue envelope with journal family
+   `codex-repair`. When codexSync's own newest `thread-catalogue` write left a
+   verified copy whose row says `complete`, that exact row is put back;
+   otherwise the row as found keeps its timestamps and only the status and the
+   watermark change -- deterministic, so a preview and its apply hash the same.
+   This amends D-024: `backfill_state` is written to `pending` on request and
+   to `complete` by a repair; it is still the one row of that table codexSync
+   touches, and a `threads` row is still never written.
+3. **Codex's state is checked, whoever broke it.** `codex check`
+   (`app.check_codex`, module `codex_health`) reads only and returns findings
+   with stable codes, a severity and either a repair or the command that deals
+   with it: a stuck rebuild (`CATALOGUE_REBUILD_STUCK`, BROKEN only when the
+   gate is sure Codex is closed -- `UNKNOWN` is never taken for closed), a
+   pending or running one, chats Codex does not list, a missing or invalid
+   global state (-> `guardian restore`), an open journal (-> `recover`).
+   `doctor` carries the same reading as `codex_startup`, FAIL for a stuck
+   rebuild. The window shows the findings on the Recovery page; the check runs
+   when asked, never on arrival, because it looks at the process list.
+
+The check is meant to grow into the place for "Codex broke, put it right"
+(the owner's request: chats torn from projects after a crash, and whatever
+comes next). A new finding is added only from a breakage observed on a real
+machine, with its repair going through an existing envelope.

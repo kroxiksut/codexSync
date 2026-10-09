@@ -201,6 +201,16 @@ class BackfillReading:
     database: str | None = None
     backfill: str | None = None
     codes: tuple[str, ...] = ()
+    #: The rest of the row, ``None`` where the column is absent or NULL: how far
+    #: a rebuild got, when it last finished and when the row last changed. A
+    #: repair compares all four before it writes (D-032).
+    last_watermark: str | None = None
+    last_success_at: int | None = None
+    updated_at: int | None = None
+
+    @property
+    def row(self) -> tuple[str | None, str | None, int | None, int | None]:
+        return (self.backfill, self.last_watermark, self.last_success_at, self.updated_at)
 
 
 class _Refused(Exception):
@@ -265,14 +275,25 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
 def read_backfill_state(state_root: Path, *, timeout_seconds: float = 2.0) -> BackfillReading:
     """The catalogue's own backfill status, strictly read-only."""
 
-    def query(connection: sqlite3.Connection) -> str | None:
-        if not {"id", "status"}.issubset(_columns(connection, "backfill_state")):
-            raise _Refused("NO_BACKFILL_STATE")
-        row = connection.execute("SELECT status FROM backfill_state WHERE id = 1").fetchone()
-        return row[0] if row is not None and isinstance(row[0], str) else None
+    optional = ("last_watermark", "last_success_at", "updated_at")
 
-    status, relative, value, codes = _query_the_catalogue(state_root, query, timeout_seconds=timeout_seconds)
-    return BackfillReading(status, relative, value, codes)
+    def query(connection: sqlite3.Connection) -> tuple[object, ...] | None:
+        columns = _columns(connection, "backfill_state")
+        if not {"id", "status"}.issubset(columns):
+            raise _Refused("NO_BACKFILL_STATE")
+        selected = ", ".join(name if name in columns else "NULL" for name in ("status", *optional))
+        return connection.execute(f"SELECT {selected} FROM backfill_state WHERE id = 1").fetchone()
+
+    status, relative, row, codes = _query_the_catalogue(state_root, query, timeout_seconds=timeout_seconds)
+    if row is None:
+        return BackfillReading(status, relative, None, codes)
+    value, watermark, success, updated = row
+    return BackfillReading(
+        status, relative, value if isinstance(value, str) else None, codes,
+        last_watermark=watermark if isinstance(watermark, str) else None,
+        last_success_at=success if isinstance(success, int) else None,
+        updated_at=updated if isinstance(updated, int) else None,
+    )
 
 
 @dataclass(frozen=True, slots=True)

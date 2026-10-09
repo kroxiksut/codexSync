@@ -19,7 +19,7 @@
 | [快照守护](zh/GUARDIAN.md) | 全局状态的快照、隔离区、还原、新的基准 |
 | [会话](zh/SESSIONS.md) | 跨机器的会话分支、工作集、镜像、索引 |
 | [项目与对话](zh/PROJECTS.md) | 对话归属、换机之后的修复、搬移项目 |
-| [备份与恢复](zh/RECOVERY.md) | 备份、还原、被中断的写操作 |
+| [备份与恢复](zh/RECOVERY.md) | 备份、还原、被中断的写操作、Codex 无法启动时 |
 
 其他语言的同一批页面：[English](en/README.md) · [Русский](ru/README.md)。
 

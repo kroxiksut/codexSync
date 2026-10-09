@@ -55,6 +55,8 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `sessions scope` | 否 | 显示为一对机器保存的工作集 | [会话](SESSIONS.md) |
 | `sessions names` | **是** | 其他机器显示的聊天名称；加 `--confirm-plan` 时给本机没有名称的聊天设置名称 | [会话](SESSIONS.md#写入-codex) |
 | `sessions catalogue` | **是** | 列出 Codex 不显示的聊天文件；加 `--confirm-plan` 时请 Codex 重建聊天列表 | [会话](SESSIONS.md#写入-codex) |
+| `codex check` | 否 | Codex 为什么可能无法启动或不显示聊天；只读取 | [恢复](RECOVERY.md#codex-无法启动时) |
+| `codex repair` | **是** | 预览，或加 `--confirm-plan` 执行 `codex check` 给出的修复 | [恢复](RECOVERY.md#codex-无法启动时) |
 | `chats list` / `chats tree` | 否 | 查找对话，看每个对话属于哪个项目 | [项目](PROJECTS.md#对话) |
 | `chats move` | **是** | 把选定的对话放到一个项目下 | [项目](PROJECTS.md#把对话移到某个项目) |
 | `projects sync` | **是** | 把其他电脑的项目列表合并到本机，再发布本机的列表（不带 `--confirm-plan` 时只是预览） | [项目](PROJECTS.md#机器之间的项目) |
@@ -113,7 +115,8 @@ codexsync -c config.toml doctor
 `doctor`（以及与它相同的 `preflight`）只读取、不创建任何东西 —— 尤其不会在 `.codex`
 里面创建。它会检查配置和各个目录、Codex 是否在运行、全局状态的结构与最近一张可还原的
 快照、会话文件与会话索引、SQLite 线程目录、一次同步被允许做什么、同步清单、遗留的
-临时文件，以及是否有未完成的写操作仍在阻止一切写入（在 `recover` 关闭它之前算作失败）。
+临时文件、Codex 能否启动（`codex_startup`：卡住的聊天列表重建在 `codex repair` 把它设回之前
+算作失败），以及是否有未完成的写操作仍在阻止一切写入（在 `recover` 关闭它之前算作失败）。
 
 ## 窗口与控制台
 
@@ -129,6 +132,7 @@ codexsync -c config.toml doctor
 | 备份 | `backups list`，然后 `restore --from 名称` |
 | 会话 — 工作集 | `sessions scan --project/--chat --save-scope`；用 `sessions scope` 查看 |
 | *始终这样处理* | `config set conflict.policy prefer_newer_mtime`（或其他规则） |
+| 恢复 — Codex 状态 | `codex check`，然后 `codex repair --confirm-plan 标识`；重建聊天列表是 `sessions catalogue --confirm-plan 标识` |
 
 `config set` 接受 TOML 值（`true`、`600`、`["sessions", "skills"]`）；文本无需引号。它像“设置”页一样修改文件：注释和其他值保持不变，结果必须通过与加载时相同的检查，期间被改动的文件不会被覆盖，被替换的版本保存到 `config-history/`。窗口不允许修改的，控制台同样拒绝——`safety.*`、`assumptions`、0.1 的终止进程开关以及 `handoff.root_dir`。
 

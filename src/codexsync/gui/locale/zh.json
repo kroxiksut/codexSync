@@ -133,6 +133,7 @@
   "check.session_catalog": "会话文件",
   "check.session_format": "会话记录格式",
   "check.session_visibility": "Codex 列出的对话",
+  "check.codex_startup": "Codex 能否启动",
   "check.sqlite_audit": "线程目录（SQLite）",
   "check.session_index": "会话索引",
   "check.global_state_schema": "全局状态结构",
@@ -213,6 +214,7 @@
   "sync.history.family.chats": "对话归属",
   "sync.history.family.project-sync": "项目",
   "sync.history.family.thread-catalogue": "Codex 聊天列表",
+  "sync.history.family.codex-repair": "修复 Codex",
   "sync.history.family.chat-names": "聊天名称",
   "sync.history.family.sessions": "聊天",
   "sync.history.family.sync": "设置文件",
@@ -314,6 +316,9 @@
   "sync.note.files.MISSING_HERE": "项目 {project}：本机上没有它的文件夹。",
   "sync.note.codex_ignores": {
     "other": "重建聊天列表后，Codex 仍未列出 {count} 个聊天文件。文件都在，没有丢失任何内容。"
+  },
+  "sync.note.codex_does_not_list": {
+    "other": "Codex 不显示带过来的 {count} 个聊天：它的聊天列表里没有对应的记录。当你可以让 Codex 保持打开几分钟时，可以在“恢复”页请它重建聊天列表。"
   },
   "sync.note.new_chats_in_cloud": {
     "other": "有 {count} 个对本机而言是新的聊天留在了云端副本中：加载新对话已关闭（「设置」→「同步」→「来自另一台机器的新对话」）。"
@@ -507,6 +512,7 @@
   "projects.lost.detail": "可在「对话归属」中固定它们，或构建下面的修复计划。",
   "projects.lost.open": "打开「对话归属」",
   "sync.link.files": "显示文件",
+  "sync.link.codex": "Codex 聊天列表",
   "sync.note.files.MISSING_THERE": "项目 {project}：本机有它的文件夹，{machine} 上没有。",
   "projects.files.title": "项目文件夹",
   "projects.files.caption": "对话会在机器之间迁移，项目文件夹不会。每次启动、完整同步和检查都会重新读取文件夹，并与其他机器最近发布的内容比较。不会复制或修改任何东西。",
@@ -655,6 +661,35 @@
     "other": "已从 {name} 还原 {count} 个文件。"
   },
   "recovery.loading": "正在读取事务日志…",
+  "recovery.codex.title": "Codex 状态",
+  "recovery.codex.caption": "检查 Codex 为什么可能无法启动或不显示你的聊天，并在这里修复能修复的问题，无论是谁造成的。检查只读取，不写入。",
+  "recovery.codex.check": "检查 Codex",
+  "recovery.codex.checking": "正在检查 Codex…",
+  "recovery.codex.never": "尚未检查。",
+  "recovery.codex.healthy": "未发现问题。",
+  "recovery.codex.severity.BROKEN": "已损坏",
+  "recovery.codex.severity.WARNING": "警告",
+  "recovery.codex.severity.NOTE": "提示",
+  "recovery.codex.repair": "修复",
+  "recovery.codex.open_guardian": "打开快照守护",
+  "recovery.codex.confirm.title": "修复 Codex",
+  "recovery.codex.confirm.text": "Codex 聊天列表的重建将被设回“已完成”，以便 Codex 能够启动。Codex 必须处于关闭状态。写入前会先备份数据库。\n\n计划 {plan_id}",
+  "recovery.codex.repaired": "已修复。现在可以启动 Codex。修复前的数据库保存在备份 {snapshot} 中。",
+  "recovery.codex.rebuild.prepare": "准备重建聊天列表",
+  "recovery.codex.rebuild.apply": "请 Codex 重建",
+  "recovery.codex.rebuild.prepared": "重建会遍历所有聊天文件：{count} 个文件，{megabytes} MB。下次启动时，Codex 要处理完全部文件才会打开，因此在聊天出现之前请不要关闭它。如果它显示“无法加载组织设置”，请回到这里检查 Codex。",
+  "recovery.codex.rebuild.nothing": "Codex 已列出所有聊天文件，无需重建。",
+  "recovery.codex.rebuild.confirm": "下次启动时，Codex 会重建整个聊天列表（{count} 个文件，{megabytes} MB）。在聊天出现之前请不要关闭它。现在 Codex 必须处于关闭状态；写入前会先备份数据库。\n\n计划 {plan_id}",
+  "recovery.codex.rebuild.done": "已请求。启动 Codex，并在聊天出现之前保持打开。",
+  "codex.finding.CATALOGUE_REBUILD_STUCK": "Codex 无法启动：聊天列表的重建（{chats} 个聊天文件，{megabytes} MB）中途被中断，且没有进程在继续。“修复”会将其设回“已完成”。",
+  "codex.finding.CATALOGUE_REBUILD_PENDING": "下次启动时 Codex 会重建聊天列表（{chats} 个聊天文件，{megabytes} MB）：在聊天出现之前请保持打开。也可以用“修复”跳过这次重建。",
+  "codex.finding.CATALOGUE_REBUILDING": "Codex 正在重建聊天列表：在聊天出现之前请保持打开。",
+  "codex.finding.CATALOGUE_REBUILD_UNDETERMINED": "聊天列表重建已被标记，但无法确定 Codex 是否在运行。请关闭 Codex 后再检查。",
+  "codex.finding.CATALOGUE_UNREADABLE": "无法读取 Codex 的聊天列表，因此未对其作出判断。",
+  "codex.finding.CATALOGUE_MISSES_CHATS": "有 {chats} 个聊天文件在原位，但 Codex 没有显示。可以在下方请它重建聊天列表。",
+  "codex.finding.GLOBAL_STATE_MISSING": "Codex 的全局状态（项目、置顶、聊天所属项目）缺失。快照守护可以恢复已保存的快照。",
+  "codex.finding.GLOBAL_STATE_INVALID": "Codex 的全局状态未通过校验，项目和聊天可能已经脱节。快照守护可以恢复已保存的快照。",
+  "codex.finding.OPEN_JOURNAL": "有 {journals} 个 codexSync 操作中途停止，它们会阻止所有写入；见下方列表。",
   "recovery.blocked.title": {
     "other": "{count} 个未完成的操作阻止了一切改动"
   },
@@ -720,6 +755,7 @@
   "journal.family.guardian-restore": "快照还原",
   "journal.family.project-move": "项目搬移",
   "journal.family.thread-catalogue": "重建 Codex 聊天列表",
+  "journal.family.codex-repair": "修复 Codex",
   "journal.family.chat-names": "聊天名称",
   "first_run.missing.title": "尚未打开配置",
   "first_run.missing.detail": "打开一个已有的 config.toml（位置不限），或在您自己选择的文件夹中新建一个。.codex 里不会创建也不会改动任何东西。",

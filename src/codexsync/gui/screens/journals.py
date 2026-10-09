@@ -7,11 +7,18 @@ resume (close the journal so the command can be re-run; it re-plans from what
 is on disk) or roll back. Both start with a dry run. A rollback puts each file
 back into the side its backup recorded (CS-293); naming a side only narrows it,
 and is needed only for an older restore whose snapshot does not record one.
+
+Above the journals sits Codex's own state (D-032): a check that only reads,
+then the repair it planned, confirmed by its plan id -- and the deliberate
+request for a chat-list rebuild, which a sync no longer makes by itself. The
+check runs when asked: it looks at the process list, and no page reads on
+arrival beyond what it always did.
 """
 from __future__ import annotations
 
 from PySide6.QtWidgets import QComboBox
 
+from ...codex_health import CATALOGUE_MISSES_CHATS, Severity
 from ..controller import Outcome
 from ..widgets import Banner, Cell, button, card, fill_table, label, row, selected_data, set_tone, table
 from .base import Model, Screen
@@ -30,6 +37,14 @@ class RecoveryModel(Model):
         self.result: Outcome | None = None
         #: The journal another page sent the person to (`reveal`).
         self.wanted: str | None = None
+        #: Codex's own state (D-032): the last check, and what a repair or a
+        #: rebuild request answered.
+        self.health: Outcome | None = None
+        self.codex_busy = False
+        self.codex_kind = ""
+        self.codex_result: Outcome | None = None
+        #: The preview a rebuild request is confirmed against.
+        self.rebuild_preview: Outcome | None = None
 
 
 class RecoveryScreen(Screen):
@@ -41,6 +56,26 @@ class RecoveryScreen(Screen):
         self.refresh_button.clicked.connect(self.refresh)
         self.banner.actions.addWidget(self.refresh_button)
         self.body.addWidget(self.banner)
+
+        self.codex_frame, codex_inner = card(self.t("recovery.codex.title"))
+        codex_inner.addWidget(label(self.t("recovery.codex.caption"), "muted", wrap=True))
+        self.codex_check = button(self.t("recovery.codex.check"))
+        self.codex_check.clicked.connect(self.check_codex)
+        self.codex_repair = button(self.t("recovery.codex.repair"), primary=True)
+        self.codex_repair.clicked.connect(self.repair_codex)
+        self.codex_guardian = button(self.t("recovery.codex.open_guardian"))
+        self.codex_guardian.clicked.connect(lambda: self.host.go_to("guardian"))
+        codex_inner.addLayout(row(self.codex_check, self.codex_repair, self.codex_guardian))
+        self.codex_findings = label("", wrap=True)
+        codex_inner.addWidget(self.codex_findings)
+        self.rebuild_prepare = button(self.t("recovery.codex.rebuild.prepare"))
+        self.rebuild_prepare.clicked.connect(self.prepare_rebuild)
+        self.rebuild_apply = button(self.t("recovery.codex.rebuild.apply"))
+        self.rebuild_apply.clicked.connect(self.request_rebuild)
+        codex_inner.addLayout(row(self.rebuild_prepare, self.rebuild_apply))
+        self.codex_status = label("", wrap=True)
+        codex_inner.addWidget(self.codex_status)
+        self.body.addWidget(self.codex_frame)
 
         self.summary = label()
         frame, inner = card(self.t("recovery.list.title"), self.summary)
@@ -91,9 +126,104 @@ class RecoveryScreen(Screen):
             self.refresh()
 
     def reveal(self, target: str) -> None:
-        """Select the journal ``target`` names, now or once the listing arrives."""
+        """Select the journal ``target`` names, now or once the listing arrives.
+
+        ``codex`` is Codex's own state instead: a sync's note about chats Codex
+        does not show sends the person there.
+        """
+        if target == "codex":
+            self.show_widget(self.codex_check)
+            return
         self.model.wanted = target
         self._select_wanted()
+
+    # --- Codex's own state -------------------------------------------------------
+
+    def check_codex(self) -> None:
+        model = self.model
+        if model.codex_busy:
+            return
+        model.codex_busy, model.codex_kind, model.codex_result = True, "check", None
+        self.render()
+
+        def apply(model: RecoveryModel, outcome: Outcome) -> None:
+            model.codex_busy = False
+            model.health = outcome
+
+        self.read(self.host.controller.codex_check, apply)
+
+    def repair_codex(self) -> None:
+        model = self.model
+        health = model.health
+        if model.codex_busy or health is None or not health.ok or not health.value.plan.writes:
+            return
+        plan_id = health.value.plan.plan_id
+        if not self.host.confirm(
+            self.t("recovery.codex.confirm.title"),
+            self.t("recovery.codex.confirm.text", plan_id=plan_id),
+            self.t("recovery.codex.repair"),
+        ):
+            return
+        model.codex_busy, model.codex_kind, model.codex_result = True, "repair", None
+        self.render()
+        controller = self.host.controller
+
+        def go() -> Outcome:
+            done = controller.codex_repair(confirm_plan=plan_id)
+            return Outcome(value=(done, controller.codex_check() if done.ok else None))
+
+        self.run(go, self._codex_written)
+
+    def prepare_rebuild(self) -> None:
+        model = self.model
+        if model.codex_busy:
+            return
+        model.codex_busy, model.codex_kind, model.codex_result = True, "prepare", None
+        self.render()
+        controller = self.host.controller
+
+        def apply(model: RecoveryModel, outcome: Outcome) -> None:
+            model.codex_busy = False
+            model.rebuild_preview = outcome
+
+        self.read(lambda: controller.catalogue_rebuild(confirm_plan=None), apply)
+
+    def request_rebuild(self) -> None:
+        model = self.model
+        preview = model.rebuild_preview
+        if model.codex_busy or preview is None or not preview.ok or not preview.value.plan.writes:
+            return
+        plan_id = preview.value.plan.plan_id
+        count, megabytes = _size(preview.value.chat_files)
+        if not self.host.confirm(
+            self.t("recovery.codex.rebuild.apply"),
+            self.t("recovery.codex.rebuild.confirm", plan_id=plan_id, count=count, megabytes=megabytes),
+            self.t("recovery.codex.rebuild.apply"),
+        ):
+            return
+        model.codex_busy, model.codex_kind, model.codex_result = True, "rebuild", None
+        self.render()
+        controller = self.host.controller
+
+        def go() -> Outcome:
+            done = controller.catalogue_rebuild(confirm_plan=plan_id)
+            return Outcome(value=(done, controller.codex_check() if done.ok else None))
+
+        self.run(go, self._codex_written)
+
+    @staticmethod
+    def _codex_written(model: RecoveryModel, outcome: Outcome) -> None:
+        model.codex_busy = False
+        if not outcome.ok:
+            # Only when the job itself broke; a refusal arrives as ``done``.
+            model.codex_result = outcome
+            return
+        done, health = outcome.value
+        model.codex_result = done
+        if done.ok:
+            model.rebuild_preview = None
+        if health is not None:
+            model.health = health
 
     def _select_wanted(self) -> None:
         wanted = self.model.wanted
@@ -247,6 +377,72 @@ class RecoveryScreen(Screen):
             self._select_wanted()
             self.summary.setText(self.p("recovery.count", len(outcome.value)))
         self._render_actions()
+        self._render_codex()
+
+    def _render_codex(self) -> None:
+        model = self.model
+        palette = self.palette_
+        busy = model.codex_busy
+        health = model.health
+        findings = health.value.findings if health is not None and health.ok else ()
+        repairable = bool(health is not None and health.ok and health.value.plan.writes)
+        misses = any(item.code == CATALOGUE_MISSES_CHATS for item in findings)
+        preview = model.rebuild_preview
+        prepared = bool(preview is not None and preview.ok and preview.value.plan.writes)
+        self.codex_check.setEnabled(not busy)
+        self.codex_repair.setVisible(repairable)
+        self.codex_repair.setEnabled(repairable and not busy)
+        self.codex_guardian.setVisible(any(item.command == "guardian restore" for item in findings))
+        self.rebuild_prepare.setVisible(misses or prepared)
+        self.rebuild_prepare.setEnabled(not busy)
+        self.rebuild_apply.setVisible(misses or prepared)
+        self.rebuild_apply.setEnabled(prepared and not busy)
+
+        if busy and model.codex_kind == "check":
+            text, tone = self.t("recovery.codex.checking"), None
+        elif health is None:
+            text, tone = self.t("recovery.codex.never"), None
+        elif not health.ok:
+            text, tone = self.failure_text(health), "danger"
+        elif not findings:
+            text, tone = self.t("recovery.codex.healthy"), "ok"
+        else:
+            lines = [
+                f"{self.t(f'recovery.codex.severity.{item.severity.value}')}: "
+                + self.t(f"codex.finding.{item.code}", **{"chats": 0, "megabytes": 0, "journals": 0, **item.counts})
+                for item in findings
+            ]
+            text = "\n".join(lines)
+            tone = "danger" if health.value.broken else (
+                "attention" if any(item.severity is Severity.WARNING for item in findings) else None
+            )
+        self.codex_findings.setText(text)
+        set_tone(self.codex_findings, tone, palette)
+
+        text, tone = "", None
+        result = model.codex_result
+        if busy and model.codex_kind != "check":
+            text = self.t("recovery.working")
+        elif result is not None and not result.ok:
+            text, tone = self.failure_text(result), "danger"
+        elif result is not None and model.codex_kind == "repair":
+            text = (
+                self.t("recovery.codex.repaired", snapshot=result.value.snapshot or "—")
+                if result.value.repaired else self.t("recovery.codex.healthy")
+            )
+            tone = "ok"
+        elif result is not None and model.codex_kind == "rebuild":
+            text, tone = self.t("recovery.codex.rebuild.done"), "ok"
+        elif preview is not None and not preview.ok:
+            text, tone = self.failure_text(preview), "danger"
+        elif prepared:
+            count, megabytes = _size(preview.value.chat_files)
+            text, tone = self.t("recovery.codex.rebuild.prepared", count=count, megabytes=megabytes), "attention"
+        elif preview is not None:
+            text = self.t("recovery.codex.rebuild.nothing")
+        self.codex_status.setText(text)
+        set_tone(self.codex_status, tone, palette)
+        self.codex_status.setVisible(bool(text))
 
     def _render_actions(self) -> None:
         model = self.model
@@ -299,6 +495,13 @@ class RecoveryScreen(Screen):
         self.status.setText(text)
         set_tone(self.status, tone, palette)
         self.status.setVisible(bool(text))
+
+
+def _size(files) -> tuple[int, int]:
+    """(chat files, megabytes) of what a rebuild walks; zeros when unknown."""
+    if files is None:
+        return 0, 0
+    return files.count, files.size // (1024 * 1024)
 
 
 def _checked_target(action: str, target: str) -> str:

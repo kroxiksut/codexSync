@@ -48,6 +48,8 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
   保留一份完整副本（按你的规则或选择），另一份被保存下来。→ [会话](docs/zh/SESSIONS.md)
 - **每次覆盖前先备份**，并能从被中断的写入中恢复 —— 锁、事务日志、经过校验的备份。
   → [备份与恢复](docs/zh/RECOVERY.md)
+- **检查并修复 Codex** —— Codex 无法启动或不显示聊天时，`codex check` 说明原因，`codex repair`
+  修复能修复的问题，无论是谁造成的。→ [Codex 无法启动时](docs/zh/RECOVERY.md#codex-无法启动时)
 - **守护全局状态**：*在 Codex 运行期间*拍摄经过校验的快照，并且只写到 `.codex`
   之外。→ [快照守护](docs/zh/GUARDIAN.md)
 - **可以自动运行** —— 交接监视器、`.codex` 副本和定期快照都是操作系统的普通任务。
@@ -101,7 +103,7 @@ codexsync -c config.toml doctor
 | [快照守护](docs/zh/GUARDIAN.md) | 全局状态的快照、隔离区、还原、新的基准 |
 | [会话](docs/zh/SESSIONS.md) | 跨机器的会话分支、工作集、镜像、索引 |
 | [项目与对话](docs/zh/PROJECTS.md) | 对话归属、换机之后的修复、搬移项目 |
-| [备份与恢复](docs/zh/RECOVERY.md) | 备份、还原、被中断的写操作 |
+| [备份与恢复](docs/zh/RECOVERY.md) | 备份、还原、被中断的写操作、Codex 无法启动时 |
 
 全部页面汇总在一处：[docs/](docs/README.zh.md)。面向贡献者（均为英文）：
 [开发者文档](docs/dev/README.md)。更新日志：[CHANGELOG.md](./CHANGELOG.md)。

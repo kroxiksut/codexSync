@@ -13,6 +13,8 @@ from .app import (
     ProjectSyncResult,
     sync_projects,
     refresh_thread_catalogue,
+    check_codex,
+    repair_codex,
     sync_chat_names,
     check_project_files,
     handoff_status,
@@ -1026,6 +1028,20 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("--limit", type=int, default=20, help="Newest runs to show (default: 20; 0 = all)")
     history.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
 
+    codex = sub.add_parser(
+        "codex", help="Check why Codex may not start or show its work, and repair what can be repaired",
+    )
+    codex_sub = codex.add_subparsers(dest="codex_command", required=True)
+    codex_check = codex_sub.add_parser("check", help="List what is wrong with Codex's state; reads only")
+    codex_check.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+    codex_repair = codex_sub.add_parser(
+        "repair",
+        help="Preview, or with --confirm-plan apply, the repair `codex check` offers; Codex must be closed",
+    )
+    codex_repair.add_argument("--confirm-plan", default=None, help="Plan id from the preview")
+    codex_repair.add_argument("--dry-run", action="store_true", help="Run every check without writing")
+    codex_repair.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+
     recover = sub.add_parser("recover", help="Inspect and clear interrupted mutation evidence")
     recover_sub = recover.add_subparsers(dest="recover_command", required=True)
     recover_list = recover_sub.add_parser(
@@ -1229,7 +1245,13 @@ def _print_handoff_result(result) -> None:
     if result.chats_codex_will_list:
         print(
             f"  chats Codex lists after its next start: {result.chats_codex_will_list} "
-            "(it rebuilds its chat list from the files; that start takes longer)"
+            "(it rebuilds its chat list from the files; that start takes longer -- leave Codex open "
+            "until the chats appear)"
+        )
+    if result.chats_codex_does_not_list:
+        print(
+            f"  chat files Codex does not list: {result.chats_codex_does_not_list} "
+            "(the files are in place; `sessions catalogue` asks Codex to rebuild its chat list)"
         )
     if result.chats_codex_ignores:
         print(
@@ -1617,6 +1639,58 @@ def _print_history(runs) -> None:
             f"{run.created_at_utc or '?'}  {run.family or '?'}  {state}  "
             f"origin={run.origin or '-'}  {changes}  backup={run.backup_snapshot or '-'}"
         )
+
+
+#: Said wherever Codex is asked to rebuild its chat list (D-032).
+_REBUILD_ADVICE = (
+    "  On its next start Codex walks every chat file before it opens; leave it open until the chats "
+    "appear. If it shows \"could not load your organization's settings\", run `codexsync codex check`."
+)
+
+#: One sentence per `codex check` finding; counts fill the braces.
+_FINDING_TEXT = {
+    "CATALOGUE_REBUILD_STUCK": (
+        "Codex will not start: a rebuild of its chat list ({chats} chat files, {megabytes} MB) was ended "
+        "part-way and nobody is doing it. `codex repair` sets it back to complete."
+    ),
+    "CATALOGUE_REBUILD_PENDING": (
+        "Codex rebuilds its chat list on its next start ({chats} chat files, {megabytes} MB): leave it open "
+        "until the chats appear. `codex repair` skips the rebuild instead."
+    ),
+    "CATALOGUE_REBUILDING": "Codex is rebuilding its chat list: leave it open until the chats appear.",
+    "CATALOGUE_REBUILD_UNDETERMINED": (
+        "A rebuild of Codex's chat list is marked, and whether Codex is running could not be determined; "
+        "close Codex and check again."
+    ),
+    "CATALOGUE_UNREADABLE": "Codex's chat list could not be read; nothing about it was judged.",
+    "CATALOGUE_MISSES_CHATS": (
+        "Codex does not list {chats} chat file(s) that are in place. `sessions catalogue` asks it to "
+        "rebuild its chat list."
+    ),
+    "GLOBAL_STATE_MISSING": (
+        "Codex's global state (projects, pins, which chat is in which project) is missing. "
+        "`guardian restore` puts a saved snapshot back."
+    ),
+    "GLOBAL_STATE_INVALID": (
+        "Codex's global state does not validate, so projects or chats may be torn apart. "
+        "`guardian restore` puts a saved snapshot back."
+    ),
+    "OPEN_JOURNAL": "{journals} codexSync operation(s) stopped part-way and block every write; see `recover list`.",
+}
+
+
+def _print_codex_health(health) -> None:
+    state = health.process_state.value.lower()
+    if not health.findings:
+        print(f"Codex check: nothing wrong found (Codex {state}).")
+        return
+    print(f"Codex check (Codex {state}):")
+    for item in health.findings:
+        text = _FINDING_TEXT.get(item.code, item.code).format_map({"chats": 0, "megabytes": 0, "journals": 0, **item.counts})
+        print(f"  [{item.severity.value}] {item.code}: {text}")
+    if health.plan.writes:
+        print(f"  repair plan id: {health.plan.plan_id}")
+        print("  Close Codex and run `codex repair --confirm-plan <plan id>`.")
 
 
 def _print_journals(journals, *, as_json: bool, include_finished: bool) -> None:
@@ -2258,9 +2332,68 @@ def main(argv: list[str] | None = None) -> int:
                 print("  Codex is running: this reading is only an indication")
             if refresh.refreshed:
                 print("Asked Codex to rebuild its chat list; it does so on its next start.")
+                print(_REBUILD_ADVICE)
             elif args.confirm_plan is None and plan.writes:
+                files = refresh.chat_files
+                if files is not None:
+                    print(
+                        f"  a rebuild walks every chat file: {files.count} file(s), "
+                        f"{files.size // (1024 * 1024)} MB"
+                    )
                 print(f"  plan id: {plan.plan_id}")
                 print("  Close Codex and run again with --confirm-plan <plan id> to ask it to rebuild its chat list.")
+                print(_REBUILD_ADVICE)
+            return int(ExitCode.OK)
+
+        if args.command == "codex" and args.codex_command == "check":
+            health = check_codex(config_path)
+            if args.as_json:
+                print(json.dumps({
+                    "broken": health.broken,
+                    "process_state": health.process_state.value,
+                    "findings": [
+                        {
+                            "code": item.code, "severity": item.severity.value, "counts": dict(item.counts),
+                            "fix": item.fix, "command": item.command,
+                        }
+                        for item in health.findings
+                    ],
+                    "repair_plan_id": health.plan.plan_id if health.plan.writes else None,
+                }, sort_keys=True, indent=2))
+                return int(ExitCode.OK)
+            _print_codex_health(health)
+            return int(ExitCode.OK)
+
+        if args.command == "codex" and args.codex_command == "repair":
+            repair = repair_codex(
+                config_path, confirm_plan=args.confirm_plan, dry_run=args.dry_run, origin="cli",
+            )
+            plan = repair.plan
+            if args.as_json:
+                print(json.dumps({
+                    "plan_id": plan.plan_id,
+                    "writes": plan.writes,
+                    "current": list(plan.current) if plan.current is not None else None,
+                    "target": list(plan.target) if plan.target is not None else None,
+                    "source": plan.source,
+                    "snapshot": plan.snapshot,
+                    "repaired": repair.repaired,
+                    "backup": repair.snapshot,
+                }, sort_keys=True, indent=2))
+                return int(ExitCode.OK)
+            if not plan.writes:
+                print("Nothing to repair: Codex's chat-list rebuild is not stuck.")
+                return int(ExitCode.OK)
+            print(f"Codex's chat-list rebuild: {plan.current[0] if plan.current else '-'} -> complete")
+            print(
+                "  row put back: "
+                + (f"the one codexSync's copy {plan.snapshot} holds" if plan.snapshot else "the row as found")
+            )
+            if repair.repaired:
+                print(f"Repaired; the catalogue as it was is in backup {repair.snapshot}. Start Codex now.")
+            elif args.confirm_plan is None:
+                print(f"  plan id: {plan.plan_id}")
+                print("  Close Codex and run again with --confirm-plan <plan id> to repair.")
             return int(ExitCode.OK)
 
         if args.command == "sessions" and args.sessions_command == "names":

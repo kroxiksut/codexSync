@@ -177,13 +177,15 @@ new_chats = "same_path"   # same_path | keep_in_cloud
   目录把该聊天放在别处或无法读取时，写入仍会被拒绝（`BLOCKED_UNSUPPORTED_BACKEND`）。
 
 Codex 从它的线程目录列出聊天。它只根据聊天文件填充一次这个目录，之后自行维护。之后才写入的
-文件——也就是来自另一台机器的每个聊天——不在目录中，Codex 也就不显示它。因此完整同步会请
-Codex 根据文件重建列表（`D-024`）：在对目录做了已验证的备份之后，codexSync 把一行状态恢复为
-Codex 创建它时的值，Codex 在下次启动时自己把所有聊天写入列表，那次启动会比平时慢。codexSync
-从不自己把聊天写入目录。`codexsync sessions catalogue` 列出 Codex 列表中没有的聊天文件，加上
-`--confirm-plan` 时单独发出同样的请求。对同一组文件只请求一次；如果 Codex 之后仍有遗漏，同步会
-如实报告，而不会每次再请求。`doctor` 在 `session_visibility` 中报告同一个数字；`not_listed=0`
-表示所有聊天都可见。
+文件——也就是来自另一台机器的每个聊天——不在目录中，Codex 也就不显示它。完整同步会统计并报告
+这些聊天，但**不会**请 Codex 重建列表（`D-032`）。是否请求由你决定：`codexsync sessions catalogue
+--confirm-plan <id>`，或在窗口中进入“恢复 → Codex 状态”。随后 codexSync 在对目录做了已验证的
+备份之后，把一行状态恢复为 Codex 创建它时的值（`D-024`），Codex 在下次启动时会先遍历**所有**
+聊天文件才打开——在聊天出现之前请不要关闭它。如果这次启动被中途结束，重建会一直标记为“进行中”，
+Codex 将完全无法启动（显示“无法加载组织设置”）；`codexsync codex check` 能发现这一情况，
+`codex repair` 可以修复——见 [Codex 无法启动时](RECOVERY.md#codex-无法启动时)。codexSync 从不自己
+把聊天写入目录。`doctor` 在 `session_visibility` 中报告同一个数字；`not_listed=0` 表示所有聊天
+都可见。
 
 聊天的**名称**也不在其文件中：Codex 只把它保存在该目录里，所以迁移过来的聊天起初显示为第一条消息。
 因此每台机器把自己聊天的名称发布到清单旁边的 `chat-names` 中，完整同步会把另一台机器的名称设置给

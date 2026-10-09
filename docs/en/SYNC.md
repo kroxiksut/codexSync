@@ -250,8 +250,11 @@ is loaded into `.codex` over its own file, at the path Codex's own catalogue
 names for it. A chat started on the other machine is loaded too, at the path it
 has there (`[semantic] new_chats = "same_path"`, the default); with
 `keep_in_cloud` it stays in the cloud copy (see [Sessions](SESSIONS.md#writing-into-codex)). A handoff says how many new
-chats it wrote into Codex — `doctor` then says whether Codex lists them — and
-how many stayed in the cloud copy only, rather than calling the work loaded.
+chats it wrote into Codex, how many of the chat files Codex does not list yet,
+and how many stayed in the cloud copy only, rather than calling the work
+loaded. It never asks Codex to rebuild its chat list (`D-032`): `sessions
+catalogue` or *Recovery → Codex state* does, when you can leave Codex open
+until it finishes.
 
 **Projects.** Last, the project list is merged: projects the other machine has
 are added here, nothing is removed, and the other machine's pins and order are

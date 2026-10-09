@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 
+from .codex_health import Severity, diagnose_catalogue, measure_chat_files
 from .config import load_config
 from .guardian_models import (
     GUARDIAN_COMMITTED_NAME,
@@ -29,7 +30,7 @@ from .runtime import _make_safety_gate
 from .safety_gate import OperationKind, ProcessState
 from .session_catalog import SessionCatalog, SessionState, latest_page, peek_record_formats, scan_sessions
 from .session_index import SESSION_INDEX_FILE, parse_session_index
-from .sqlite_audit import PlacementStatus, audit_sqlite, read_thread_placements
+from .sqlite_audit import PlacementStatus, audit_sqlite, read_backfill_state, read_thread_placements
 from .project_registry import PROVEN_PROJECT_REGISTRY, registry_note
 from .state_locator import locate_state_dirs
 from .sync_engine import STAGE_DIR_PREFIXES
@@ -101,6 +102,7 @@ def run_preflight(config_path: Path, operation: OperationKind = OperationKind.DO
 
     checks.append(_check_process_state(cfg, operation))
     if local_dir is not None:
+        checks.append(_check_codex_startup(cfg, local_dir))
         try:
             catalog = scan_sessions(local_dir, volatile=True, max_line_bytes=cfg.semantic.max_jsonl_line_bytes)
             invalid = sum(1 for item in catalog.descriptors if item.state.value in {"INVALID", "AMBIGUOUS"})
@@ -294,10 +296,43 @@ def _check_session_visibility(local_dir: Path, catalog: SessionCatalog) -> Prefl
     if unlisted or elsewhere:
         return PreflightCheckResult(
             "session_visibility", "WARN",
-            detail + "; Codex does not show these chats. A full sync (or `sessions catalogue`) asks "
-            "Codex to rebuild its chat list from the files, which it does on its next start",
+            detail + "; Codex does not show these chats. `sessions catalogue` asks Codex to rebuild "
+            "its chat list from the files, which it does on its next start (leave it open until it finishes)",
         )
     return PreflightCheckResult("session_visibility", "PASS", detail)
+
+
+def _check_codex_startup(cfg: AppConfig, local_dir: Path) -> PreflightCheckResult:
+    """Whether Codex's chat-list rebuild will let it start (D-032).
+
+    A rebuild marked ``running`` with no Codex process is one nobody is doing,
+    and every Codex start waits for it and exits: that is a FAIL, with the
+    command that repairs it. A pending rebuild is a WARN with its size, because
+    the start that runs it is long and ending it part-way leads to the FAIL.
+    """
+    try:
+        reading = read_backfill_state(local_dir)
+        process = _make_safety_gate(cfg).check(OperationKind.DOCTOR).process_state
+        findings = diagnose_catalogue(reading, process, measure_chat_files(local_dir))
+    except Exception as exc:
+        return PreflightCheckResult("codex_startup", "WARN", f"Codex's chat-list state not checked: {exc}")
+    if not findings:
+        return PreflightCheckResult("codex_startup", "PASS", f"Chat-list rebuild: {reading.backfill or 'none'}")
+    item = findings[0]
+    counts = " ".join(f"{key}={value}" for key, value in item.counts.items())
+    if item.severity is Severity.BROKEN:
+        return PreflightCheckResult(
+            "codex_startup", "FAIL",
+            f"{item.code} {counts}: Codex will not start until its chat-list rebuild is complete; "
+            "run `codex repair` (Codex closed)",
+        )
+    if item.severity is Severity.WARNING:
+        return PreflightCheckResult(
+            "codex_startup", "WARN",
+            f"{item.code} {counts}: leave Codex open on its next start until the chats appear, "
+            "or `codex repair` skips the rebuild",
+        )
+    return PreflightCheckResult("codex_startup", "PASS", f"{item.code} {counts}".strip())
 
 
 def _check_process_state(cfg: AppConfig, operation: OperationKind) -> PreflightCheckResult:

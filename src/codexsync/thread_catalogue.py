@@ -237,6 +237,79 @@ def reset_backfill(database: Path, *, now: int) -> None:
         connection.close()
 
 
+BackfillRow = tuple[str | None, str | None, int | None, int | None]
+
+
+def settle_backfill(database: Path, *, expected: BackfillRow, target: BackfillRow) -> None:
+    """Put a rebuild Codex cannot finish back to ``complete`` (D-032).
+
+    ``expected`` is the whole row as the plan read it -- status, watermark,
+    last success and last change -- and it must still be exactly that under the
+    write lock: a Codex that moved the row since (it took the rebuild up, or
+    finished it) is never overwritten. ``target`` must say ``complete``. One
+    transaction, one row, like `reset_backfill`.
+    """
+    if target[0] != BACKFILL_COMPLETE:
+        raise FailSafeError("A repair only ever puts Codex's chat-list rebuild back to complete")
+    connection = sqlite3.connect(str(database), timeout=5.0, isolation_level=None)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = connection.execute(
+                "SELECT status, last_watermark, last_success_at, updated_at FROM backfill_state WHERE id = 1"
+            ).fetchone()
+            if row is None or tuple(row) != tuple(expected):
+                raise FailSafeError(
+                    "Codex's chat-list rebuild changed after it was checked; nothing was written. Check again."
+                )
+            changed = connection.execute(
+                "UPDATE backfill_state SET status = ?, last_watermark = ?, last_success_at = ?, updated_at = ? "
+                "WHERE id = 1",
+                tuple(target),
+            ).rowcount
+            if changed != 1:
+                raise FailSafeError("Codex's chat-list rebuild could not be settled; nothing was written")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        connection.execute("COMMIT")
+    finally:
+        connection.close()
+
+
+def read_backfill_row(database: Path) -> BackfillRow | None:
+    """The whole row as stored now; same conditions as `read_backfill_status`."""
+    connection = sqlite3.connect(str(database), timeout=5.0)
+    try:
+        row = connection.execute(
+            "SELECT status, last_watermark, last_success_at, updated_at FROM backfill_state WHERE id = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    return tuple(row) if row is not None else None  # type: ignore[return-value]
+
+
+def read_snapshot_backfill_row(database: Path) -> BackfillRow | None:
+    """The row a backup copy of the catalogue holds, opened immutable.
+
+    The copy lives in codexSync's own backup folder and is never written; a
+    copy that cannot be read is no evidence, so ``None``.
+    """
+    try:
+        connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro&immutable=1", uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return None
+    try:
+        row = connection.execute(
+            "SELECT status, last_watermark, last_success_at, updated_at FROM backfill_state WHERE id = 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    return tuple(row) if row is not None else None  # type: ignore[return-value]
+
+
 def read_backfill_status(database: Path) -> str | None:
     """The status as stored now, read through an ordinary connection.
 

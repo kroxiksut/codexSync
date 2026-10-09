@@ -448,6 +448,7 @@ class SyncScreen(Screen):
             self.links.show(run.value)
             attention = (
                 run.value.projects_missing_folders or run.value.chats_codex_ignores
+                or getattr(run.value, "chats_codex_does_not_list", 0)
                 or run.value.project_files_behind or getattr(run.value, "steps_not_done", ())
             )
             set_tone(self.result, "attention" if attention else "ok", palette)
@@ -605,6 +606,10 @@ def full_sync_notes(screen: Screen, result) -> list[str]:
         notes.append(screen.p("sync.note.codex_will_list", result.chats_codex_will_list))
     if result.chats_codex_ignores:
         notes.append(screen.p("sync.note.codex_ignores", result.chats_codex_ignores))
+    # A sync no longer asks Codex to rebuild its chat list (D-032): the person
+    # does, from Recovery, when Codex can be left open while it works.
+    if getattr(result, "chats_codex_does_not_list", 0):
+        notes.append(screen.p("sync.note.codex_does_not_list", result.chats_codex_does_not_list))
     # Names live only in Codex's catalogue, so they travel separately (D-025).
     if result.chat_names_set:
         notes.append(screen.p("sync.note.names_set", result.chat_names_set))
@@ -653,7 +658,9 @@ class ResultLinks:
         self.sessions.clicked.connect(self.open_sessions)
         self.files = button(screen.t("sync.link.files"))
         self.files.clicked.connect(self.open_files)
-        self.layout = row(self.recovery, self.mappings, self.new_chats, self.sessions, self.files)
+        self.codex = button(screen.t("sync.link.codex"))
+        self.codex.clicked.connect(lambda: screen.host.go_to("recovery", "codex"))
+        self.layout = row(self.recovery, self.mappings, self.new_chats, self.sessions, self.files, self.codex)
         self.show(None)
 
     def show_stop(self, outcome) -> None:
@@ -674,6 +681,7 @@ class ResultLinks:
             result is not None and result.chats_not_loaded - result.new_chats_kept_in_cloud > 0
         ))
         self.files.setVisible(bool(result is not None and result.project_files_behind))
+        self.codex.setVisible(bool(result is not None and getattr(result, "chats_codex_does_not_list", 0)))
 
     def open_files(self) -> None:
         """Projects, at the folders that did not come along, checked afresh."""

@@ -26,9 +26,13 @@ and every write still goes through the lock, journal and verified backup.
   interrupted writes, history of every sync, verified copies of `.codex`.
 - So that carried chats show up in Codex with their names, two narrow edits of
   Codex's own database, each with Codex closed and after a verified backup: a
-  request to rebuild its chat list from the files, and a name for a chat that
-  has none here. Never a chat row of its own, never a project record. If you
-  turn it on, a sync asks Codex to quit first — never by force.
+  request to rebuild its chat list from the files — made only when you ask —
+  and a name for a chat that has none here. Never a chat row of its own, never
+  a project record. If you turn it on, a sync asks Codex to quit first — never
+  by force.
+- `codex check` / `codex repair` (and *Recovery → Codex state* in the window):
+  find why Codex does not start or show your chats and put right what can be
+  put right here, whoever caused it.
 
 **Install**
 - `python -m pip install --upgrade --pre "codexsync[gui]"` — the same command
@@ -68,6 +72,15 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
 [SECURITY.md](https://github.com/kroxiksut/codexSync/blob/main/SECURITY.md).
 
 ### Added
+- **Codex's state can be checked and repaired** (`D-032`). `codex check` reads
+  only and lists findings with a code, a severity and their repair; `codex
+  repair --confirm-plan` applies the one it plans, in the same envelope as
+  every catalogue write (journal family `codex-repair`). The window shows the
+  same on the Recovery page, and `doctor` reports it as `codex_startup`. The
+  first repair is the one that was needed on the day: a chat-list rebuild left
+  `running`, which stops every Codex start ("could not load your
+  organization's settings"), is set back to `complete` — the exact row from
+  codexSync's own backup when its request started the rebuild.
 - **Python 3.14, and Linux as an experimental platform** (`D-031`). CI runs
   Python 3.11–3.14 on Windows and macOS, and every job on `ubuntu-latest` as
   well, where a failure is shown but does not fail the run. On Linux the
@@ -153,10 +166,11 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
 - **Chats brought from another machine show up in Codex** (`D-024`). Codex
   lists chats from its own catalogue, which it filled from the files once; a
   chat file written afterwards stayed invisible (197 on the laptop, every
-  project "no chats"). A full sync now asks Codex to rebuild that list from
-  the files on its next start — one status row put back to the value Codex
-  itself creates, after a verified backup — and says how many chats will
-  appear. `codexsync sessions catalogue` shows and does the same on its own.
+  project "no chats"). `codexsync sessions catalogue` (or *Recovery → Codex
+  state* in the window) asks Codex to rebuild that list from the files on its
+  next start — one status row put back to the value Codex itself creates,
+  after a verified backup. A full sync only says how many chats Codex does
+  not list: since `D-032` it never asks by itself.
 - **Archived chats follow the other machine** (`D-023`). A chat archived or
   taken out of the archive on one machine is moved the same way on the other:
   written where that machine keeps it, the old file removed after a verified
@@ -609,6 +623,13 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
   termination flow it belonged to.
 
 ### Fixed
+- **A sync no longer asks Codex to rebuild its chat list** (`D-032`). On a
+  machine with 306 chats the request made Codex walk every chat file while it
+  started; that start was ended part-way, the rebuild stayed marked as
+  running, and Codex would not start again until the row was put back by
+  hand. A sync now only counts the chats Codex does not list; `sessions
+  catalogue` (or the window) asks, after saying how many files the rebuild
+  walks and that Codex must be left open until the chats appear.
 - **A chat decided by the rule on both machines no longer stops every later
   sync.** The conflict bundle's id sorts the two branches, but finding an
   existing bundle compared them by position, so the second machine to decide

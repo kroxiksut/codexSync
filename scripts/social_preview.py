@@ -57,7 +57,7 @@ def draw() -> QImage:
     painter.setFont(QFont("Segoe UI", 15))
     painter.drawText(
         QRectF(72, 500, 520, 60), Qt.AlignmentFlag.AlignLeft,
-        "Local-first GUI and CLI · Windows and macOS",
+        "Local-first GUI and CLI\nWindows · macOS · Linux (experimental)",
     )
 
     # Right: the window, cropped to its left part and framed like a card.

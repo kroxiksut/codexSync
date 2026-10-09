@@ -251,6 +251,28 @@ class FakeController(Controller):
         self.calls.append(("rollback", operation_id, target, dry_run))
         return Outcome(value=RecoveryOutcome(operation_id, "sync", "COMMITTING", RecoveryAction.WOULD_RECOVER if dry_run else RecoveryAction.ROLLED_BACK, "snap-1", 2, "detail"))
 
+    def codex_check(self) -> Outcome:
+        self.calls.append(("codex_check",))
+        return self._answer("codex_check", Outcome(value=_codex_health("CATALOGUE_REBUILD_STUCK")))
+
+    def codex_repair(self, *, confirm_plan) -> Outcome:
+        from codexsync.app import CodexRepairResult
+
+        self.calls.append(("codex_repair", confirm_plan))
+        self.outcomes["codex_check"] = Outcome(value=_codex_health(None))
+        return Outcome(value=CodexRepairResult(plan=_codex_health("CATALOGUE_REBUILD_STUCK").plan, repaired=True, snapshot="snap-9"))
+
+    def catalogue_rebuild(self, *, confirm_plan) -> Outcome:
+        from codexsync.app import CatalogueRefreshResult
+        from codexsync.codex_health import ChatFiles
+        from codexsync.thread_catalogue import CatalogueRefreshPlan, RefreshStatus
+
+        self.calls.append(("catalogue_rebuild", confirm_plan))
+        plan = CatalogueRefreshPlan("c" * 64, RefreshStatus.NEEDED, "state_5.sqlite", "complete", ("sessions/a.jsonl",))
+        return Outcome(value=CatalogueRefreshResult(
+            plan=plan, refreshed=confirm_plan is not None, chat_files=ChatFiles(306, 900 * 1024 * 1024),
+        ))
+
     def open_config(self) -> Outcome:
         return self._answer("open_config", Outcome(failure=Failure.CONFIGURATION, message="not in this test"))
 
@@ -747,16 +769,32 @@ class OverviewSideTests(_OverviewCase):
         self.assertIn(window.catalog.plural("common.minutes", 15), screen.automation_line.text())
 
 
+def _codex_health(code: str | None):
+    """What `codex check` would answer: one finding, or none."""
+    from codexsync.app import CodexHealth
+    from codexsync.codex_health import FIX_CATALOGUE_REBUILD, Finding, Severity, SettlePlan
+    from codexsync.safety_gate import ProcessState
+
+    findings = ()
+    plan = SettlePlan("e" * 64, "state_5.sqlite", ("complete", None, 1, 1), None, None)
+    if code == "CATALOGUE_REBUILD_STUCK":
+        findings = (Finding(code, Severity.BROKEN, {"chats": 306, "megabytes": 900}, fix=FIX_CATALOGUE_REBUILD),)
+        plan = SettlePlan("a" * 64, "state_5.sqlite", ("running", "x", None, 9), ("complete", None, 9, 9), "as-found")
+    elif code == "CATALOGUE_MISSES_CHATS":
+        findings = (Finding(code, Severity.NOTE, {"chats": 3}, command="sessions catalogue"),)
+    return CodexHealth(findings, ProcessState.STOPPED, plan)
+
+
 def _full_sync_result(
     *, added: int = 0, missing: int = 0, not_loaded: int = 0, new_in_cloud: int = 0,
-    will_list: int = 0, ignored: int = 0,
+    will_list: int = 0, ignored: int = 0, does_not_list: int = 0,
 ):
     from types import SimpleNamespace
 
     return SimpleNamespace(
         sync_actions=2, session_actions=1, projects_added=added, projects_missing_folders=missing,
         chats_not_loaded=not_loaded, new_chats_kept_in_cloud=new_in_cloud,
-        chats_codex_will_list=will_list, chats_codex_ignores=ignored,
+        chats_codex_will_list=will_list, chats_codex_ignores=ignored, chats_codex_does_not_list=does_not_list,
         chat_names_set=0, chat_names_kept=0, chat_names_waiting=0, project_files_behind=(),
         machine="laptop", source="machine-a",
     )
@@ -1356,6 +1394,62 @@ class BackupsTests(_WindowTestCase):
         self.assertFalse(screen.dry_button.isEnabled())
         screen.restore(dry_run=True)
         self.assertEqual([call for call in controller.calls if call[0] == "restore"], [])
+
+
+class CodexStateTests(_WindowTestCase):
+    """D-032: Codex's own state on the Recovery page."""
+
+    def test_arriving_does_not_check_codex(self) -> None:
+        window, controller = self.make()
+        window.go_to("recovery")
+        self.assertNotIn(("codex_check",), controller.calls)
+        self.assertEqual(window.screen("recovery").codex_findings.text(), window.catalog.text("recovery.codex.never"))
+
+    def test_a_stuck_rebuild_is_shown_and_repaired_by_its_plan_id(self) -> None:
+        window, controller = self.make()
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        self.assertFalse(screen.codex_repair.isVisibleTo(window), "nothing to repair before a check")
+        screen.codex_check.click()
+        self.assertIn(
+            window.catalog.text("codex.finding.CATALOGUE_REBUILD_STUCK", chats=306, megabytes=900),
+            screen.codex_findings.text(),
+        )
+        self.assertTrue(screen.codex_repair.isVisibleTo(window))
+        screen.codex_repair.click()
+        self.assertIn("a" * 64, self.confirmations[-1][1], "the confirmation quotes the plan id")
+        self.assertIn(("codex_repair", "a" * 64), controller.calls)
+        self.assertEqual(screen.codex_findings.text(), window.catalog.text("recovery.codex.healthy"))
+        self.assertIn("snap-9", screen.codex_status.text())
+        self.assertFalse(screen.codex_repair.isVisibleTo(window))
+
+    def test_a_chat_list_rebuild_is_asked_only_after_its_preview(self) -> None:
+        window, controller = self.make()
+        controller.outcomes["codex_check"] = Outcome(value=_codex_health("CATALOGUE_MISSES_CHATS"))
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        screen.codex_check.click()
+        self.assertTrue(screen.rebuild_prepare.isVisibleTo(window))
+        self.assertFalse(screen.rebuild_apply.isEnabled())
+        screen.rebuild_prepare.click()
+        self.assertIn(("catalogue_rebuild", None), controller.calls)
+        self.assertIn("306", screen.codex_status.text(), "the size of the rebuild is said before it is asked")
+        self.assertTrue(screen.rebuild_apply.isEnabled())
+        screen.rebuild_apply.click()
+        self.assertIn("c" * 64, self.confirmations[-1][1])
+        self.assertIn(("catalogue_rebuild", "c" * 64), controller.calls)
+        self.assertEqual(screen.codex_status.text(), window.catalog.text("recovery.codex.rebuild.done"))
+
+    def test_a_sync_note_about_chats_codex_does_not_show_leads_here(self) -> None:
+        window, controller = self.make()
+        controller.outcomes["handoff_now"] = Outcome(value=_full_sync_result(does_not_list=4))
+        window.go_to("sync")
+        screen = window.screen("sync")
+        screen.start_run(dry_run=False)
+        self.assertIn(window.catalog.plural("sync.note.codex_does_not_list", 4), screen.result.text())
+        self.assertTrue(screen.links.codex.isVisibleTo(window))
+        screen.links.codex.click()
+        self.assertIs(window._stack.currentWidget(), window.screen("recovery"))
 
 
 class RecoveryTests(_WindowTestCase):

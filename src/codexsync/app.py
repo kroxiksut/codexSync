@@ -220,14 +220,31 @@ from .chat_names import (
     write_names_publication,
 )
 from .thread_catalogue import (
+    BACKFILL_COMPLETE,
     BACKFILL_PENDING,
+    BackfillRow,
     CatalogueRefreshPlan,
     RefreshStatus,
     build_refresh_plan,
     database_fingerprint,
+    find_unnamed_chat_files,
+    read_backfill_row,
     read_backfill_status,
+    read_snapshot_backfill_row,
     reset_backfill,
+    settle_backfill,
     unnamed_digest,
+)
+from .codex_health import (
+    ChatFiles,
+    Finding,
+    Severity,
+    SettlePlan,
+    build_settle_plan,
+    diagnose_catalogue,
+    diagnose_global_state,
+    diagnose_journals,
+    measure_chat_files,
 )
 from .session_catalog import one_per_chat, scan_both_sides, scan_sessions
 from .session_index import (
@@ -282,6 +299,10 @@ __all__ = [
     "run_handoff",
     "refresh_thread_catalogue",
     "CatalogueRefreshResult",
+    "check_codex",
+    "repair_codex",
+    "CodexHealth",
+    "CodexRepairResult",
     "sync_chat_names",
     "ChatNamesResult",
     "check_project_files",
@@ -1169,6 +1190,9 @@ class CatalogueRefreshResult:
     refreshed: bool = False
     #: Read while Codex was open, so only an indication.
     volatile: bool = False
+    #: What that rebuild walks -- every chat file, not only the missing ones --
+    #: so a person asked to confirm it knows how long Codex's start may take.
+    chat_files: "ChatFiles | None" = None
 
 
 def _catalogue_marker(cfg: AppConfig) -> Path:
@@ -1238,7 +1262,9 @@ def refresh_thread_catalogue(
         local_dir, read_thread_placements(local_dir), read_backfill_state(local_dir),
         asked_before=_read_catalogue_marker(marker),
     )
-    result = CatalogueRefreshResult(plan=plan, volatile=volatile)
+    result = CatalogueRefreshResult(
+        plan=plan, volatile=volatile, chat_files=measure_chat_files(local_dir) if plan.writes else None,
+    )
     if not applying:
         return result
     if not planned_here and plan.plan_id != confirm_plan:
@@ -1273,6 +1299,150 @@ def refresh_thread_catalogue(
         len(plan.unnamed), snapshot,
     )
     return replace(result, refreshed=True)
+
+
+@dataclass(frozen=True, slots=True)
+class CodexHealth:
+    """What `codex check` found (D-032). Reads only."""
+
+    findings: tuple[Finding, ...]
+    #: Whether Codex was running when it was checked, as the gate saw it.
+    process_state: ProcessState
+    #: The repair `codex repair` would apply now; ``plan.writes`` is false
+    #: when there is nothing for it to do.
+    plan: SettlePlan
+
+    @property
+    def broken(self) -> bool:
+        return any(item.severity is Severity.BROKEN for item in self.findings)
+
+
+@dataclass(frozen=True, slots=True)
+class CodexRepairResult:
+    plan: SettlePlan
+    repaired: bool = False
+    #: The backup snapshot holding the catalogue as it was before the repair.
+    snapshot: str | None = None
+
+
+def _own_catalogue_backup(cfg: AppConfig, config_path: Path, database: str | None) -> tuple[str, BackfillRow] | None:
+    """The row this machine's newest catalogue write found, from its verified copy.
+
+    Only the newest committed `thread-catalogue` operation of this machine
+    counts: that copy holds the row as it was right before codexSync asked for
+    a rebuild. A copy that is gone or unreadable is no evidence, and an older
+    one is not consulted in its place.
+    """
+    if database is None:
+        return None
+    for info in list_journals(config_path):
+        if info.family != "thread-catalogue" or not info.own or info.state != JournalState.COMMITTED.value:
+            continue
+        if not info.backup_snapshot or not info.backup_snapshot_present:
+            return None
+        copy = cfg.paths.backup_dir / info.backup_snapshot / Path(database)
+        row = read_snapshot_backfill_row(copy) if copy.is_file() else None
+        return (info.backup_snapshot, row) if row is not None else None
+    return None
+
+
+def _settle_plan(cfg: AppConfig, config_path: Path, local_dir: Path) -> SettlePlan:
+    reading = read_backfill_state(local_dir)
+    own = None
+    if reading.status is PlacementStatus.AVAILABLE and reading.backfill not in (None, BACKFILL_COMPLETE):
+        own = _own_catalogue_backup(cfg, config_path, reading.database)
+    return build_settle_plan(local_dir, reading, own_backup=own)
+
+
+def check_codex(config_path: Path, *, gate: SafetyGate | None = None) -> CodexHealth:
+    """Why Codex may not start or show its work, and what can be repaired (D-032).
+
+    Reads only, and creates nothing: the catalogue is opened the way every
+    other reading opens it, and the process is only looked at. Each finding
+    names its repair -- `repair_codex` for the chat-list rebuild, another
+    codexsync command for the rest -- whoever caused the problem.
+    """
+    cfg = load_config(config_path)
+    local_dir = locate_local_state_dir(cfg)
+    gate = gate if gate is not None else _make_safety_gate(cfg)
+    process = gate.check(OperationKind.DOCTOR).process_state
+    reading = read_backfill_state(local_dir)
+    unnamed = 0
+    if reading.status is PlacementStatus.AVAILABLE and reading.backfill == BACKFILL_COMPLETE:
+        placements = read_thread_placements(local_dir)
+        if placements.status is PlacementStatus.AVAILABLE:
+            unnamed = len(find_unnamed_chat_files(local_dir, placements))
+    findings = diagnose_catalogue(reading, process, measure_chat_files(local_dir), unnamed=unnamed)
+    source = local_dir / ".codex-global-state.json"
+    valid: bool | None = None
+    if source.is_file():
+        try:
+            report = validate_global_state_references(source.read_bytes())
+            valid = report.status in {ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING}
+        except OSError:
+            valid = None
+    findings += diagnose_global_state(present=source.is_file(), valid=valid)
+    try:
+        open_journals = sum(1 for item in list_journals(config_path) if not item.terminal and not item.closes_itself)
+    except Exception:  # an unreadable journal folder is `recover list`'s to explain
+        LOG.exception("codex check: journals not read")
+        open_journals = 0
+    findings += diagnose_journals(open_journals)
+    return CodexHealth(tuple(findings), process, _settle_plan(cfg, config_path, local_dir))
+
+
+def repair_codex(
+    config_path: Path,
+    *,
+    confirm_plan: str | None = None,
+    dry_run: bool = False,
+    gate: SafetyGate | None = None,
+    origin: str | None = None,
+) -> CodexRepairResult:
+    """Preview, or put Codex's chat-list rebuild back to ``complete`` (D-032).
+
+    Without ``confirm_plan`` this reads only. With it, Codex must be closed,
+    the plan is rebuilt and must still carry that id, and the write -- one row
+    of ``backfill_state``, re-read under the write lock and refused if Codex
+    moved it -- runs in the envelope every catalogue write uses: operation
+    lock, journal (family ``codex-repair``), a verified backup of the database
+    and its sidecars, the process checked again right before the transaction.
+    """
+    cfg = load_config(config_path)
+    local_dir = locate_local_state_dir(cfg)
+    gate = gate if gate is not None else _make_safety_gate(cfg)
+    plan = _settle_plan(cfg, config_path, local_dir)
+    result = CodexRepairResult(plan=plan)
+    if confirm_plan is None:
+        return result
+    _require_mutation_compatible_config(cfg)
+    gate.require(OperationKind.SESSION_APPLY)
+    if plan.plan_id != confirm_plan:
+        raise ConfigError(
+            "--confirm-plan must match the plan id from `codex repair`; Codex's catalogue changed since "
+            "then, so check again"
+        )
+    if not plan.writes:
+        LOG.info("codex repair: nothing to repair")
+        return result
+    if dry_run:
+        LOG.info("codex repair dry-run: the chat-list rebuild would be set back to complete")
+        return result
+    assert plan.database is not None and plan.current is not None and plan.target is not None
+    database = local_dir / Path(plan.database)
+    expected, target = plan.current, plan.target
+    snapshot = _write_codex_catalogue(
+        cfg, gate, local_dir, database,
+        family="codex-repair", plan_id=plan.plan_id, action_count=1, counts={}, origin=origin,
+        still_planned=lambda: _settle_plan(cfg, config_path, local_dir).plan_id == plan.plan_id,
+        write=lambda: settle_backfill(database, expected=expected, target=target),
+        verify=lambda: read_backfill_row(database) == tuple(target),
+    )
+    LOG.info(
+        "codex repair: Codex's chat-list rebuild set back to complete (%s; backup %s)",
+        f"row from {plan.snapshot}" if plan.snapshot else "row as found", snapshot,
+    )
+    return replace(result, repaired=True, snapshot=snapshot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2566,9 +2736,12 @@ class HandoffResult:
     project_changes: int = 0
     #: Added projects whose folder does not exist on this machine.
     projects_missing_folders: int = 0
-    #: Chat files Codex's catalogue did not list, which it was asked to take
-    #: up on its next start (D-024).
+    #: Chat files Codex's catalogue does not list that Codex takes up on its
+    #: next start, because a rebuild of its own is pending (D-024).
     chats_codex_will_list: int = 0
+    #: Chat files Codex's catalogue does not list. A sync no longer asks Codex
+    #: to rebuild its chat list (D-032): `sessions catalogue` does, on request.
+    chats_codex_does_not_list: int = 0
     #: Chat files Codex still does not list although it was asked once before.
     chats_codex_ignores: int = 0
     #: Chat names taken from other machines (D-025).
@@ -2882,11 +3055,13 @@ def run_handoff(
     report_progress(progress, "sync_chat_names", 0, 0)
     names = step("chat_names", lambda: sync_chat_names(config_path, origin=origin, planned_here=True))
     # Chat files Codex's catalogue does not list -- written now or by an
-    # earlier run -- are invisible until Codex takes them up (D-024).
+    # earlier run -- are invisible until Codex takes them up (D-024). Only
+    # counted: asking Codex to rebuild its chat list makes its next start walk
+    # every chat file, and a start ended part-way left Codex unable to start
+    # at all (2026-10-09). That request is `sessions catalogue`, made by a
+    # person who can leave Codex open until it finishes (D-032).
     report_progress(progress, "refresh_catalogue", 0, 0)
-    catalogue = step(
-        "catalogue", lambda: refresh_thread_catalogue(config_path, origin=origin, planned_here=True),
-    )
+    catalogue = step("catalogue", lambda: refresh_thread_catalogue(config_path))
     # Chats are carried, project folders are not (D-026): say which projects
     # here hold less than another machine had, and publish this one's. A
     # check that fails says so in the log and never undoes a finished sync.
@@ -2922,12 +3097,14 @@ def run_handoff(
         projects_added=len(projects.plan.added) if projects else 0,
         project_changes=projects.written if projects else 0,
         projects_missing_folders=len(projects.plan.missing_folders) if projects else 0,
-        # Asked now, or Codex has not run its own backfill since: either way
-        # it walks the files on its next start.
+        # Codex has a rebuild of its own pending: it walks the files on its
+        # next start. Nothing of this run asked for it (D-032).
         chats_codex_will_list=(
             len(catalogue.plan.unnamed)
-            if catalogue and (catalogue.refreshed or catalogue.plan.status is RefreshStatus.ALREADY_PENDING)
-            else 0
+            if catalogue and catalogue.plan.status is RefreshStatus.ALREADY_PENDING else 0
+        ),
+        chats_codex_does_not_list=(
+            len(catalogue.plan.unnamed) if catalogue and catalogue.plan.status is RefreshStatus.NEEDED else 0
         ),
         chats_codex_ignores=(
             len(catalogue.plan.unnamed)

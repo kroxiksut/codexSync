@@ -13,7 +13,7 @@
 | [Guardian](GUARDIAN.md) | Snapshots of the global state, quarantine, restore, a new baseline |
 | [Sessions](SESSIONS.md) | Session branches across machines, working set, mirror, index |
 | [Projects and chats](PROJECTS.md) | Chat bindings, repair after a handoff, moving a project |
-| [Backups and recovery](RECOVERY.md) | Backups, restore, interrupted mutations |
+| [Backups and recovery](RECOVERY.md) | Backups, restore, interrupted mutations, when Codex does not start |
 
 [![The CodexSync window](../screenshots/en/02-overview.png)](GUI.md)
 
@@ -137,9 +137,10 @@ in the cloud folder: those are the user's responsibility.
   the desktop app to quit the normal way and writes only after the process
   check confirms it has stopped; if it does not quit, nothing is written.
 - Nothing in Codex's SQLite databases beyond two narrow edits, each made with
-  Codex closed, after a verified backup and only when needed: a request that
-  Codex rebuild its chat list from the chat files (`backfill_state`), and, for a
-  chat with no name here, the name the other machine shows. It never creates or
+  Codex closed, after a verified backup and only when needed: Codex's chat-list
+  rebuild status (`backfill_state`) — set to rebuild when you ask for it, and
+  back to complete when a rebuild is stuck and Codex cannot start (`D-032`) —
+  and, for a chat with no name here, the name the other machine shows. It never creates or
   deletes chat rows, never rewrites `session_index.jsonl` and never modifies
   project records.
 - No real-time sync: one machine works at a time.

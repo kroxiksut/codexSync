@@ -219,16 +219,19 @@ new_chats = "same_path"   # same_path | keep_in_cloud
 
 Codex lists chats from its thread catalogue, which it fills from the chat files
 once and then keeps up itself. A chat file written afterwards — every chat from
-another machine — is not in it, so Codex does not show it. A full sync therefore
-asks Codex to rebuild that list from the files (`D-024`): codexSync puts one
-status row back to the value Codex creates it with, after a verified backup of
-the catalogue, and Codex writes every chat into its list on its next start,
-which takes longer than usual. codexSync never writes a chat into the catalogue
-itself. `codexsync sessions catalogue` lists the chat files Codex does not
-list and, with `--confirm-plan`, asks the same on its own. It is asked once per
-set of files; if Codex still leaves some out, the sync says so instead of
-asking again. `doctor` reports the same count as `session_visibility`;
-`not_listed=0` means every chat is visible.
+another machine — is not in it, so Codex does not show it. A full sync counts
+these chats and says so; it does **not** ask Codex to rebuild its list
+(`D-032`). The request is yours: `codexsync sessions catalogue --confirm-plan
+<id>`, or *Recovery → Codex state* in the window. codexSync then puts one status
+row back to the value Codex creates it with, after a verified backup of the
+catalogue (`D-024`), and on its next start Codex walks **every** chat file
+before it opens — leave it open until the chats appear. A start ended part-way
+leaves the rebuild marked as running, and Codex then does not start at all
+(it shows "could not load your organization's settings"); `codexsync codex
+check` finds that and `codex repair` puts it right — see
+[When Codex does not start](RECOVERY.md#when-codex-does-not-start). codexSync
+never writes a chat into the catalogue itself. `doctor` reports the same count
+as `session_visibility`; `not_listed=0` means every chat is visible.
 
 A chat's **name** is not in its file either: Codex keeps it only in that
 catalogue, so a carried chat first shows its first message. Each machine

@@ -26,9 +26,11 @@ the way.
 * Never terminate Codex by force. With `[sync] close_codex = true` a sync may
   *ask* the desktop app to quit (`D-029`) and refuses if it does not
 * Codex's SQLite is written in exactly two narrow places, with Codex closed,
-  inside the mutation envelope: `backfill_state` reset so Codex rebuilds its
-  chat list (`D-024`) and `threads.name` where it is unset (`D-025`). Never a
-  `threads` row, never project records, never `session_index.jsonl`
+  inside the mutation envelope: the `backfill_state` row -- `pending` when a
+  person asks Codex to rebuild its chat list (`D-024`), back to `complete` when
+  a rebuild is stuck (`codex repair`, `D-032`) -- and `threads.name` where it
+  is unset (`D-025`). A sync never asks for a rebuild. Never a `threads` row,
+  never project records, never `session_index.jsonl`
 
 ## Sync model
 
@@ -36,7 +38,8 @@ the way.
 * Single active machine at a time; handoff: close Codex on A, wait for the
   cloud, sync on B, then start Codex on B
 * `sync` is a full sync by default (`D-028`): settings, chats, projects, chat
-  names, the catalogue request. `scope = "settings"` is files only
+  names; it counts the chats Codex does not list and never asks for a rebuild
+  (`D-032`). `scope = "settings"` is files only
 * A conflict is decided by `[conflict] policy` (`D-027`, default
   `prefer_newer_mtime`); the copy not kept is saved, a tie asks. Two histories
   are never merged

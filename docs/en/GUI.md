@@ -85,7 +85,7 @@ path or a title. A part that cannot be read is one tile saying why.
 
 A manual check of this machine; it authorises no write. The banner says whether
 Codex looks closed. The table is the `doctor` report: configuration, state
-directories, the Codex process, the detected global-state schema, the latest
+directories, the Codex process, whether Codex can start, the detected global-state schema, the latest
 restorable snapshot, session files, the session index, the SQLite thread
 catalogue, what a sync is allowed to do, where projects are stored, and the sync
 manifest. Below it: a dry run of the sync, the last synchronisation with a link to its
@@ -138,6 +138,10 @@ The cloud → local and local → cloud plan.
 - The **History** tab lists past runs: when, what (settings files, chats,
   projects — one full sync is three rows), result, who started them, what they
   carried and their backup. See [Synchronisation → History](SYNC.md#history).
+- A sync never asks Codex to rebuild its chat list. When it carried chats Codex
+  does not show yet, the result says how many, with a button to
+  [*Recovery → Codex state*](#recovery), where you ask for the rebuild when
+  Codex can be left open until it finishes.
 
 See [Synchronisation](SYNC.md).
 
@@ -248,6 +252,12 @@ See [Backups and recovery](RECOVERY.md).
 ## Recovery
 
 ![Recovery](../screenshots/en/10-recovery.png)
+
+- **Codex state** — *Check Codex* finds why Codex might not start or show your
+  chats, whoever caused it, and *Repair* applies the repair it planned (Codex
+  closed; the confirmation quotes the plan id). Here you also ask Codex to
+  rebuild its chat list, after a preview that says how many chat files it will
+  walk. See [When Codex does not start](RECOVERY.md#when-codex-does-not-start).
 
 Every write keeps a journal. An unfinished journal blocks every new change until
 it is resumed or rolled back — that block is the protection.

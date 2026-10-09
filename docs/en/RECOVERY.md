@@ -133,3 +133,35 @@ codexsync -c config.toml recover rollback <operation-id> --apply
   replace — so there is nothing to undo and the journal is simply closed.
 - Only one writing command works on one Codex folder at a time, whatever its
   kind; a second one stops with exit code `5` instead of interleaving its writes.
+
+## When Codex does not start
+
+```powershell
+codexsync -c config.toml codex check
+codexsync -c config.toml codex repair
+codexsync -c config.toml codex repair --confirm-plan <plan-id>
+```
+
+`codex check` reads Codex's state and lists what is wrong, whoever caused it —
+in the window, *Recovery → Codex state → Check Codex*. It only reads, and may
+run while Codex is open. Each finding names its repair:
+
+| Finding | What it means | Repair |
+|---|---|---|
+| `CATALOGUE_REBUILD_STUCK` | Codex will not start: a rebuild of its chat list was ended part-way and nobody is doing it. Codex shows "could not load your organization's settings". | `codex repair` |
+| `CATALOGUE_REBUILD_PENDING` | Codex rebuilds its chat list on its next start, walking every chat file; leave it open until the chats appear. | `codex repair` skips the rebuild |
+| `CATALOGUE_REBUILDING` | Codex is rebuilding right now. | Leave it open |
+| `CATALOGUE_MISSES_CHATS` | Chat files are in place that Codex does not show. | `sessions catalogue` |
+| `GLOBAL_STATE_MISSING`, `GLOBAL_STATE_INVALID` | Projects, pins or which chat is in which project are gone or torn apart. | `guardian restore` |
+| `OPEN_JOURNAL` | A codexSync operation stopped part-way and blocks every write. | [Interrupted mutations](#interrupted-mutations) |
+
+How a rebuild gets stuck: Codex builds its chat list from the chat files while
+it starts, and opens only when it is done. If that start is ended part-way —
+the window gave up, or Codex was closed — the rebuild stays marked as running,
+and every later start waits for it and exits. `codex repair` sets it back to
+complete: one row, with Codex closed, after a verified backup of the database,
+journalled like every write (family `codex-repair`). Where codexSync's own
+request started the rebuild, the exact row from the backup it took then is put
+back. Codex then starts with the chats it already listed; ask for a rebuild
+again with `sessions catalogue` when you can leave Codex open until it
+finishes. `doctor` reports the same state as `codex_startup`.

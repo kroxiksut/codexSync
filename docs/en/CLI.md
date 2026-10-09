@@ -56,6 +56,8 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `sessions scope` | no | Show the working set stored for a pair of machines | [Sessions](SESSIONS.md) |
 | `sessions names` | **yes** | Chat names other machines show; with `--confirm-plan`, set them on chats unnamed here | [Sessions](SESSIONS.md#writing-into-codex) |
 | `sessions catalogue` | **yes** | List chat files Codex does not show; with `--confirm-plan`, ask Codex to rebuild its chat list | [Sessions](SESSIONS.md#writing-into-codex) |
+| `codex check` | no | Why Codex may not start or show your chats; reads only | [Recovery](RECOVERY.md#when-codex-does-not-start) |
+| `codex repair` | **yes** | Preview, or with `--confirm-plan` apply, the repair `codex check` offers | [Recovery](RECOVERY.md#when-codex-does-not-start) |
 | `chats list` / `chats tree` | no | Find chats and see which project each is in | [Projects](PROJECTS.md#chats) |
 | `chats move` | **yes** | Put chosen chats under one project | [Projects](PROJECTS.md#moving-chats-to-a-project) |
 | `projects sync` | **yes** | Merge other machines' project lists into this one, then publish this one's (preview without `--confirm-plan`) | [Projects](PROJECTS.md#projects-between-machines) |
@@ -121,10 +123,12 @@ codexsync -c config.toml doctor
 
 `doctor` (and its twin `preflight`) reads only and creates nothing — least of all
 inside `.codex`. It checks the configuration and directories, whether Codex is
-running, the global-state schema and the latest restorable snapshot, session
-files and the session index, the SQLite thread catalogue, what a sync is allowed
-to do, the sync manifest, leftover temporary files, and whether an unfinished
-mutation still blocks every write (a failure until `recover` closes it).
+running, whether Codex can start (`codex_startup`: a rebuild of its chat list
+left stuck is a failure until `codex repair` sets it back), the global-state
+schema and the latest restorable snapshot, session files and the session index,
+the SQLite thread catalogue, what a sync is allowed to do, the sync manifest,
+leftover temporary files, and whether an unfinished mutation still blocks every
+write (a failure until `recover` closes it).
 
 ## The window from the console
 
@@ -142,6 +146,7 @@ commands of their own map like this:
 | Backups | `backups list`, then `restore --from NAME` |
 | Sessions — working set | `sessions scan --project/--chat --save-scope`; `sessions scope` shows it |
 | *Always decide this way* | `config set conflict.policy prefer_newer_mtime` (or another rule) |
+| Recovery — Codex state | `codex check`, then `codex repair --confirm-plan ID`; the chat-list rebuild is `sessions catalogue --confirm-plan ID` |
 
 `config set` takes a TOML value (`true`, `600`, `["sessions", "skills"]`); text
 needs no quotes. It edits the file the way Settings do: comments and every other

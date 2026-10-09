@@ -20,7 +20,7 @@ English only.
 | [Guardian](en/GUARDIAN.md) | Snapshots of the global state, quarantine, restore, a new baseline |
 | [Sessions](en/SESSIONS.md) | Session branches across machines, working set, mirror, index |
 | [Projects and chats](en/PROJECTS.md) | Chat bindings, repair after a handoff, moving a project |
-| [Backups and recovery](en/RECOVERY.md) | Backups, restore, interrupted mutations |
+| [Backups and recovery](en/RECOVERY.md) | Backups, restore, interrupted mutations, when Codex does not start |
 
 The same pages in the other languages: [Русский](ru/README.md) · [中文](zh/README.md).
 

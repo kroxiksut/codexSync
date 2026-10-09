@@ -251,6 +251,15 @@ class DemoController(Controller):
             backup_status=SchedulerStatus(True, True, "2026-09-17T07:05:00Z", "2026-09-18T07:05:00Z", 0, "", True),
         ))
 
+    def codex_check(self) -> Outcome:
+        """A healthy Codex: the Recovery page's Codex section after a check (D-032)."""
+        from codexsync.app import CodexHealth
+        from codexsync.codex_health import SettlePlan
+        from codexsync.safety_gate import ProcessState
+
+        plan = SettlePlan("0" * 64, "state_5.sqlite", ("complete", None, 1, 1), None, None)
+        return Outcome(value=CodexHealth((), ProcessState.STOPPED, plan))
+
     def codex_backups(self) -> Outcome:
         stamps = (
             ("20260917T070512Z", 402_118_904), ("20260916T070433Z", 399_870_115),
@@ -453,6 +462,7 @@ PREPARE = {
     "sessions": lambda screen: screen.scan(),
     "projects": lambda screen: screen.scan(),
     "automation": _show_copies,
+    "recovery": lambda screen: screen.check_codex(),
 }
 
 

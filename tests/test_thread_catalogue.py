@@ -258,20 +258,32 @@ class RefreshCommandTests(_Workspace):
 
 
 class FullSyncTests(_Workspace):
-    def test_a_chat_brought_from_the_other_machine_is_announced_to_codex(self) -> None:
+    def test_a_sync_counts_the_chats_codex_does_not_list_and_never_asks_for_a_rebuild(self) -> None:
+        # D-032: a rebuild Codex started on its own next start, ended part-way,
+        # left it unable to start at all (2026-10-09). A sync only counts.
         desktop, desktop_codex = self.machine("desktop")
         laptop, laptop_codex = self.machine("laptop")
         chat(desktop_codex, NEW)
         database = catalogue(laptop_codex, {})
+        before = database.read_bytes()
         run_handoff(desktop)
         loaded = run_handoff(laptop)
         self.assertEqual(loaded.new_chats_written, 1)
+        self.assertEqual(loaded.chats_codex_does_not_list, 1)
+        self.assertEqual(loaded.chats_codex_will_list, 0)
+        self.assertEqual(backfill_row(database)[0], BACKFILL_COMPLETE)
+        self.assertEqual(database.read_bytes(), before, "the catalogue is not touched by a sync")
+        self.assertEqual(list_history(laptop, family="thread-catalogue"), [])
+
+    def test_a_rebuild_codex_has_pending_of_its_own_is_reported_as_such(self) -> None:
+        desktop, desktop_codex = self.machine("desktop")
+        laptop, laptop_codex = self.machine("laptop")
+        chat(desktop_codex, NEW)
+        catalogue(laptop_codex, {}, status=BACKFILL_PENDING)
+        run_handoff(desktop)
+        loaded = run_handoff(laptop)
         self.assertEqual(loaded.chats_codex_will_list, 1)
-        self.assertEqual(backfill_row(database)[0], BACKFILL_PENDING)
-        # Codex not started yet: the next sync asks nothing and still says so.
-        again = run_handoff(laptop)
-        self.assertEqual(again.chats_codex_will_list, 1)
-        self.assertEqual(again.chats_codex_ignores, 0)
+        self.assertEqual(loaded.chats_codex_does_not_list, 0)
 
 
 if __name__ == "__main__":
