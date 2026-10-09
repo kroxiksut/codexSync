@@ -14,7 +14,7 @@
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
   <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Платформы: Windows | macOS">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Платформы: Windows | macOS | Linux">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Внешних зависимостей: 0">
   <img src="https://img.shields.io/badge/GUI-PySide6%2C%20optional-41CD52?logo=qt&logoColor=white" alt="Окно: PySide6, необязательно">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="Лицензия: GPL-3.0-or-later"></a>
@@ -25,8 +25,10 @@
 </p>
 
 > [!IMPORTANT]
-> На практике проверен только перенос Windows → Windows. macOS поддержан в коде
-> и в CI, но полный перенос между настоящими macOS-машинами ещё не проверялся.
+> На практике проверен только перенос Windows → Windows. macOS и Linux —
+> экспериментально: чтение, диагностика и планы работают, а запись закрыта, пока
+> определение процесса не подтверждено там на живом Codex (само приложение Codex
+> для Linux тоже в превью).
 
 <p align="center">
   <a href="docs/ru/GUI.md"><img src="docs/screenshots/ru/02-overview.png" width="85%" alt="Окно CodexSync: обзор"></a>
@@ -89,10 +91,14 @@ codexSync считает перенос этого состояния защищ
 распакуйте и запустите `codexsync-gui.exe`. Этот же файл умеет выполнять и
 команды CLI. Нужна Windows 10 (1809) или новее.
 
-**С Python 3.11+**, на Windows или macOS — с `--pre`, пока 0.2 в альфе, иначе
-pip поставит 0.1, и с `--upgrade`, чтобы заменилась и уже установленная 0.1.
-На macOS работают все чтения и планы, но запись запрещена, пока определение
-процесса там не подтверждено ([платформы](docs/ru/README.md#платформы)):
+**С Python 3.11+**, на Windows, macOS или Linux — с `--pre`, пока 0.2 в альфе,
+иначе pip поставит 0.1, и с `--upgrade`, чтобы заменилась и уже установленная
+0.1. На macOS и Linux работают все чтения и планы, но запись запрещена, пока
+определение процесса там не подтверждено
+([платформы](docs/ru/README.md#платформы)). На Linux системный Python не даёт
+делать `pip install` (PEP 668), поэтому ставьте в виртуальное окружение:
+`python3 -m venv ~/.venvs/codexsync && ~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"`
+(на Ubuntu и Debian сначала `sudo apt install python3-venv`).
 
 ```powershell
 python -m pip install --upgrade --pre "codexsync[gui]"    # окно и командная строка

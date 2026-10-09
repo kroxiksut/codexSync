@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from codexsync.guardian_models import SourceObservation, ValidationStatus
 from codexsync.guardian_validation import (
@@ -84,13 +85,31 @@ class GuardianValidationTests(unittest.TestCase):
         self.assertEqual(report.status, ValidationStatus.INVALID)
         self.assertEqual(report.codes, (SOURCE_TOO_LARGE,))
 
-    def test_unexpected_parser_depth_fails_safe(self) -> None:
+    def test_a_parser_that_runs_out_of_depth_fails_safe(self) -> None:
+        # Forced rather than provoked: how deep `json` can go is the
+        # interpreter's business (see the next test), so nesting alone cannot
+        # reach this branch on every supported version.
+        with patch("codexsync.guardian_validation.json.loads", side_effect=RecursionError):
+            report = validate_source_observation(self._observation(b"{}"))
+
+        self.assertEqual(report.status, ValidationStatus.INDETERMINATE)
+        self.assertEqual(report.codes, (VALIDATOR_ERROR,))
+
+    def test_deep_nesting_is_never_accepted_whatever_the_interpreter(self) -> None:
+        # Up to 3.13 the parser raises RecursionError long before 10 000
+        # levels; 3.14 guards the C stack instead and parses it, so the same
+        # bytes end as a root that is not an object. Both refuse.
         payload = (b"[" * 10_000) + (b"]" * 10_000)
 
         report = validate_source_observation(self._observation(payload))
 
-        self.assertEqual(report.status, ValidationStatus.INDETERMINATE)
-        self.assertEqual(report.codes, (VALIDATOR_ERROR,))
+        self.assertIn(
+            (report.status, report.codes),
+            {
+                (ValidationStatus.INDETERMINATE, (VALIDATOR_ERROR,)),
+                (ValidationStatus.INVALID, (ROOT_NOT_OBJECT,)),
+            },
+        )
 
     @staticmethod
     def _observation(payload: bytes, *, size_after: int | None = None) -> SourceObservation:

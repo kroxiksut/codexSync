@@ -14,7 +14,7 @@
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
   <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform: Windows | macOS">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platform: Windows | macOS | Linux">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Runtime dependencies: 0">
   <img src="https://img.shields.io/badge/GUI-PySide6%2C%20optional-41CD52?logo=qt&logoColor=white" alt="GUI: PySide6, optional">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
@@ -25,8 +25,10 @@
 </p>
 
 > [!IMPORTANT]
-> Validated in practice Windows → Windows only. macOS is supported in code and
-> CI, but an end-to-end handoff on real macOS machines has not been validated.
+> Validated in practice Windows → Windows only. macOS and Linux are
+> experimental: reads, diagnostics and plans work, and writes stay closed until
+> process detection has been proven against a live Codex there (Codex's own
+> Linux app is a preview too).
 
 <p align="center">
   <a href="docs/en/GUI.md"><img src="docs/screenshots/en/02-overview.png" width="85%" alt="The CodexSync window: overview"></a>
@@ -83,10 +85,14 @@ Found a security or data-safety problem? See [SECURITY.md](./SECURITY.md).
 unpack it and run `codexsync-gui.exe`. The same executable can also run CLI
 subcommands. Windows 10 (1809) or later.
 
-**With Python 3.11+**, on Windows or macOS — `--pre` while 0.2 is an alpha,
-or pip installs 0.1, and `--upgrade` so that an installed 0.1 is replaced too.
-On macOS every read and plan works, but writes are refused until the process
-detector is proven there ([platforms](docs/en/README.md#platforms)):
+**With Python 3.11+**, on Windows, macOS or Linux — `--pre` while 0.2 is an
+alpha, or pip installs 0.1, and `--upgrade` so that an installed 0.1 is
+replaced too. On macOS and Linux every read and plan works, but writes are
+refused until the process detector is proven there
+([platforms](docs/en/README.md#platforms)). On Linux the system Python refuses
+`pip install` (PEP 668), so install into a virtual environment:
+`python3 -m venv ~/.venvs/codexsync && ~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"`
+(on Ubuntu and Debian `sudo apt install python3-venv` first).
 
 ```powershell
 python -m pip install --upgrade --pre "codexsync[gui]"    # the window and the command line

@@ -13,7 +13,7 @@
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
   <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Platform: Windows | macOS">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platform: Windows | macOS | Linux">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Runtime dependencies: 0">
   <img src="https://img.shields.io/badge/GUI-PySide6%2C%20optional-41CD52?logo=qt&logoColor=white" alt="GUI: PySide6, optional">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
@@ -24,8 +24,8 @@
 </p>
 
 > [!IMPORTANT]
-> 实测验证过的只有 Windows → Windows。macOS 在代码和 CI 中受支持，但还没有在真实的
-> macOS 机器之间做过端到端的交接验证。
+> 实测验证过的只有 Windows → Windows。macOS 和 Linux 处于实验阶段：读取、诊断和计划都能用，
+> 但在进程检测于那里对着真实运行的 Codex 得到验证之前，写入一直关闭（Codex 自己的 Linux 应用也还是预览版）。
 
 <p align="center">
   <a href="docs/zh/GUI.md"><img src="docs/screenshots/zh/02-overview.png" width="85%" alt="CodexSync 窗口：概览"></a>
@@ -71,9 +71,12 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 **Windows，无需 Python：** 从 [Releases](https://github.com/kroxiksut/codexSync/releases)
 下载 `codexsync-gui-…-windows-amd64.zip`（或 `…-arm64.zip`），解压后运行 `codexsync-gui.exe`。同一个可执行文件也能运行命令行子命令。需要 Windows 10（1809）或更新版本。
 
-**使用 Python 3.11+**，在 Windows 或 macOS 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1；
-加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
-写入会被拒绝（[平台](docs/zh/README.md#平台)）：
+**使用 Python 3.11+**，在 Windows、macOS 或 Linux 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1；
+加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 和 Linux 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
+写入会被拒绝（[平台](docs/zh/README.md#平台)）。在 Linux 上系统自带的 Python 不允许 `pip install`（PEP 668），
+请安装到虚拟环境中：
+`python3 -m venv ~/.venvs/codexsync && ~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"`
+（在 Ubuntu 和 Debian 上先执行 `sudo apt install python3-venv`）。
 
 ```powershell
 python -m pip install --upgrade --pre "codexsync[gui]"    # 窗口和命令行
