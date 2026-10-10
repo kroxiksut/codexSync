@@ -22,6 +22,7 @@ from codexsync.codex_health import (
     FIX_CATALOGUE_REBUILD,
     GLOBAL_STATE_INVALID,
     GLOBAL_STATE_MISSING,
+    GLOBAL_STATE_UNRECOGNISED,
     SOURCE_AS_FOUND,
     SOURCE_OWN_BACKUP,
     ChatFiles,
@@ -117,6 +118,11 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual([item.code for item in diagnose_global_state(present=True, valid=False)], [GLOBAL_STATE_INVALID])
         self.assertEqual(diagnose_global_state(present=True, valid=True), [])
 
+    def test_a_shape_no_adapter_knows_is_a_note_not_damage(self) -> None:
+        """A fresh Linux Codex: `local-projects: {}`, no order (2026-10-09)."""
+        found = diagnose_global_state(present=True, valid=False, recognised=False)
+        self.assertEqual([(item.code, item.severity) for item in found], [(GLOBAL_STATE_UNRECOGNISED, Severity.NOTE)])
+
 
 class SettlePlanTests(_Workspace):
     def setUp(self) -> None:
@@ -192,6 +198,21 @@ class CheckAndRepairTests(_Workspace):
 
     def test_a_missing_global_state_is_reported(self) -> None:
         self.assertIn(GLOBAL_STATE_MISSING, [item.code for item in check_codex(self.config).findings])
+
+    def test_a_codex_with_no_project_yet_is_healthy(self) -> None:
+        """The shape a fresh Linux Codex wrote (2026-10-09): projects empty, no order."""
+        (self.codex / ".codex-global-state.json").write_text(
+            '{"local-projects": {}, "projectless-thread-ids": [], "selected-project": null}', encoding="utf-8",
+        )
+        health = check_codex(self.config)
+        self.assertFalse(health.broken)
+        self.assertNotIn(GLOBAL_STATE_UNRECOGNISED, [item.code for item in health.findings])
+
+    def test_a_shape_nobody_knows_is_a_note_not_damage(self) -> None:
+        (self.codex / ".codex-global-state.json").write_text('{"projects": []}', encoding="utf-8")
+        health = check_codex(self.config)
+        self.assertFalse(health.broken)
+        self.assertIn(GLOBAL_STATE_UNRECOGNISED, [item.code for item in health.findings])
 
     def test_repairing_backs_up_journals_and_completes_the_rebuild(self) -> None:
         set_row(self.database, "running")

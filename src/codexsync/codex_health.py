@@ -79,6 +79,10 @@ GLOBAL_STATE_MISSING = "GLOBAL_STATE_MISSING"
 #: It is there and fails validation: broken JSON, an unknown shape, or a
 #: project list whose references do not hold (chats torn from projects).
 GLOBAL_STATE_INVALID = "GLOBAL_STATE_INVALID"
+#: It is JSON in a shape no adapter knows -- not damage: a fresh Linux Codex
+#: with no project yet writes `local-projects: {}` and no order (2026-10-09).
+#: Calling that BROKEN told a working Codex it was torn apart.
+GLOBAL_STATE_UNRECOGNISED = "GLOBAL_STATE_UNRECOGNISED"
 # codexSync's own operations.
 #: An operation stopped part-way and blocks every later write until resolved.
 OPEN_JOURNAL = "OPEN_JOURNAL"
@@ -93,6 +97,7 @@ FINDING_CODES = (
     CATALOGUE_MISSES_CHATS,
     GLOBAL_STATE_MISSING,
     GLOBAL_STATE_INVALID,
+    GLOBAL_STATE_UNRECOGNISED,
     OPEN_JOURNAL,
 )
 
@@ -171,12 +176,18 @@ def diagnose_catalogue(
     return [Finding(CATALOGUE_REBUILD_PENDING, Severity.WARNING, sizes, fix=FIX_CATALOGUE_REBUILD)]
 
 
-def diagnose_global_state(*, present: bool, valid: bool | None) -> list[Finding]:
-    """``valid`` is ``None`` when the file could not be judged at all."""
+def diagnose_global_state(*, present: bool, valid: bool | None, recognised: bool = True) -> list[Finding]:
+    """``valid`` is ``None`` when the file could not be judged at all.
+
+    ``recognised`` is False when the file reads but no known shape claims it:
+    nothing was judged, so nothing is called broken.
+    """
     if not present:
         # A warning, not BROKEN: the console Codex never writes this file, so
         # a machine that only uses it has none, and the app recreates it.
         return [Finding(GLOBAL_STATE_MISSING, Severity.WARNING, command="guardian restore")]
+    if not recognised:
+        return [Finding(GLOBAL_STATE_UNRECOGNISED, Severity.NOTE)]
     if valid is False:
         return [Finding(GLOBAL_STATE_INVALID, Severity.BROKEN, command="guardian restore")]
     return []

@@ -54,6 +54,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `sessions apply` | **yes** | Transfer whole branches under one confirmed plan | [Sessions](SESSIONS.md#applying-a-plan) |
 | `sessions index` | no | Report what each `session_index.jsonl` holds | [Sessions](SESSIONS.md#the-session-index) |
 | `sessions scope` | no | Show the working set stored for a pair of machines | [Sessions](SESSIONS.md) |
+| `sessions archive` | **yes** | Chats whose file an archive move left elsewhere; with `--confirm-plan`, point Codex's list at it | [Sessions](SESSIONS.md#writing-into-codex) |
 | `sessions names` | **yes** | Chat names other machines show; with `--confirm-plan`, set them on chats unnamed here | [Sessions](SESSIONS.md#writing-into-codex) |
 | `sessions catalogue` | **yes** | List chat files Codex does not show; with `--confirm-plan`, ask Codex to rebuild its chat list | [Sessions](SESSIONS.md#writing-into-codex) |
 | `codex check` | no | Why Codex may not start or show your chats; reads only | [Recovery](RECOVERY.md#when-codex-does-not-start) |
@@ -62,6 +63,8 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `chats move` | **yes** | Put chosen chats under one project | [Projects](PROJECTS.md#moving-chats-to-a-project) |
 | `projects sync` | **yes** | Merge other machines' project lists into this one, then publish this one's (preview without `--confirm-plan`) | [Projects](PROJECTS.md#projects-between-machines) |
 | `projects files` | no | Whether this machine's project folders hold what other machines last had | [Projects](PROJECTS.md#project-folders) |
+| `projects places` | no | Where each project of another machine is on this one, and what this machine was told | [Projects](PROJECTS.md#on-another-operating-system) |
+| `projects place` | workspace only | Say where another machine's project is here (`--path`), not to carry it (`--skip`), or forget (`--forget`); remembered for every direction | [Projects](PROJECTS.md#on-another-operating-system) |
 | `repair-projects scan` | no | Build an immutable, hashed repair plan | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `repair-projects apply` | **yes** | Apply one exact plan, quoted by its id | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `project-move scan` | no | Hash a project and plan copying it to a new folder | [Projects](PROJECTS.md#moving-a-projects-files) |
@@ -198,8 +201,8 @@ only together with `--confirm`.
   direct checks before and during the commit.
 - Only one writing command works on one Codex folder at a time, whatever its
   kind; a second one stops with exit code `5`.
-- `RUNNING` and `UNKNOWN` both block a write. On macOS and Linux writes stay
-  blocked until the process detector has been proven on a live machine (see
+- `RUNNING` and `UNKNOWN` both block a write. On macOS writes stay blocked
+  until the process detector has been proven on a live Mac (see
   [what is not proven yet](README.md#what-is-not-proven-yet)).
 - If a destination is momentarily held open by another process (a cloud client,
   a search indexer, an antivirus), the atomic replace is retried with bounded

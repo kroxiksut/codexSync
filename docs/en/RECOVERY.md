@@ -153,6 +153,7 @@ run while Codex is open. Each finding names its repair:
 | `CATALOGUE_REBUILDING` | Codex is rebuilding right now. | Leave it open |
 | `CATALOGUE_MISSES_CHATS` | Chat files are in place that Codex does not show. | `sessions catalogue` |
 | `GLOBAL_STATE_MISSING`, `GLOBAL_STATE_INVALID` | Projects, pins or which chat is in which project are gone or torn apart. | `guardian restore` |
+| `GLOBAL_STATE_UNRECOGNISED` | The global state is in a shape this version does not know (a Codex with no project yet writes one). Codex is not affected; projects are not carried until it is known. | Nothing to repair |
 | `OPEN_JOURNAL` | A codexSync operation stopped part-way and blocks every write. | [Interrupted mutations](#interrupted-mutations) |
 
 How a rebuild gets stuck: Codex builds its chat list from the chat files while

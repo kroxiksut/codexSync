@@ -447,7 +447,7 @@ class SyncScreen(Screen):
             self.result.setText(full_sync_result(self, run.value))
             self.links.show(run.value)
             attention = (
-                run.value.projects_missing_folders or run.value.chats_codex_ignores
+                run.value.chats_codex_ignores
                 or getattr(run.value, "chats_codex_does_not_list", 0)
                 or run.value.project_files_behind or getattr(run.value, "steps_not_done", ())
             )
@@ -611,6 +611,9 @@ def full_sync_notes(screen: Screen, result) -> list[str]:
     if getattr(result, "chats_codex_does_not_list", 0):
         notes.append(screen.p("sync.note.codex_does_not_list", result.chats_codex_does_not_list))
     # Names live only in Codex's catalogue, so they travel separately (D-025).
+    moved = getattr(result, "chats_archived", 0) + getattr(result, "chats_restored", 0)
+    if moved:
+        notes.append(screen.p("sync.note.archive_followed", moved))
     if result.chat_names_set:
         notes.append(screen.p("sync.note.names_set", result.chat_names_set))
     if result.chat_names_waiting:
@@ -650,8 +653,8 @@ class ResultLinks:
         self.journal: str | None = None
         self.recovery = button(screen.t("sync.link.recovery"))
         self.recovery.clicked.connect(lambda: screen.host.go_to("recovery", self.journal))
-        self.mappings = button(screen.t("sync.link.mappings"))
-        self.mappings.clicked.connect(lambda: screen.host.go_to("settings", "mappings"))
+        self.places = button(screen.t("sync.link.places"))
+        self.places.clicked.connect(self.open_places)
         self.new_chats = button(screen.t("sync.link.new_chats"))
         self.new_chats.clicked.connect(lambda: screen.host.go_to("settings", "semantic.new_chats"))
         self.sessions = button(screen.t("sync.decisions.open"))
@@ -660,7 +663,7 @@ class ResultLinks:
         self.files.clicked.connect(self.open_files)
         self.codex = button(screen.t("sync.link.codex"))
         self.codex.clicked.connect(lambda: screen.host.go_to("recovery", "codex"))
-        self.layout = row(self.recovery, self.mappings, self.new_chats, self.sessions, self.files, self.codex)
+        self.layout = row(self.recovery, self.places, self.new_chats, self.sessions, self.files, self.codex)
         self.show(None)
 
     def show_stop(self, outcome) -> None:
@@ -675,13 +678,19 @@ class ResultLinks:
         self.result = result
         self.journal = None
         self.recovery.setVisible(False)
-        self.mappings.setVisible(bool(result is not None and result.projects_missing_folders))
+        self.places.setVisible(bool(result is not None and result.projects_missing_folders))
         self.new_chats.setVisible(bool(result is not None and result.new_chats_kept_in_cloud))
         self.sessions.setVisible(bool(
             result is not None and result.chats_not_loaded - result.new_chats_kept_in_cloud > 0
         ))
         self.files.setVisible(bool(result is not None and result.project_files_behind))
         self.codex.setVisible(bool(result is not None and getattr(result, "chats_codex_does_not_list", 0)))
+
+    def open_places(self) -> None:
+        """Projects, at the list of other machines' projects, read afresh."""
+        host = self.screen.host
+        host.go_to("projects", "places")
+        host.screen("projects").check_places()
 
     def open_files(self) -> None:
         """Projects, at the folders that did not come along, checked afresh."""

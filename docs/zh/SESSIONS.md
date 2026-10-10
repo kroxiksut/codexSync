@@ -141,8 +141,9 @@ codexsync -c config.toml sessions apply --plan sessions-plan.json --confirm-plan
   发生了变化，从本机关于上一次一致状态的记录中读取，绝不依据时钟；本机没有自己的记录时，
   跟随云端副本。对话被写到另一台机器存放它的位置，旧文件在已验证的备份之后、在同一个
   封装内被删除。写入 `.codex` 时，线程目录必须指向被搬移的文件。在一台机器上归档、在另一台
-  上继续的对话需要你来决定（`ARCHIVED_AND_CONTINUED`）。在 Codex 更新之前，目录中的那一行
-  仍指向旧位置；`doctor` 会在 `session_visibility` 中统计这类对话。
+  上继续的对话需要你来决定（`ARCHIVED_AND_CONTINUED`）。随后同一次完整同步会让 Codex 的列表
+  指向搬移后的文件，并把对话标记为已归档或活动（`D-035`），因此在本机它也会出现在 Codex 的
+  归档中；`sessions archive` 可以单独预览并执行这一步。
 
 ### 写入 `.codex`
 

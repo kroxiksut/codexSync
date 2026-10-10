@@ -24,8 +24,9 @@
 </p>
 
 > [!IMPORTANT]
-> 实测验证过的只有 Windows → Windows。macOS 和 Linux 处于实验阶段：读取、诊断和计划都能用，
-> 但在进程检测于那里对着真实运行的 Codex 得到验证之前，写入一直关闭（Codex 自己的 Linux 应用也还是预览版）。
+> 实测验证过的只有 Windows → Windows。Linux 和 macOS 处于实验阶段。在 Linux 上，进程检测已经对着真实运行的
+> Codex 观察过，写入已开放，但还没有试过与 Linux 之间的交接（Codex 自己的 Linux 应用也还是预览版）。
+> 在 macOS 上读取、诊断和计划都能用，但在 Mac 上做过同样的观察之前，写入一直关闭。
 
 <p align="center">
   <a href="docs/zh/GUI.md"><img src="docs/screenshots/zh/02-overview.png" width="85%" alt="CodexSync 窗口：概览"></a>
@@ -55,7 +56,7 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 - **可以自动运行** —— 交接监视器、`.codex` 副本和定期快照都是操作系统的普通任务。
   → [自动化](docs/zh/CONFIGURATION.md#自动化)
 
-它不是 Codex 客户端，也不做实时同步。它从不强制结束 Codex，对 Codex 的数据库只做两处
+它不是 Codex 客户端，也不做实时同步。它从不强制结束 Codex，对 Codex 的数据库只做三处
 有限且先备份的修改：[它不做什么](docs/zh/README.md#它不做什么)。
 
 ## 隐私与安全
@@ -74,8 +75,8 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 下载 `codexsync-gui-…-windows-amd64.zip`（或 `…-arm64.zip`），解压后运行 `codexsync-gui.exe`。同一个可执行文件也能运行命令行子命令。需要 Windows 10（1809）或更新版本。
 
 **使用 Python 3.11+**，在 Windows、macOS 或 Linux 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1；
-加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 和 Linux 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
-写入会被拒绝（[平台](docs/zh/README.md#平台)）。在 Linux 上系统自带的 Python 不允许 `pip install`（PEP 668），
+加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
+写入会被拒绝；在 Linux 上它已经得到验证（[平台](docs/zh/README.md#平台)）。在 Linux 上系统自带的 Python 不允许 `pip install`（PEP 668），
 请安装到虚拟环境中：
 `python3 -m venv ~/.venvs/codexsync && ~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"`
 （在 Ubuntu 和 Debian 上先执行 `sudo apt install python3-venv`）。

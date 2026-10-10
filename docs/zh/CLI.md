@@ -53,6 +53,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `sessions apply` | **是** | 按一份已确认的计划整体传输分支 | [会话](SESSIONS.md#执行计划) |
 | `sessions index` | 否 | 报告两边的 `session_index.jsonl` 各有什么 | [会话](SESSIONS.md#会话索引) |
 | `sessions scope` | 否 | 显示为一对机器保存的工作集 | [会话](SESSIONS.md) |
+| `sessions archive` | **是** | 归档搬移后文件已换位置的对话；加 `--confirm-plan` 时让 Codex 的列表指向新文件 | [会话](SESSIONS.md#写入-codex) |
 | `sessions names` | **是** | 其他机器显示的聊天名称；加 `--confirm-plan` 时给本机没有名称的聊天设置名称 | [会话](SESSIONS.md#写入-codex) |
 | `sessions catalogue` | **是** | 列出 Codex 不显示的聊天文件；加 `--confirm-plan` 时请 Codex 重建聊天列表 | [会话](SESSIONS.md#写入-codex) |
 | `codex check` | 否 | Codex 为什么可能无法启动或不显示聊天；只读取 | [恢复](RECOVERY.md#codex-无法启动时) |
@@ -61,6 +62,8 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `chats move` | **是** | 把选定的对话放到一个项目下 | [项目](PROJECTS.md#把对话移到某个项目) |
 | `projects sync` | **是** | 把其他电脑的项目列表合并到本机，再发布本机的列表（不带 `--confirm-plan` 时只是预览） | [项目](PROJECTS.md#机器之间的项目) |
 | `projects files` | 否 | 本机的项目文件夹是否包含其他机器上次的内容 | [项目](PROJECTS.md#项目文件夹) |
+| `projects places` | 否 | 其他机器的每个项目在本机的位置，以及本机已得到的回答 | [项目](PROJECTS.md#在另一种操作系统上) |
+| `projects place` | 仅共享文件夹 | 说明其他机器的项目在本机的位置（`--path`）、不带到本机（`--skip`）或忘记回答（`--forget`）；对所有方向都有效 | [项目](PROJECTS.md#在另一种操作系统上) |
 | `repair-projects scan` | 否 | 构建一份不可变的、带哈希的修复计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `repair-projects apply` | **是** | 按标识执行某一份确切的计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `project-move scan` | 否 | 为项目计算哈希，并规划复制到新文件夹 | [项目](PROJECTS.md#搬移项目的文件) |
@@ -172,8 +175,8 @@ codexsync -c config.toml backups list
 - 一次写入要求 Codex 已经连续停止两秒，另加提交前和提交过程中的直接检查。
 - 同一个 Codex 文件夹同一时间只能有一条会写入的命令在工作，不论它是哪一种；第二条会以
   退出码 `5` 停下。
-- `RUNNING` 和 `UNKNOWN` 都会阻止写入。在 macOS 和 Linux 上，写入一直被阻止，直到
-  进程检测器在真实机器上得到验证（见
+- `RUNNING` 和 `UNKNOWN` 都会阻止写入。在 macOS 上，写入一直被阻止，直到
+  进程检测器在真实的 Mac 上得到验证（见
   [还没有被验证的部分](README.md#还没有被验证的部分)）。
 - 如果目标文件一瞬间被别的进程占用（云客户端、搜索索引器、杀毒软件），原子替换会以
   有上限的退避重试。每次重试之前都会重新做进程检查，而其他任何错误都不会重试

@@ -17,9 +17,9 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
-
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .config import PATH_SUBSTITUTIONS, load_config, preview_path
 from .progress import PHASES, ProgressCallback, report as report_progress
@@ -74,12 +74,29 @@ from .models import (
     SyncPlan,
 )
 from .operation_lock import OperationLock
-from .path_mapping import PathMappingError, apply_path_mapping, mapping_digest
+from .path_mapping import PathMappingError, PathMappingRule, apply_path_mapping, mapping_digest, path_flavor
+from .path_places import (
+    MachinePlaces,
+    Place,
+    Skip,
+    case_sensitive_on,
+    forget as forget_place,
+    learn_place,
+    learn_skip,
+    learned_rules,
+    read_places,
+    suggest_here,
+    this_system,
+    write_places,
+)
 from .project_sync import (
+    MergeKind,
     ProjectMergePlan,
     ProjectSyncUnsupported,
     RootMappingAmbiguous,
+    RootNotPlaced,
     build_project_merge,
+    project_root_rules,
     publication_from_state,
     read_board as read_project_board,
     root_key,
@@ -205,11 +222,13 @@ from .sqlite_audit import (
     ThreadActivity,
     read_backfill_state,
     read_thread_activity,
+    read_thread_archive_rows,
     read_thread_names,
     read_thread_placements,
 )
 from .fs_replace import replace_with_retry
 from .config_locations import cache_dir
+from .chat_archive import ArchivePlan, apply_archive_changes, build_archive_plan, read_archive_back
 from .chat_names import (
     NamePlan,
     apply_names,
@@ -305,6 +324,8 @@ __all__ = [
     "CodexRepairResult",
     "sync_chat_names",
     "ChatNamesResult",
+    "follow_chat_archive",
+    "ChatArchiveResult",
     "check_project_files",
     "ProjectFilesItem",
     "ProjectFilesReport",
@@ -610,7 +631,7 @@ def scan_repair_projects(
         observation.payload,
         source_machine=source_machine,
         target_machine=target_machine,
-        rules=cfg.path_mappings,
+        rules=path_rules(cfg),
         volatile=volatile,
     )
 
@@ -642,7 +663,7 @@ def apply_repair_projects(
         raise ConfigError("--confirm-plan must exactly match the saved repair plan id")
     if plan.volatile or plan.codes:
         raise FailSafeError("Volatile or unresolved repair plan cannot be applied")
-    if plan.mapping_digest != mapping_digest(cfg.path_mappings):
+    if plan.mapping_digest != mapping_digest(path_rules(cfg)):
         raise FailSafeError("Path mapping rules changed after the repair scan")
     unsupported = {RepairActionKind.AMBIGUOUS_PROJECT, RepairActionKind.UNSUPPORTED_BACKEND}
     if any(action.kind in unsupported for action in plan.actions):
@@ -942,7 +963,7 @@ def scan_chats(
         observation.payload,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=decision.process_state is not ProcessState.STOPPED,
-        rules=cfg.path_mappings,
+        rules=path_rules(cfg),
         source_machine=source_machine,
         target_machine=target_machine,
         progress=progress,
@@ -984,7 +1005,7 @@ def move_chats(
         local_dir, original,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=volatile,
-        rules=cfg.path_mappings,
+        rules=path_rules(cfg),
         source_machine=source_machine,
         target_machine=target_machine,
     )
@@ -1064,21 +1085,75 @@ def projects_root(cfg: AppConfig) -> Path:
     return _coordination_dir(cfg) / "projects"
 
 
-def _root_mapper(cfg: AppConfig, machine: str) -> Callable[[str, str], str]:
+def places_root(cfg: AppConfig) -> Path:
+    """Where each machine keeps what it was told about folders (D-033)."""
+    return _coordination_dir(cfg) / "path-places"
+
+
+def path_rules(cfg: AppConfig) -> list[PathMappingRule]:
+    """`[[path_mappings]]` plus every place the machines learned (D-033). Reads only.
+
+    The one list projects, chats, the working set, repair and the session
+    transfer map paths through: the config's own rules, what any machine was
+    told about a folder (`path_places`, both directions and through a third
+    machine), and each project both machines hold under different roots. A
+    part that cannot be read adds nothing; the config's rules always count.
+    """
     rules = list(cfg.path_mappings)
+    try:
+        machine = _handoff_machine(cfg)
+        coordination = _coordination_dir(cfg)
+    except ConfigError:
+        return rules
+    places = read_places(coordination / "path-places")
+    rules.extend(learned_rules(places, machine))
+    try:
+        source = locate_local_state_dir(cfg) / ".codex-global-state.json"
+        state = json.loads(source.read_bytes().decode("utf-8-sig"))
+    except (ConfigError, OSError, UnicodeError, ValueError):
+        return rules
+    if isinstance(state, dict):
+        board = read_project_board(projects_root(cfg))
+        rules.extend(project_root_rules(
+            state, board.publications.values(), machine,
+            case_sensitive=lambda peer: case_sensitive_on(places.system_of(peer)),
+        ))
+    return rules
+
+
+def _native_here(path: str) -> bool:
+    """Whether ``path`` is written the way this operating system writes paths."""
+    flavor = path_flavor(path)
+    return flavor is None or (flavor in {"windows", "unc"}) == (this_system() == "windows")
+
+
+def _root_mapper(
+    cfg: AppConfig, machine: str, rules: list[PathMappingRule] | None = None,
+) -> Callable[[str, str], str]:
+    rules = list(path_rules(cfg) if rules is None else rules)
 
     def map_root(peer: str, root: str) -> str:
-        if not rules:
-            return root
         try:
             return apply_path_mapping(root, source_machine=peer, target_machine=machine, rules=rules).target_path
         except PathMappingError as exc:
-            if str(exc) == "NO_MAPPING":
-                # Same path on both machines -- the usual case on one cloud drive.
-                return root
-            raise RootMappingAmbiguous(str(exc)) from exc
+            if str(exc) != "NO_MAPPING":
+                raise RootMappingAmbiguous(str(exc)) from exc
+            if not _native_here(root):
+                # Another system's path names nothing here (CS-403).
+                raise RootNotPlaced(root) from exc
+            # Same path on both machines -- the usual case on one cloud drive.
+            return root
 
     return map_root
+
+
+def _chat_folders(local_dir: Path, cfg: AppConfig) -> list[tuple[str, str | None]]:
+    """``(thread id, cwd)`` of every chat here that is not a spawned sub-thread."""
+    catalog = scan_sessions(local_dir, max_line_bytes=cfg.semantic.max_jsonl_line_bytes)
+    return [
+        (item.session_id, item.cwd) for item in one_per_chat(catalog.descriptors)
+        if item.session_id and not item.parent_id
+    ]
 
 
 def _folder_exists(root: str) -> bool:
@@ -1128,10 +1203,17 @@ def sync_projects(
     if not source.is_file():
         raise ProjectsNotCarried(f"No Codex global state at {source}; there is no project list to merge into")
     original = _read_live_state(source, config_path)
+    places = read_places(places_root(cfg))
+    for name, reason in sorted(places.unreadable.items()):
+        LOG.warning("folder places %s are not believed: %s", name, reason)
+    pending_machines = {item.machine for item in pending}
     try:
         plan, state = build_project_merge(
             original, pending, machine=machine,
             map_root=_root_mapper(cfg, machine), folder_exists=_folder_exists,
+            taken_before=[item for item in board.others(machine) if item.machine not in pending_machines],
+            skipped=places.skipped_here(machine),
+            chats=_chat_folders(local_dir, cfg), native=_native_here,
         )
     except ProjectSyncUnsupported as exc:
         raise ProjectsNotCarried(f"Projects cannot be carried: {exc}") from exc
@@ -1152,8 +1234,14 @@ def sync_projects(
             "project %s of %s left alone: %s", item.name or item.peer_project_id, item.peer_machine,
             ", ".join(item.codes),
         )
+    # A project without a folder here is the usual case, not a fault (D-034).
     for item in plan.missing_folders:
-        LOG.warning("project %s added, but its folder does not exist here: %s", item.name, ", ".join(item.roots))
+        LOG.info("project %s added without a folder here: %s", item.name, ", ".join(item.roots))
+    for item in plan.unplaced:
+        LOG.info(
+            "project %s of %s added with that machine's root as it is (%s); `projects place` gives it a folder here",
+            item.name or item.peer_project_id, item.peer_machine, ", ".join(item.roots),
+        )
     if dry_run:
         LOG.info("project sync dry-run: plan %s would make %d change(s)", plan.plan_id, plan.action_count)
         return result
@@ -1173,12 +1261,223 @@ def sync_projects(
             origin=origin,
         )
         LOG.info(
-            "projects: %d added, pins %s, order %s, %d chat binding(s) written",
-            len(plan.added), "changed" if plan.pins_changed else "kept",
-            "changed" if plan.order_changed else "kept", plan.bindings_written,
+            "projects: %d added, %d placed, pins %s, order %s, %d chat binding(s) written, "
+            "%d chat(s) bound by their folder",
+            len(plan.added), len(plan.placed), "changed" if plan.pins_changed else "kept",
+            "changed" if plan.order_changed else "kept", plan.bindings_written, plan.bound_by_folder,
         )
     published = _publish_projects(root, board, machine, source, plan)
     return replace(result, written=written, published=published)
+
+
+class PlaceStatus(str, Enum):
+    """Where a project another machine has stands on this one (D-033)."""
+
+    #: Here, and its folder exists.
+    HERE = "HERE"
+    #: Here, without a folder: its chats can be read, its files are elsewhere.
+    MISSING_HERE = "MISSING_HERE"
+    #: Not here yet; the next sync adds it at ``here``.
+    COMING = "COMING"
+    #: Not here yet; its root is another system's path and nothing places it,
+    #: so the next sync adds it with that root as it is, without a folder (D-034).
+    UNPLACED = "UNPLACED"
+    #: This machine was told not to carry it.
+    SKIPPED = "SKIPPED"
+    #: Two rules or answers disagree about where it is.
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectPlace:
+    project_id: str
+    name: str
+    #: The machines that publish it, and its root on the first of them.
+    peers: tuple[str, ...]
+    there: tuple[str, ...]
+    status: PlaceStatus
+    #: Its root here: the one Codex has, or where the next sync puts it.
+    here: tuple[str, ...] = ()
+    #: Folders here named like it, beside folders already placed. Offered only.
+    suggestions: tuple[str, ...] = ()
+
+    @property
+    def needs_answer(self) -> bool:
+        """Only a disagreement waits: a project without a folder here is fine (D-034)."""
+        return self.status is PlaceStatus.AMBIGUOUS
+
+    @property
+    def without_folder(self) -> bool:
+        return self.status in {PlaceStatus.UNPLACED, PlaceStatus.MISSING_HERE}
+
+
+@dataclass(frozen=True, slots=True)
+class PlacesReport:
+    machine: str
+    system: str
+    projects: tuple[ProjectPlace, ...]
+    #: What this machine was told, as it is stored in the shared workspace.
+    learned: MachinePlaces
+    root: Path
+    unreadable: tuple[str, ...] = ()
+
+    @property
+    def waiting(self) -> tuple[ProjectPlace, ...]:
+        return tuple(item for item in self.projects if item.needs_answer)
+
+    @property
+    def without_folder(self) -> tuple[ProjectPlace, ...]:
+        return tuple(item for item in self.projects if item.without_folder)
+
+
+def project_places(config_path: Path) -> PlacesReport:
+    """Every project another machine has, and where it stands here. Reads only (D-033)."""
+    cfg = load_config(config_path)
+    machine = _handoff_machine(cfg)
+    root = places_root(cfg)
+    places = read_places(root)
+    board = read_project_board(projects_root(cfg))
+    rules = path_rules(cfg)
+    map_root = _root_mapper(cfg, machine, rules)
+    local: dict[str, Any] = {}
+    schema_id = None
+    try:
+        state = json.loads((locate_local_state_dir(cfg) / ".codex-global-state.json").read_bytes().decode("utf-8-sig"))
+        if isinstance(state, dict):
+            schema_id = detect_state_schema(state)
+            local = dict(state.get("local-projects") or {})
+    except (ConfigError, OSError, UnicodeError, ValueError):
+        pass
+    here_roots = {
+        project_id: project_root_paths(schema_id, entry) if schema_id and isinstance(entry, dict) else ()
+        for project_id, entry in local.items()
+    }
+    known_here = [root for roots in here_roots.values() for root in roots if _folder_exists(root)]
+    known_here += [place.here for place in places.own(machine).places]
+    skipped = places.skipped_here(machine)
+    # A root another machine publishes for a project already here: the merge
+    # takes a root carried as it is to be that project (D-034).
+    published: dict[str, set[str]] = {}
+    for peer in board.others(machine):
+        for project_id, entry in peer.projects.items():
+            for root in project_root_paths("electron-v2", entry):
+                published.setdefault(root_key(root), set()).add(project_id)
+
+    seen: dict[str, ProjectPlace] = {}
+    for peer in board.others(machine):
+        for project_id, entry in sorted(peer.projects.items()):
+            if project_id in seen:
+                item = seen[project_id]
+                seen[project_id] = replace(item, peers=item.peers + (peer.machine,))
+                continue
+            name = entry.get("name") if isinstance(entry.get("name"), str) else ""
+            there = project_root_paths("electron-v2", entry)
+            here: tuple[str, ...] = ()
+            if project_id in local:
+                here = here_roots.get(project_id, ())
+                status = PlaceStatus.HERE if any(_folder_exists(item) for item in here) else PlaceStatus.MISSING_HERE
+            elif project_id in skipped:
+                status = PlaceStatus.SKIPPED
+            else:
+                try:
+                    here = tuple(map_root(peer.machine, item) for item in there)
+                    wanted = {root_key(item) for item in here}
+                    # The merge matches a project by its folder too, under another id.
+                    same_folder = [roots for roots in here_roots.values() if wanted & {root_key(r) for r in roots}]
+                    if same_folder:
+                        here = same_folder[0]
+                        status = (
+                            PlaceStatus.HERE if any(_folder_exists(item) for item in here)
+                            else PlaceStatus.MISSING_HERE
+                        )
+                    else:
+                        status = PlaceStatus.COMING
+                except RootNotPlaced:
+                    status = PlaceStatus.UNPLACED
+                    known = sorted({
+                        other for root in there for other in published.get(root_key(root), ())
+                        if other != project_id and other in local
+                    })
+                    if len(known) == 1:
+                        here = here_roots.get(known[0], ())
+                        status = (
+                            PlaceStatus.HERE if any(_folder_exists(item) for item in here)
+                            else PlaceStatus.MISSING_HERE
+                        )
+                except RootMappingAmbiguous:
+                    status = PlaceStatus.AMBIGUOUS
+            suggestions: tuple[str, ...] = ()
+            if status in {PlaceStatus.UNPLACED, PlaceStatus.MISSING_HERE} and there:
+                suggestions = suggest_here(there[0], known_here)
+            seen[project_id] = ProjectPlace(
+                project_id, name, (peer.machine,), there, status, here, suggestions,
+            )
+    projects = tuple(sorted(seen.values(), key=lambda item: (item.name.casefold(), item.project_id)))
+    return PlacesReport(
+        machine, this_system(), projects, places.own(machine), root, tuple(sorted(places.unreadable)),
+    )
+
+
+def place_project(
+    config_path: Path,
+    project: str,
+    *,
+    path: str | None = None,
+    skip: bool = False,
+    forget: bool = False,
+    whole_folder: bool = True,
+) -> MachinePlaces:
+    """Say where another machine's project is here, not to carry it, or forget either (D-033).
+
+    The answer goes into this machine's own file in the shared workspace, not
+    into Codex: the next sync adds or moves the project through the ordinary
+    envelope, and every other machine reads the answer backwards. With
+    ``whole_folder`` the folder above is learned too when both ends share the
+    project's folder name, so its neighbours need no question.
+    """
+    if sum((path is not None, skip, forget)) != 1:
+        raise ConfigError("Give exactly one of a folder, skip or forget")
+    cfg = load_config(config_path)
+    machine = _handoff_machine(cfg)
+    root = places_root(cfg)
+    # This machine's file says which system wrote it; it is this one, now.
+    current = replace(read_places(root).own(machine), system=this_system())
+    report = project_places(config_path)
+    matches = [
+        item for item in report.projects
+        if item.project_id == project or (item.name and item.name.casefold() == project.casefold())
+    ]
+    if not matches:
+        raise ConfigError(f"No project of another machine matches {project!r}; `projects places` lists them")
+    if len(matches) > 1:
+        names = ", ".join(f"{item.name} ({item.project_id})" for item in matches)
+        raise ConfigError(f"{project!r} matches more than one project: {names}; name it by its id")
+    item = matches[0]
+    if forget:
+        updated = current
+        for there in item.there:
+            updated = forget_place(updated, there=there)
+        updated = forget_place(updated, project_id=item.project_id)
+    elif skip:
+        updated = learn_skip(current, project_id=item.project_id, name=item.name, peer=item.peers[0])
+    else:
+        assert path is not None
+        here = path.strip()
+        if path_flavor(here) is None or not _native_here(here):
+            raise ConfigError(f"Not an absolute path on this machine: {path!r}")
+        if len(item.there) != 1:
+            raise ConfigError(f"Project {item.name!r} has {len(item.there)} folders there; only one can be placed")
+        updated = current
+        for peer in item.peers:
+            updated = learn_place(
+                updated, peer=peer, there=item.there[0], here=here,
+                project_id=item.project_id, name=item.name, whole_folder=whole_folder,
+            )
+        if not _folder_exists(here):
+            LOG.warning("project %s placed at %s, which does not exist here yet", item.name, here)
+    write_places(root, updated)
+    LOG.info("folder places of %s written to %s", machine, root)
+    return updated
 
 
 @dataclass(frozen=True, slots=True)
@@ -1375,13 +1674,15 @@ def check_codex(config_path: Path, *, gate: SafetyGate | None = None) -> CodexHe
     findings = diagnose_catalogue(reading, process, measure_chat_files(local_dir), unnamed=unnamed)
     source = local_dir / ".codex-global-state.json"
     valid: bool | None = None
+    recognised = True
     if source.is_file():
         try:
             report = validate_global_state_references(source.read_bytes())
             valid = report.status in {ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING}
+            recognised = report.status is not ValidationStatus.INDETERMINATE
         except OSError:
             valid = None
-    findings += diagnose_global_state(present=source.is_file(), valid=valid)
+    findings += diagnose_global_state(present=source.is_file(), valid=valid, recognised=recognised)
     try:
         open_journals = sum(1 for item in list_journals(config_path) if not item.terminal and not item.closes_itself)
     except Exception:  # an unreadable journal folder is `recover list`'s to explain
@@ -1529,6 +1830,84 @@ def sync_chat_names(
         written = len(plan.changes)
         LOG.info("chat names: %d set from other machines, %d kept as named here", written, plan.kept)
     return replace(result, written=written, published=_publish_chat_names(root, machine, local_dir))
+
+
+@dataclass(frozen=True, slots=True)
+class ChatArchiveResult:
+    """What `follow_chat_archive` found and rewrote (D-035)."""
+
+    plan: ArchivePlan
+    #: Catalogue rows pointed at the file an archive move left them.
+    written: int = 0
+    volatile: bool = False
+
+
+def follow_chat_archive(
+    config_path: Path,
+    *,
+    confirm_plan: str | None = None,
+    dry_run: bool = False,
+    gate: SafetyGate | None = None,
+    origin: str | None = None,
+    planned_here: bool = False,
+) -> ChatArchiveResult:
+    """Preview, or make Codex's catalogue follow chats moved into or out of the archive.
+
+    A sync moves an archived chat's file between ``sessions/`` and
+    ``archived_sessions/`` (D-023); this points the row at the file it moved
+    to, with the archive state that folder means (`chat_archive`). Without
+    ``confirm_plan`` it reads only; with it, Codex must be closed and the plan
+    id must still match, and the rows are rewritten in one transaction inside
+    the catalogue envelope. ``planned_here`` applies the plan this call builds.
+    """
+    cfg = load_config(config_path)
+    local_dir = locate_local_state_dir(cfg)
+    gate = gate if gate is not None else _make_safety_gate(cfg)
+    applying = confirm_plan is not None or planned_here
+    if applying:
+        _require_mutation_compatible_config(cfg)
+        gate.require(OperationKind.SESSION_APPLY)
+        volatile = False
+    else:
+        volatile = gate.check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
+
+    def fingerprint(relative: str) -> str:
+        return database_fingerprint(local_dir / Path(relative))
+
+    def plan_now() -> ArchivePlan:
+        return build_archive_plan(read_thread_archive_rows(local_dir), local_dir, fingerprint=fingerprint)
+
+    plan = plan_now()
+    result = ChatArchiveResult(plan=plan, volatile=volatile)
+    if not applying:
+        return result
+    if not planned_here and plan.plan_id != confirm_plan:
+        raise ConfigError(
+            "--confirm-plan must match the plan id from the preview; the catalogue or the chat files "
+            "changed since then, so preview again"
+        )
+    if dry_run or not plan.writes:
+        if dry_run:
+            LOG.info("chat archive dry-run: %d catalogue row(s) would follow their file", len(plan.changes))
+        return result
+    assert plan.database is not None
+    database = local_dir / Path(plan.database)
+    expected = {
+        item.thread_id: (item.path_after, item.archived_after, item.archived_at_after) for item in plan.changes
+    }
+    _write_codex_catalogue(
+        cfg, gate, local_dir, database,
+        family="chat-archive", plan_id=plan.plan_id, action_count=len(plan.changes),
+        counts={"archived": plan.archived, "restored": plan.restored}, origin=origin,
+        still_planned=lambda: plan_now().plan_id == plan.plan_id,
+        write=lambda: apply_archive_changes(database, plan.changes),
+        verify=lambda: read_archive_back(database, sorted(expected)) == expected,
+    )
+    LOG.info(
+        "chat archive: %d chat(s) archived and %d brought back in Codex's catalogue, as their files moved",
+        plan.archived, plan.restored,
+    )
+    return replace(result, written=len(plan.changes))
 
 
 def _publish_chat_names(root: Path, machine: str, local_dir: Path) -> bool:
@@ -1809,7 +2188,7 @@ def _publish_projects(root: Path, board, machine: str, source: Path, plan: Proje
     publication = publication_from_state(state, machine, accepted=accepted)
     if (
         own is not None and own.publication_id == publication.publication_id
-        and own.accepted == publication.accepted
+        and own.accepted == publication.accepted and own.projectless == publication.projectless
     ):
         return False
     write_publication(root, publication)
@@ -1901,7 +2280,7 @@ def scan_session_transfer(
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=volatile,
         scope=scope.session_hashes if scope is not None and not scope.is_empty else None,
-        path_rules=cfg.path_mappings,
+        path_rules=path_rules(cfg),
         folder_exists=local_folder_exists,
         conflict_rule=conflict_rule_for(cfg.conflict.policy, cfg.sync.direction),
         direction=cfg.sync.direction,
@@ -2294,7 +2673,7 @@ def _rebuild_transfer_plan(
         scope=plan_scope(plan),
         # The rules as they are now: the codes they produce are in the id, so a
         # rule edited after the scan is a changed plan, not a silent one.
-        path_rules=cfg.path_mappings,
+        path_rules=path_rules(cfg),
         folder_exists=local_folder_exists,
         # The rule and direction the plan was confirmed under, like the codec.
         conflict_rule=plan.conflict_rule,
@@ -2699,7 +3078,7 @@ class HandoffNotDelivered(FailSafeError):
 
 
 #: The steps of a full sync that may fail without failing it, in run order.
-HANDOFF_STEPS = ("projects", "chat_names", "catalogue")
+HANDOFF_STEPS = ("projects", "chat_archive", "chat_names", "catalogue")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2734,7 +3113,7 @@ class HandoffResult:
     projects_added: int = 0
     #: Changes written into the project list: added projects, pins, order, bindings.
     project_changes: int = 0
-    #: Added projects whose folder does not exist on this machine.
+    #: Added projects without a folder on this machine -- reported, not a fault (D-034).
     projects_missing_folders: int = 0
     #: Chat files Codex's catalogue does not list that Codex takes up on its
     #: next start, because a rebuild of its own is pending (D-024).
@@ -2744,6 +3123,9 @@ class HandoffResult:
     chats_codex_does_not_list: int = 0
     #: Chat files Codex still does not list although it was asked once before.
     chats_codex_ignores: int = 0
+    #: Chats archived / brought back in Codex's catalogue as their files moved (D-035).
+    chats_archived: int = 0
+    chats_restored: int = 0
     #: Chat names taken from other machines (D-025).
     chat_names_set: int = 0
     #: Chats named here that another machine names differently; local kept.
@@ -2753,7 +3135,8 @@ class HandoffResult:
     #: Projects whose folder here holds less than another machine had (D-026).
     project_files_behind: tuple["ProjectFilesItem", ...] = ()
     #: Steps after the settings and chats that failed this time and were
-    #: logged: ``projects``, ``chat_names``, ``catalogue`` (`HANDOFF_STEPS`).
+    #: logged: ``projects``, ``chat_archive``, ``chat_names``, ``catalogue``
+    #: (`HANDOFF_STEPS`).
     #: The handoff itself happened; the next sync does them again.
     steps_not_done: tuple[str, ...] = ()
     #: Codex was open and quit when asked (`[sync] close_codex`, D-029).
@@ -3049,6 +3432,11 @@ def run_handoff(
     # A merge never needs a person (an ambiguous project is left alone).
     report_progress(progress, "sync_projects", 0, 0)
     projects = step("projects", lambda: sync_projects(config_path, origin=origin, planned_here=True))
+    # A chat archived or brought back on the other machine arrived as a file
+    # move; Codex's catalogue row still names the old path and state until it
+    # is pointed at the file (D-035).
+    report_progress(progress, "follow_chat_archive", 0, 0)
+    archive = step("chat_archive", lambda: follow_chat_archive(config_path, origin=origin, planned_here=True))
     # Names live only in Codex's catalogue, never in the chat file (D-025):
     # set the other machines' names on chats Codex already lists here, and
     # publish this machine's.
@@ -3096,7 +3484,9 @@ def run_handoff(
         source=source,
         projects_added=len(projects.plan.added) if projects else 0,
         project_changes=projects.written if projects else 0,
-        projects_missing_folders=len(projects.plan.missing_folders) if projects else 0,
+        projects_missing_folders=(
+            len(projects.plan.missing_folders) + len(projects.plan.unplaced) if projects else 0
+        ),
         # Codex has a rebuild of its own pending: it walks the files on its
         # next start. Nothing of this run asked for it (D-032).
         chats_codex_will_list=(
@@ -3110,6 +3500,8 @@ def run_handoff(
             len(catalogue.plan.unnamed)
             if catalogue and catalogue.plan.status is RefreshStatus.ALREADY_ASKED else 0
         ),
+        chats_archived=archive.plan.archived if archive and archive.written else 0,
+        chats_restored=archive.plan.restored if archive and archive.written else 0,
         chat_names_set=names.written if names else 0,
         chat_names_kept=names.plan.kept if names else 0,
         chat_names_waiting=names.plan.waiting if names else 0,

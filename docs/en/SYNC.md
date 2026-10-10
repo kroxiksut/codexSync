@@ -197,7 +197,7 @@ there. A **handoff** does the two syncs and checks the delivery in between:
 
 ```toml
 [handoff]
-root_dir = "${workspace_root}/handoff"   # optional: empty means "handoff" beside state.manifest_file
+root_dir = ""                            # empty: "handoff" beside state.manifest_file, the same on every machine
 enabled = true                           # the watcher task below
 delivery_wait_minutes = 15
 notify = true

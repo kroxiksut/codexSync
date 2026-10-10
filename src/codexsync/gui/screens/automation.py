@@ -710,7 +710,7 @@ class AutomationScreen(ConfigFormScreen):
                 self.handoff_links.show(done)
                 text = " ".join(parts)
                 tone = "attention" if (
-                    done.chats_not_loaded or done.projects_missing_folders or done.chats_codex_ignores
+                    done.chats_not_loaded or done.chats_codex_ignores
                     or getattr(done, "chats_codex_does_not_list", 0) or done.project_files_behind or getattr(done, "steps_not_done", ())
                 ) else "ok"
         self.handoff_status.setText(text)

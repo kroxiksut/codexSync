@@ -86,8 +86,12 @@ each full sync carries the **project part** of it:
 - for projects both machines have, the other machine's pins, order and chat
   bindings win, but only from a list this machine has not taken yet, so an
   unchanged list is never applied again over a change made here since;
-- a project whose folder does not exist on this machine is still added, and
-  the sync says so — create the folder or add a path mapping.
+- a project whose folder does not exist on this machine is still added, with
+  its chats (`D-034`, below);
+- the sidebar's **sections** travel the same way: a section, its name, the
+  projects and single chats in it and their order; an item the other machine
+  put into a section leaves any other section here, and a section is never
+  removed (`D-036`).
 
 It runs as part of `handoff sync` and of **Synchronise** in the window. By hand:
 
@@ -101,6 +105,56 @@ state: Codex closed, a verified backup first, and a rollback through
 [`recover`](RECOVERY.md#interrupted-mutations) if anything fails. Codex also
 keeps projects in `state_*.sqlite`, whose project records codexSync never
 modifies; the sidebar follows the JSON file.
+
+### On another operating system
+
+A project's folder is rarely at the same path on Windows, Linux and macOS
+(`D:\Projects\atlas`, `/opt/atlas`, `/Users/you/code/atlas`). codexSync asks
+once where it is and remembers the answer (`D-033`). Until then the project
+still comes along (`D-034`):
+
+- a project with no folder here is carried **with its chats**, which can be
+  read; nothing warns about it, since a project you do not work on here is
+  the usual case. If its folder is written the other system's way and no rule
+  places it, it keeps that machine's path as it is (Codex shows such a
+  project and opens its chats);
+- to work on its files — or to continue one of its chats — here, give it a
+  folder; the next synchronisation moves the project there. Until then Codex
+  opens its chats to read, but a chat continued there would run in a folder
+  that does not exist. Answer in the window (**Projects → Other machines' projects on this one →
+  Choose its folder here…**) or in the console:
+
+```powershell
+codexsync -c config.toml projects places                                  # projects without a folder here, with suggestions
+codexsync -c config.toml projects place atlas --path /opt/atlas           # it is here
+codexsync -c config.toml projects place old-tool --skip                   # do not carry it here
+codexsync -c config.toml projects place atlas --forget                    # forget the answer
+```
+
+- the answer is kept in the `path-places` folder beside `state.manifest_file`,
+  not in `config.toml`, and serves **every direction and every machine**: the
+  other machine reads it backwards, and two machines that each placed the same
+  folder of a third map onto each other. When both ends end in the project's
+  folder name, the folder above is learned too (`D:\Projects` is `/opt`), so
+  the other projects from that folder need no question (`--only-this` turns
+  that off). A project both machines hold under different folders is such a
+  pair by itself;
+- the next sync adds the project there, and moves a project carried earlier
+  with a folder that does not exist here, once its new folder does; a folder
+  chosen here is never moved;
+- chats follow: Codex puts most chats under a project by their folder alone,
+  so a chat with no binding is bound to the project whose folder held it on
+  the machine it came from. A chat with a binding is never touched, and
+  neither is one Codex shows without a project on either machine: it stays a
+  plain chat until you put it in a project, even when its folder is the
+  project's folder;
+- two different folders of one machine that the rules send to **one** folder
+  here are left alone, both of them, and so are their chats — merging them
+  would put the chats of one project into the other.
+
+Suggestions — a folder of the same name beside a project already placed — are
+offered, never chosen. Whether paths differ by case follows the machine: macOS
+writes paths like Linux but ignores case, as Windows does.
 
 ### Project folders
 

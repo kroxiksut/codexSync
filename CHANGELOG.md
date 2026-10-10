@@ -60,9 +60,11 @@ session store — is read by every later alpha and by 0.2.0 (`D-030`).
 
 **Known limits.** Validated in practice Windows → Windows only. On macOS the
 code and CI run, but every write is refused until the process detector has
-been observed against a live Codex. Linux is experimental in the same way
+been observed against a live Codex. Linux is experimental
 (Codex for Linux is itself a preview, `D-031`): it installs and its CI runs,
-and writes stay refused until the detector is observed there. Some Codex behaviours are deliberately left unused until an
+and the detector has been observed against a live Codex on Ubuntu 26.04, so
+writes are open there; one Windows -> Linux handoff has been tried, on a copy of
+the workspace. Some Codex behaviours are deliberately left unused until an
 experiment records them:
 [what is not proven yet](https://github.com/kroxiksut/codexSync/blob/main/docs/en/README.md#what-is-not-proven-yet).
 
@@ -72,6 +74,35 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
 [SECURITY.md](https://github.com/kroxiksut/codexSync/blob/main/SECURITY.md).
 
 ### Added
+- **Archived chats stay archived on the other machine** (`D-035`). A chat
+  archived or brought back in Codex on one machine already moved between
+  `sessions/` and `archived_sessions/` on the other; now Codex's list there
+  follows it too, so the chat shows in Codex's archive (or back in the list)
+  instead of where it was, with no file behind it. This is a third, narrow
+  write into Codex's catalogue: three columns of that one chat's row, guarded
+  by the values the plan saw, in the same envelope as the others. `sessions
+  archive` previews and applies it on its own.
+- **Sidebar sections travel between machines** (`D-036`). A section, its name,
+  the projects and single chats in it and their order are carried with the
+  project list; nothing is ever removed, and the machine you worked on last
+  decides where an item sits.
+- **Where a project is on each machine is asked once and remembered**
+  (`D-033`). A folder rarely has one path on Windows, Linux and macOS. A
+  project with no folder here comes with its chats anyway, without a warning
+  (`D-034`): one whose folder is written the other system's way keeps that
+  machine's path as it is, which Codex shows and whose chats it opens. To
+  work on its files here, give it a folder in the window (Projects -> Other
+  machines' projects on this one) or with `projects place <name> --path
+  <folder>` (`--skip` not to carry it, `--forget`); `projects places` lists the
+  projects without a folder here, with suggestions. The answer lives in the shared
+  workspace, serves every direction and every machine (read backwards, and
+  joined through a third machine), learns the folder above when the names
+  match, and feeds the same rules `[[path_mappings]]` does -- projects, chats,
+  the working set, repair and the session transfer. Chats follow their
+  project: one with no binding is bound to the project whose folder held it
+  on the machine it came from, since Codex places most chats by folder alone.
+  A chat Codex shows without a project on either machine stays a plain chat
+  until you bind it, even when its folder is a project's folder.
 - **Codex's state can be checked and repaired** (`D-032`). `codex check` reads
   only and lists findings with a code, a severity and their repair; `codex
   repair --confirm-plan` applies the one it plans, in the same envelope as
@@ -84,8 +115,9 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
 - **Python 3.14, and Linux as an experimental platform** (`D-031`). CI runs
   Python 3.11–3.14 on Windows and macOS, and every job on `ubuntu-latest` as
   well, where a failure is shown but does not fail the run. On Linux the
-  package installs and reads; writes wait for the process detector to be
-  observed against a live Codex there.
+  process detector was observed against a live Codex (Ubuntu 26.04, desktop
+  app 26.1002), so writes are open; a command Codex started in a chat can
+  outlive the app, and Codex reads as running until it ends.
 - **Builds for ARM64 Windows, and PyPI from the release workflow.**
   `.github/workflows/release.yml` (was `release-exe.yml`) checks that the tag,
   `pyproject.toml` and this file name one version (`scripts/release_meta.py`),
@@ -623,6 +655,19 @@ Never attach real chats, `auth.json`, databases or your `config.toml` — see
   termination flow it belonged to.
 
 ### Fixed
+- Two different project folders of one machine that path rules send to one
+  folder on another are no longer merged into one project with the chats of
+  both; both are left alone and reported (`ROOTS_COLLAPSE`).
+- A machine set up from the shipped template kept its handoff records in
+  `${workspace_root}/handoff`, while a config without the key -- every one
+  older than the template line -- used `handoff` beside the manifest: the two
+  never saw each other's handoffs, and a full sync paired chats with the
+  machine itself. The template now leaves `root_dir` empty, so every machine
+  uses the one folder.
+- A Codex that has never held a project (`local-projects` empty, no
+  `project-order`) was in no known shape: `doctor` failed, Guardian
+  quarantined every snapshot and no project could be carried to it. It is now
+  the desktop shape with nothing in it, and a merge into it writes the order.
 - **A sync no longer asks Codex to rebuild its chat list** (`D-032`). On a
   machine with 306 chats the request made Codex walk every chat file while it
   started; that start was ended part-way, the rebuild stayed marked as

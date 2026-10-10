@@ -173,9 +173,10 @@ codexsync -c config.toml sessions apply --plan sessions-plan.json --confirm-plan
   keeps it and the old file is removed — after it is in a verified backup, in
   the same envelope. Into `.codex` this needs the thread catalogue to name the
   file being moved. A chat archived on one machine and continued on the other
-  is a decision (`ARCHIVED_AND_CONTINUED`). The catalogue row still names the
-  old place until Codex updates it; `doctor` counts such chats in
-  `session_visibility`.
+  is a decision (`ARCHIVED_AND_CONTINUED`). The same full sync then points
+  Codex's list at the moved file and marks the chat archived or active
+  (`D-035`), so it shows in Codex's archive here too; `sessions archive`
+  previews and applies that step on its own.
 
 ### Writing into `.codex`
 

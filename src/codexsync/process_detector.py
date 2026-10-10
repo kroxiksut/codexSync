@@ -21,8 +21,9 @@ mutation may proceed on the strength of this listing, and a parser nobody has
 run against a live Codex could report "stopped" while it is open -- the one
 mistake this project cannot make. So a platform counts as supported only after
 someone has run `docs/dev/experiments/process-detector-macos.md` on it and recorded
-the result in `PROVEN_DETECTORS`. Until then macOS and Linux answer `UNKNOWN`,
-and `safety.fail_on_unknown` turns that into a refusal.
+the result in `PROVEN_DETECTORS`. Until then such a platform answers `UNKNOWN`,
+and `safety.fail_on_unknown` turns that into a refusal. Linux was observed on
+2026-10-09; macOS has not been, and stays closed.
 """
 from __future__ import annotations
 
@@ -89,7 +90,14 @@ def _run_console_tool(argv: list[str], *, encoding: str) -> subprocess.Completed
 #: version). **Filled only from `docs/dev/experiments/process-detector-macos.md`,
 #: never from reading the code.** Windows is not listed here: its adapter is
 #: what the project has always shipped and what CI exercises.
-PROVEN_DETECTORS: dict[str, str] = {}
+PROVEN_DETECTORS: dict[str, str] = {
+    "linux": (
+        "Ubuntu 26.04 LTS (kernel 7.0.0-38), Codex desktop deb `chatgpt` 26.1002.52244: "
+        "idle, a chat command in the sandbox, and quit with that command still running "
+        "-- it outlived the app as `codex` and read as running until it ended; "
+        "observed 2026-10-09"
+    ),
+}
 
 #: Longest name `ps -o comm=` prints on Linux before it truncates.
 LINUX_COMM_LIMIT = 15

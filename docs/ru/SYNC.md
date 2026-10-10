@@ -207,7 +207,7 @@ codexSync построен для такого порядка: закрыть Co
 
 ```toml
 [handoff]
-root_dir = "${workspace_root}/handoff"   # необязательно: пусто — папка handoff рядом с state.manifest_file
+root_dir = ""                            # пусто — папка handoff рядом с state.manifest_file, одна на всех машинах
 enabled = true                           # задача-наблюдатель, см. ниже
 delivery_wait_minutes = 15
 notify = true

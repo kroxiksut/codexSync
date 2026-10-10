@@ -103,6 +103,6 @@ that, not before.
 ## If SQLite turns out to be the truth
 
 codexSync does not implement any of it: it never writes the project tables
-(its only SQLite writes are the thread catalogue request and chat names,
-`D-024`/`D-025`), and this is not the place to start. The GUI explains how to delete a project inside Codex
+(its only SQLite writes are the thread catalogue request, chat names and archive moves,
+`D-024`/`D-025`/`D-035`), and this is not the place to start. The GUI explains how to delete a project inside Codex
 instead.

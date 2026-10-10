@@ -101,7 +101,7 @@ codexsync -c config.toml sync --apply     # Codex 必须已关闭
 - **先出计划，再按标识确认。** 每条会写入的命令都先给出计划或试运行，并且只执行你
   原样报回的那个计划标识。其间只要有任何变动，标识就不再匹配，也就什么都不会写入。
 - **只碰 Codex 的文件，并且边界很窄。** codexSync 不使用 Codex API，不读取令牌，
-  从不强制结束 Codex；对 Codex 的 SQLite 只做[它不做什么](#它不做什么)中列出的两处修改。
+  从不强制结束 Codex；对 Codex 的 SQLite 只做[它不做什么](#它不做什么)中列出的三处修改。
 - 内核与命令行**零运行时依赖**。
 
 ## 交接流程
@@ -123,9 +123,9 @@ codexSync 假定机器之间有严格的先后顺序：
 - 不提取令牌：交接之后请重新登录 Codex。
 - 从不强制结束 Codex。设置 `[sync] close_codex = true` 时，同步会以正常方式请求桌面应用退出，
   并且只在进程检查确认它已停止之后才写入；它没有退出时，什么都不写。
-- 对 Codex 的 SQLite 数据库只做两处有限的修改，每一处都在 Codex 关闭、备份经过校验并且确有
+- 对 Codex 的 SQLite 数据库只做三处有限的修改，每一处都在 Codex 关闭、备份经过校验并且确有
   需要时进行：Codex 聊天列表的重建状态（`backfill_state`）——在你请求时设为“重建”，在重建卡住、
-  Codex 无法启动时设回“已完成”（`D-032`）——以及为本机没有名称的对话设置另一台机器显示的名称。从不创建或删除对话记录，从不改写 `session_index.jsonl`，
+  Codex 无法启动时设回“已完成”（`D-032`）——为本机没有名称的对话设置另一台机器显示的名称，以及为在另一台机器上归档或取消归档的对话更新它在 Codex 列表中的位置和归档标记（`D-035`）。从不创建或删除对话记录，从不改写 `session_index.jsonl`，
   也从不修改项目记录。
 - 没有实时同步：同一时间只有一台机器在工作。
 - 不检查云客户端，也不检查云文件夹的剩余空间。
@@ -133,13 +133,15 @@ codexSync 假定机器之间有严格的先后顺序：
 ## 平台
 
 - **Windows** 是经过实测的平台。
-- **macOS**（Apple Silicon）在代码和 CI 中受支持。macOS 与 Linux 的进程检测器已经
-  写好，并针对记录下来的 `ps` 输出做过测试，但在还没有对着真实运行的 Codex 跑过之前，
+- **macOS**（Apple Silicon）在代码和 CI 中受支持。macOS 的进程检测器已经
+  写好，并针对记录下来的 `ps` 输出做过测试，但在还没有在 Mac 上对着真实运行的 Codex 跑过之前，
   该平台会把自己报告为不受支持：进程状态读作「无法判定」，因而每条会写入的命令都会
   拒绝执行。
 - **Linux** 处于实验阶段，正如 Codex 自己的 Linux 桌面应用（自 2026 年 8 月起）仍是预览版。
-  codexSync 可以从 PyPI 安装，代码和 CI 都能在 Linux 上运行；但与 macOS 一样，在进程检测器
-  对着 Linux 上真实运行的 Codex 验证之前，每条会写入的命令都会拒绝执行。
+  codexSync 可以从 PyPI 安装，代码和 CI 都能在 Linux 上运行。进程检测器已经在 Ubuntu 26.04
+  上对着真实运行的 Codex 观察过（桌面应用 26.1002，2026-10-09），所以会写入的命令已开放；
+  Linux 与另一台机器之间的完整交接还没有试过。Codex 在对话中启动的命令可能比应用本身活得更久，
+  在它结束之前，Codex 都被视为正在运行。
 - **最低版本：** Windows 10（1809）或更新版本；通过 pip 安装需要 Python 3.11 或更新版本；
   在 macOS 上使用窗口需要 macOS 13 或更新版本（当前 PySide6 支持的范围）。
 - CI 在 `windows-latest` 和 `macos-latest` 上用 Python 3.11、3.12、3.13 和 3.14 跑测试，
@@ -154,7 +156,7 @@ Codex 运行时的某些行为无法从它的文件中推知，只能观察。�
 |---|---|---|
 | Codex 期望本机从未有过的会话放在哪里的通用规则。在弄清之前，本机已有的对话会覆盖写入它自己的文件，新对话则按它在另一台机器上的路径写入（`[semantic] new_chats = "same_path"`，默认值） | 新对话按这一条规则写入，`doctor` 会统计 Codex 尚未列出的对话（`session_visibility`）；设为 `new_chats = "keep_in_cloud"` 时它们留在云端副本中（`BLOCKED_UNPROVEN_LAYOUT`） | [session-layout-adapter](../dev/experiments/session-layout-adapter.md) |
 | 改写 `session_index.jsonl` | `UNPROVEN_CONSUMER_CONTRACT` | [session-index-contract](../dev/experiments/session-index-contract.md) |
-| 在 macOS 和 Linux 上检测 Codex | 平台不受支持，写入被拒绝 | [process-detector-macos](../dev/experiments/process-detector-macos.md) |
+| 在 macOS 上检测 Codex（Linux 已观察） | 平台不受支持，写入被拒绝 | [process-detector-macos](../dev/experiments/process-detector-macos.md) |
 | 存放在 `state_*.sqlite` 里的项目 | 搬移项目只改写 JSON；删除或合并项目根本不提供 | [project-registry-contract](../dev/experiments/project-registry-contract.md) |
 
 最后一条，`doctor` 每次运行都会报告。

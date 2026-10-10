@@ -183,3 +183,70 @@ class ElectronStateSchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+#: Keys of the state a fresh Linux Codex 26.1002 wrote before it held a
+#: project (2026-10-09); the values that are not project keys are trimmed.
+_NEVER_HAD_A_PROJECT = {
+    "app-server-projects-migration-by-host": {
+        "local:/home/someone/.codex": {
+            "version": 1, "projectsMigrated": True, "threadAssignmentsMigrated": False,
+            "pendingThreadAssignmentIds": ["t0"],
+        },
+    },
+    "electron-main-window-bounds": {"x": 0, "y": 0},
+    "local-projects": {},
+    "projectless-thread-ids": ["t0"],
+    "selected-project": None,
+    "sidebar-project-thread-orders": {},
+    "thread-workspace-root-hints": {"t0": "/home/someone/Documents/Codex"},
+}
+
+
+class NeverHadAProjectTests(unittest.TestCase):
+    def test_the_observed_fresh_state_is_the_desktop_schema_with_nothing_in_it(self) -> None:
+        report = validate_global_state_references(_payload(_NEVER_HAD_A_PROJECT))
+        self.assertEqual(report.status, ValidationStatus.PASS)
+        self.assertEqual(report.schema_id, ELECTRON_V2_SCHEMA)
+        self.assertEqual((report.project_count, report.binding_count), (0, 0))
+
+    def test_any_project_trace_is_not_this_shape(self) -> None:
+        traces = {
+            "a project without an order": {"local-projects": {"p1": {"rootPaths": ["C:/a"]}}},
+            "an order key": {"project-order": []},
+            "a pin": {"pinned-project-ids": ["p1"]},
+            "a binding": {"thread-project-assignments": {"t1": {"projectKind": "local", "projectId": "p1"}}},
+            "a migration": {"project-id-migrations": {"p1": "as1"}},
+            "an app-server id": {"app-server-project-id-by-legacy-project-id-by-host": {HOST: {"p1": "as1"}}},
+            "no project key at all": {"local-projects": None},
+        }
+        for label, overrides in traces.items():
+            with self.subTest(label):
+                state = {**_NEVER_HAD_A_PROJECT, **overrides}
+                if state["local-projects"] is None:
+                    del state["local-projects"]
+                report = validate_global_state_references(_payload(state))
+                if "project-order" in overrides:
+                    # An empty order with an empty list is the legacy adapter's, as before.
+                    self.assertEqual(report.schema_id, LEGACY_V1_SCHEMA)
+                    continue
+                self.assertEqual(report.status, ValidationStatus.INDETERMINATE)
+                self.assertIn(UNKNOWN_SCHEMA, report.codes)
+
+    def test_a_null_binding_is_still_no_project(self) -> None:
+        state = {**_NEVER_HAD_A_PROJECT, "thread-project-assignments": {"t0": None}}
+        self.assertEqual(validate_global_state_references(_payload(state)).schema_id, ELECTRON_V2_SCHEMA)
+
+    def test_a_populated_state_that_collapses_to_this_shape_is_a_shrink(self) -> None:
+        """Same schema id, so the drop is measured -- not hidden behind a schema change."""
+        from codexsync.guardian_shrink import PROJECT_COUNT_DROP, assess_suspicious_shrink
+
+        try:
+            from tests.test_guardian_shrink import GuardianShrinkTests
+        except ImportError:  # collected with tests/ itself on sys.path
+            from test_guardian_shrink import GuardianShrinkTests
+        baseline = GuardianShrinkTests._baseline(19, 30, schema_id=ELECTRON_V2_SCHEMA)
+        candidate = validate_global_state_references(_payload(_NEVER_HAD_A_PROJECT))
+        report = assess_suspicious_shrink(candidate, baseline=baseline, baseline_verified=True)
+        self.assertEqual(report.status, ValidationStatus.SUSPICIOUS)
+        self.assertIn(PROJECT_COUNT_DROP, report.codes)

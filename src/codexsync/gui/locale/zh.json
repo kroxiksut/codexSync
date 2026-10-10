@@ -285,7 +285,7 @@
     "other": "新增 {count} 个项目"
   },
   "sync.note.missing_folders": {
-    "other": "有 {count} 个新增项目在本机没有对应文件夹：请创建文件夹或添加路径映射。"
+    "other": "有 {count} 个新增项目在本机没有文件夹；它们的聊天可以阅读。要在本机处理项目文件，请为它指定文件夹。"
   },
   "sync.note.chats_not_loaded": {
     "other": "有 {count} 个聊天只留在云端副本中；原因见「会话」页面。"
@@ -297,6 +297,10 @@
     "other": "有 {count} 个聊天在两台机器上都改过，已按冲突策略决定；未保留的版本完整保存在冲突包中。"
   },
   "sync.note.not_done.projects": "本次未更新项目列表；下次同步会再试。",
+  "sync.note.not_done.chat_archive": "本次未为在其他机器上归档或取消归档的对话更新 Codex 的对话列表；下次同步会再试。",
+  "sync.note.archive_followed": {
+    "other": "有 {count} 个对话已在本机像在另一台机器上一样归档或取消归档。"
+  },
   "sync.note.not_done.chat_names": "本次未从其他机器同步对话名称；下次同步会再试。",
   "sync.note.not_done.catalogue": "本次未请求 Codex 列出新的对话文件；下次同步会再试。",
   "sync.note.names_set": {
@@ -324,7 +328,7 @@
     "other": "有 {count} 个对本机而言是新的聊天留在了云端副本中：加载新对话已关闭（「设置」→「同步」→「来自另一台机器的新对话」）。"
   },
   "sync.link.new_chats": "打开该设置",
-  "sync.link.mappings": "添加路径映射",
+  "sync.link.places": "为项目指定文件夹",
   "sync.link.recovery": "打开恢复页面",
   "association.BOUND": "已固定",
   "association.DERIVED": "按路径",
@@ -543,6 +547,39 @@
   "projects.files.attention": {
     "other": "有 {count} 个项目没有完整迁移过来。"
   },
+  "projects.places.title": "其他机器的项目在本机的位置",
+  "projects.places.caption": "同一个项目文件夹在 Windows、Linux 和 macOS 上几乎不会是同一路径。本机没有文件夹的项目仍会连同对话一起带来，对话可以阅读；要在本机处理它的文件，只需告诉一次它的文件夹在哪里：答案保存在共享文件夹中，双向适用于所有机器，下一次同步会把项目改指向那里。勾选后还会记住上一级文件夹，同一文件夹中的其他项目无需再问。在此之前不会向 Codex 写入任何内容。",
+  "projects.places.column.machine": "来自",
+  "projects.places.column.there": "那边的文件夹",
+  "projects.places.column.state": "本机",
+  "projects.places.column.here": "本机的文件夹",
+  "projects.places.show_all": "显示所有项目，而不仅是本机没有文件夹的",
+  "projects.places.whole_folder": "同一文件夹中的其他项目也适用",
+  "projects.places.check": "检查",
+  "projects.places.choose": "选择本机的文件夹…",
+  "projects.places.skip": "不带到本机",
+  "projects.places.forget": "忘记这个回答",
+  "projects.places.dialog": "{name} 在本机的什么位置？",
+  "projects.places.checking": "正在读取其他机器的项目列表…",
+  "projects.places.not_checked": "尚未检查。",
+  "projects.places.none": "还没有其他机器发布它的项目；它会在下一次同步时发布。",
+  "projects.places.saved": "已记住。下一次同步会据此迁移。",
+  "projects.places.suggestion": "也许是 {path}",
+  "projects.places.status.HERE": "已在本机",
+  "projects.places.status.MISSING_HERE": "已在本机，没有文件夹",
+  "projects.places.status.COMING": "下一次同步时到来",
+  "projects.places.status.UNPLACED": "将以无文件夹方式带来",
+  "projects.places.status.SKIPPED": "不带到本机",
+  "projects.places.status.AMBIGUOUS": "两条规则不一致",
+  "projects.places.all_placed": {
+    "other": "其他机器的全部 {count} 个项目在本机都有文件夹。"
+  },
+  "projects.places.without_folder": {
+    "other": "其他机器的 {count} 个项目在本机没有文件夹；它们的对话可以阅读。要在本机处理项目文件，请选择它的文件夹。"
+  },
+  "projects.places.waiting": {
+    "other": "有 {count} 个项目存在疑问：两条规则对它们在本机的位置说法不一。"
+  },
   "projects.repair.title": "换机之后的修复",
   "projects.repair.caption": "会话记录的文件夹会经过 [[path_mappings]] 转换。计划会固定对话，或为搬走的项目重新指定根目录 —— 重新指定时总会同时固定仍在旧根目录下的每个对话，因此不会有对话消失。",
   "projects.repair.scan": "构建修复计划",
@@ -689,6 +726,7 @@
   "codex.finding.CATALOGUE_MISSES_CHATS": "有 {chats} 个聊天文件在原位，但 Codex 没有显示。可以在下方请它重建聊天列表。",
   "codex.finding.GLOBAL_STATE_MISSING": "Codex 的全局状态（项目、置顶、聊天所属项目）缺失。快照守护可以恢复已保存的快照。",
   "codex.finding.GLOBAL_STATE_INVALID": "Codex 的全局状态未通过校验，项目和聊天可能已经脱节。快照守护可以恢复已保存的快照。",
+  "codex.finding.GLOBAL_STATE_UNRECOGNISED": "Codex 的全局状态是本版本不认识的形式（还没有项目的 Codex 会写出这种形式），因此没有做判断。这不影响 Codex；在认识这种形式之前，项目不会被同步。",
   "codex.finding.OPEN_JOURNAL": "有 {journals} 个 codexSync 操作中途停止，它们会阻止所有写入；见下方列表。",
   "recovery.blocked.title": {
     "other": "{count} 个未完成的操作阻止了一切改动"
@@ -1209,6 +1247,7 @@
   "progress.phase.sync_chats": "正在同步聊天",
   "progress.phase.sync_projects": "正在同步项目",
   "progress.phase.sync_chat_names": "正在同步聊天名称",
+  "progress.phase.follow_chat_archive": "正在更新已归档的对话",
   "progress.phase.refresh_catalogue": "正在检查 Codex 聊天列表",
   "progress.phase.check_project_files": "正在检查项目文件夹",
   "home.codex.running": "Codex 已打开",

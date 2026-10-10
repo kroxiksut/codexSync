@@ -89,6 +89,12 @@ to = "C:/Work"
 working set of `sessions`; they are never written into Codex's files, and Codex
 does not read them. See [Projects and chats](PROJECTS.md).
 
+A rule here is only needed for what codexSync cannot learn: where a project
+is on this machine is asked once and remembered in the shared workspace for
+every direction — see [on another operating system](PROJECTS.md#on-another-operating-system).
+Those answers and this section are one set of rules; two that disagree about
+the same folder are reported, never picked between.
+
 ## `[process_detection]`
 
 ```toml

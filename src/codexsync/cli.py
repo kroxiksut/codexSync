@@ -12,10 +12,14 @@ from .app import (
     HandoffStatus,
     ProjectSyncResult,
     sync_projects,
+    place_project,
+    project_places,
+    PlacesReport,
     refresh_thread_catalogue,
     check_codex,
     repair_codex,
     sync_chat_names,
+    follow_chat_archive,
     check_project_files,
     handoff_status,
     run_handoff,
@@ -870,6 +874,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sessions_names.add_argument("--dry-run", action="store_true", help="Run every check without writing")
     sessions_names.add_argument("--json", dest="as_json", action="store_true")
+    sessions_archive = sessions_sub.add_parser(
+        "archive",
+        help="Chats whose file moved into or out of the archive while Codex's list still names the old place; "
+        "with --confirm-plan, point the list at the file",
+    )
+    sessions_archive.add_argument(
+        "--confirm-plan", default=None, help="Plan id from the preview; Codex must be closed"
+    )
+    sessions_archive.add_argument("--dry-run", action="store_true", help="Run every check without writing")
+    sessions_archive.add_argument("--json", dest="as_json", action="store_true")
     sessions_apply = sessions_sub.add_parser(
         "apply", help="Apply one exact cold session transfer plan"
     )
@@ -949,6 +963,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     projects_files.add_argument("--all", action="store_true", help="List every project, not only warnings")
     projects_files.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+    projects_places = projects_sub.add_parser(
+        "places",
+        help="Where each project of another machine is on this one, and what this machine was told; writes nothing",
+    )
+    projects_places.add_argument(
+        "--all", action="store_true", help="List every project, not only those without a folder here or in doubt",
+    )
+    projects_places.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+    projects_place = projects_sub.add_parser(
+        "place",
+        help=(
+            "Say where another machine's project is on this one (remembered for every direction), "
+            "or not to carry it; the next sync applies it"
+        ),
+    )
+    projects_place.add_argument("project", help="The project's name or id, as `projects places` shows it")
+    place_how = projects_place.add_mutually_exclusive_group(required=True)
+    place_how.add_argument("--path", default=None, help="The project's folder on this machine")
+    place_how.add_argument("--skip", action="store_true", help="Do not carry this project to this machine")
+    place_how.add_argument("--forget", action="store_true", help="Forget what this machine was told about it")
+    projects_place.add_argument(
+        "--only-this", action="store_true",
+        help="Learn only this project's folder, not the folder above it for its neighbours",
+    )
 
     state_backup = sub.add_parser(
         "state-backup",
@@ -1230,8 +1268,13 @@ def _print_handoff_result(result) -> None:
     )
     if result.projects_missing_folders:
         print(
-            f"  added projects whose folder does not exist here: {result.projects_missing_folders} "
-            "(create the folder, or add a [[path_mappings]] rule)"
+            f"  added without a folder here: {result.projects_missing_folders} "
+            "(their chats can be read; `projects place` gives one a folder)"
+        )
+    if result.chats_archived or result.chats_restored:
+        print(
+            f"  chats archived here as on the other machine: {result.chats_archived}, "
+            f"brought back from the archive: {result.chats_restored}"
         )
     if result.chat_names_set or result.chat_names_kept or result.chat_names_waiting:
         print(
@@ -1675,6 +1718,10 @@ _FINDING_TEXT = {
         "Codex's global state does not validate, so projects or chats may be torn apart. "
         "`guardian restore` puts a saved snapshot back."
     ),
+    "GLOBAL_STATE_UNRECOGNISED": (
+        "Codex's global state is in a shape this version does not know (a Codex with no project yet "
+        "writes one), so it was not judged. Codex is not affected; projects are not carried until it is known."
+    ),
     "OPEN_JOURNAL": "{journals} codexSync operation(s) stopped part-way and block every write; see `recover list`.",
 }
 
@@ -1792,9 +1839,61 @@ def _project_sync_json(result: ProjectSyncResult) -> dict:
         "pins_changed": plan.pins_changed,
         "order_changed": plan.order_changed,
         "bindings_written": plan.bindings_written,
+        "bound_by_folder": plan.bound_by_folder,
         "written": result.written,
         "published": result.published,
     }
+
+
+def _places_json(report: PlacesReport) -> dict:
+    return {
+        "machine": report.machine,
+        "system": report.system,
+        "folder": str(report.root),
+        "unreadable": list(report.unreadable),
+        "projects": [
+            {
+                "project_id": item.project_id, "name": item.name, "from": list(item.peers),
+                "there": list(item.there), "status": item.status.value, "here": list(item.here),
+                "suggestions": list(item.suggestions),
+            }
+            for item in report.projects
+        ],
+        "learned": report.learned.body(),
+    }
+
+
+def _print_places(report: PlacesReport, *, everything: bool) -> None:
+    print(f"Projects of other machines on {report.machine} ({report.system})")
+    for name in report.unreadable:
+        print(f"  not believed: {name}")
+    shown = report.projects if everything else tuple(
+        item for item in report.projects if item.needs_answer or item.without_folder
+    )
+    if not report.projects:
+        print("  No other machine has published its projects yet.")
+    elif not shown:
+        print(f"  Every one of {len(report.projects)} project(s) has a folder here.")
+    for item in shown:
+        print(f"  {item.status.value:<12} {item.name or item.project_id}  ({item.project_id}, from {', '.join(item.peers)})")
+        print(f"      there: {'; '.join(item.there)}")
+        if item.here:
+            print(f"      here:  {'; '.join(item.here)}")
+        for suggestion in item.suggestions:
+            print(f"      maybe: {suggestion}")
+    if report.without_folder:
+        # Not a fault (D-034): the project and its chats are carried anyway.
+        print(f"  Without a folder here: {len(report.without_folder)} -- carried with their chats, which can be read.")
+    if report.waiting or report.without_folder:
+        print("  Give one a folder here: codexsync projects place <name or id> --path <folder here>  "
+              "(or --skip not to carry it)")
+    learned = report.learned
+    if learned.places or learned.skipped:
+        print(f"  Remembered here ({report.root}):")
+        for place in learned.places:
+            print(f"    {place.scope:<7} {place.peer} {place.there} -> {place.here}")
+        for skip in learned.skipped:
+            print(f"    skipped {skip.name or skip.project_id}")
 
 
 def _print_project_sync(result: ProjectSyncResult, *, applied: bool) -> None:
@@ -1811,8 +1910,13 @@ def _print_project_sync(result: ProjectSyncResult, *, applied: bool) -> None:
         f"  added: {len(plan.added)}, already here: "
         f"{sum(1 for item in plan.items if item.kind.value == 'MATCHED')}, left alone: {len(plan.ambiguous)}; "
         f"pins {'change' if plan.pins_changed else 'kept'}, order {'changes' if plan.order_changed else 'kept'}, "
-        f"chat bindings: {plan.bindings_written}"
+        f"chat bindings: {plan.bindings_written}, chats bound by their folder: {plan.bound_by_folder}"
     )
+    if plan.unplaced:
+        print(
+            f"  carried with the other machine's root as it is: {len(plan.unplaced)} -- "
+            "`codexsync projects places` lists them, `projects place` gives one a folder here"
+        )
     if applied:
         print(f"  written: {result.written}; this machine's list published: {'yes' if result.published else 'unchanged'}")
     else:
@@ -2436,6 +2540,41 @@ def main(argv: list[str] | None = None) -> int:
                       + ("published." if named.published else "unchanged."))
             return int(ExitCode.OK)
 
+        if args.command == "sessions" and args.sessions_command == "archive":
+            followed = follow_chat_archive(
+                config_path, confirm_plan=args.confirm_plan, dry_run=args.dry_run, origin="cli",
+            )
+            plan = followed.plan
+            if args.as_json:
+                print(json.dumps({
+                    "plan_id": plan.plan_id,
+                    "database": plan.database,
+                    "to_archive": [item.thread_id for item in plan.changes if item.archives],
+                    "to_restore": [item.thread_id for item in plan.changes if not item.archives],
+                    "unresolved": plan.unresolved,
+                    "codes": list(plan.codes),
+                    "written": followed.written,
+                    "volatile": followed.volatile,
+                }, sort_keys=True, indent=2))
+                return int(ExitCode.OK)
+            print(
+                f"Chats moved between sessions/ and archived_sessions/ that Codex's list does not follow yet: "
+                f"{len(plan.changes)} (archived: {plan.archived}, brought back: {plan.restored})"
+            )
+            if plan.codes:
+                print(f"  codes: {', '.join(plan.codes)}")
+            if plan.unresolved:
+                print(f"  file gone and more than one place it could be, left alone: {plan.unresolved}")
+            if followed.volatile:
+                print("  Codex is running: this reading is only an indication")
+            if args.confirm_plan is None:
+                if plan.writes:
+                    print(f"  plan id: {plan.plan_id}")
+                    print("  Close Codex and run again with --confirm-plan <plan id> to update its list.")
+            elif not args.dry_run:
+                print(f"Updated {followed.written} chat(s) in Codex's list.")
+            return int(ExitCode.OK)
+
         if args.command == "sessions" and args.sessions_command == "apply":
             written = apply_session_transfer(
                 config_path,
@@ -2474,6 +2613,26 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Project folders compared with other machines: {len(report.items)}, "
                   f"needing attention: {len(report.warnings)}")
             _print_project_files(shown, limit=None)
+            return int(ExitCode.OK)
+
+        if args.command == "projects" and args.projects_command == "places":
+            report = project_places(config_path)
+            if args.as_json:
+                print(json.dumps(_places_json(report), sort_keys=True, indent=2, ensure_ascii=False))
+            else:
+                _print_places(report, everything=args.all)
+            return int(ExitCode.OK)
+
+        if args.command == "projects" and args.projects_command == "place":
+            learned = place_project(
+                config_path, args.project, path=args.path, skip=args.skip, forget=args.forget,
+                whole_folder=not args.only_this,
+            )
+            print(f"Remembered for {learned.machine} ({len(learned.places)} folder(s), "
+                  f"{len(learned.skipped)} project(s) not carried).")
+            for place in learned.places:
+                print(f"  {place.scope:<7} {place.peer} {place.there} -> {place.here}")
+            print("The next sync (`codexsync sync`, or `projects sync`) carries it accordingly.")
             return int(ExitCode.OK)
 
         if args.command == "projects":

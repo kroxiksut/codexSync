@@ -378,6 +378,14 @@ class FakeController(Controller):
 
         return self._answer("project_files", Outcome(value=ProjectFilesReport("laptop")))
 
+    def project_places(self) -> Outcome:
+        self.calls.append(("project_places",))
+        return self._answer("project_places", Outcome(value=_places_report()))
+
+    def place_project(self, project_id, *, path=None, skip=False, forget=False, whole_folder=True) -> Outcome:
+        self.calls.append(("place_project", project_id, path, skip, forget, whole_folder))
+        return self._answer("place_project", Outcome(value=None))
+
 
 
 _MIGRATION_DIFF = "--- config.toml\n+++ config.toml\n-session_mode = \"last_date_only\"\n+session_mode = \"all\"\n"
@@ -813,6 +821,48 @@ def _files_report():
     ), True)
 
 
+def _places_report():
+    from codexsync.app import PlaceStatus, PlacesReport, ProjectPlace
+    from codexsync.path_places import MachinePlaces
+
+    return PlacesReport("laptop", "linux", (
+        ProjectPlace("p1", "atlas", ("desktop",), ("D:\\Projects\\atlas",), PlaceStatus.UNPLACED,
+                     suggestions=("/opt/atlas",)),
+        ProjectPlace("p2", "globe", ("desktop",), ("D:\\Projects\\globe",), PlaceStatus.HERE, ("/opt/globe",)),
+    ), MachinePlaces("laptop", "linux"), Path("ws/state/path-places"))
+
+
+class ProjectPlacesTests(_WindowTestCase):
+    """D-033: where another machine's project is here, asked once and remembered."""
+
+    def test_only_the_projects_waiting_are_listed_until_asked_for_all(self) -> None:
+        window, controller = self.make()
+        window.go_to("projects")
+        screen = window.screen("projects")
+        self.assertNotIn(("project_places",), controller.calls, "arriving reads nothing")
+        screen.check_places()
+        self.pump(lambda: window.model("projects").places is not None, seconds=5)
+        self.assertEqual(screen.places_table.rowCount(), 1)
+        self.assertEqual(screen.places_table.item(0, 0).text(), "atlas")
+        self.assertIn("/opt/atlas", screen.places_table.item(0, 4).text())
+        screen.places_show_all.setChecked(True)
+        self.assertEqual(screen.places_table.rowCount(), 2)
+
+    def test_an_answer_is_written_and_the_list_read_again(self) -> None:
+        window, controller = self.make()
+        window.go_to("projects")
+        screen = window.screen("projects")
+        screen.check_places()
+        self.pump(lambda: window.model("projects").places is not None, seconds=5)
+        screen.places_table.selectRow(0)
+        screen.places_whole.setChecked(False)
+        screen.answer_place(skip=True)
+        self.pump(lambda: window.model("projects").place_result is not None, seconds=5)
+        self.assertIn(("place_project", "p1", None, True, False, False), controller.calls)
+        self.assertEqual(controller.calls.count(("project_places",)), 2)
+        self.assertEqual(screen.place_status.text(), window.catalog.text("projects.places.saved"))
+
+
 class ProjectFilesTests(_WindowTestCase):
     """D-026: which projects and which files did not come along."""
 
@@ -887,7 +937,7 @@ class SyncTests(_WindowTestCase):
         screen = window.screen("sync")
         screen.start_run(dry_run=False)
         links = screen.links
-        for link in (links.mappings, links.new_chats, links.sessions):
+        for link in (links.places, links.new_chats, links.sessions):
             self.assertTrue(link.isVisibleTo(window))
 
         links.new_chats.click()
@@ -896,9 +946,11 @@ class SyncTests(_WindowTestCase):
         self.assertEqual(settings.model.tab, "sync")
         self.assertTrue(settings.tabs.currentWidget().isAncestorOf(settings.field_widget("semantic.new_chats")))
 
+        # A project without a folder here is a state, not a fault (D-034): the
+        # button leads to the list where one is given a folder.
         window.go_to("sync")
-        links.mappings.click()
-        self.assertEqual(window.screen("settings").model.tab, "mappings")
+        links.places.click()
+        self.assertIs(window._stack.currentWidget(), window.screen("projects"))
 
         window.go_to("sync")
         links.sessions.click()
@@ -912,7 +964,7 @@ class SyncTests(_WindowTestCase):
         window.go_to("sync")
         screen = window.screen("sync")
         screen.start_run(dry_run=False)
-        for link in (screen.links.mappings, screen.links.new_chats, screen.links.sessions):
+        for link in (screen.links.places, screen.links.new_chats, screen.links.sessions):
             self.assertFalse(link.isVisibleTo(window))
 
     def test_a_real_sync_asks_first_and_does_nothing_when_declined(self) -> None:

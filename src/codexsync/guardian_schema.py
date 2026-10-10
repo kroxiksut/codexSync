@@ -190,6 +190,41 @@ class ElectronV2Adapter:
         )
 
 
+class ElectronV2NoProjectsAdapter:
+    """A desktop state that has never held a project.
+
+    Codex 26.1002 on a fresh Linux install wrote `local-projects: {}` and no
+    `project-order` key at all (observed 2026-10-09); neither adapter above
+    claims that, so `doctor` failed, Guardian quarantined every snapshot and no
+    project could be carried to the machine. Claimed only when every project
+    key is absent or empty -- a state naming even one project, order entry,
+    binding or app-server id is not this shape. It is the Electron schema with
+    nothing in it, so the first project Codex adds keeps the schema id, and a
+    populated state that collapses to this shape is a shrink, not a new schema.
+    """
+
+    schema_id = ELECTRON_V2_SCHEMA
+
+    def extract(self, state: dict[str, Any]) -> StateReferences | None:
+        if state.get("local-projects") != {} or "project-order" in state:
+            return None
+        for key in ("pinned-project-ids", "project-id-migrations"):
+            if state.get(key) not in (None, [], {}):
+                return None
+        assignments = state.get("thread-project-assignments", {})
+        if not isinstance(assignments, dict) or any(value is not None for value in assignments.values()):
+            return None
+        if _electron_app_server_ids(state) != frozenset():
+            return None
+        return StateReferences(
+            schema_id=self.schema_id,
+            project_ids=frozenset(),
+            ordered_project_ids=(),
+            binding_project_ids=(),
+            app_server_project_ids=frozenset(),
+        )
+
+
 def _electron_project_shape(projects: dict[str, Any]) -> bool:
     """Whether the project entries themselves name this as the Electron shape.
 
@@ -224,7 +259,7 @@ def _electron_app_server_ids(state: dict[str, Any]) -> frozenset[str] | None:
 #: Tried in order; the first adapter that recognises the state wins and its id
 #: is recorded in the report, so a later runtime change is a new adapter rather
 #: than a loosened old one.
-_ADAPTERS = (LegacyV1Adapter(), ElectronV2Adapter())
+_ADAPTERS = (LegacyV1Adapter(), ElectronV2Adapter(), ElectronV2NoProjectsAdapter())
 
 
 def detect_state_schema(state: dict[str, Any]) -> str | None:

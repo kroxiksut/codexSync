@@ -82,6 +82,10 @@ to = "C:/Work"
 `rule_id` 必须唯一。这些规则由 `chats`、`repair-projects` 以及 `sessions` 的工作集使用；
 它们永远不会被写进 Codex 的文件，Codex 也不会读取它们。见[项目与对话](PROJECTS.md)。
 
+这里的规则只用于 codexSync 自己无法学到的内容：项目在本机的位置只问一次，并保存在共享工作区中，
+对所有方向都有效——见[在另一种操作系统上](PROJECTS.md#在另一种操作系统上)。这些回答和本节是同一组
+规则；两条对同一文件夹说法不一的规则会被报告，绝不会擅自选一条。
+
 ## `[process_detection]`
 
 ```toml

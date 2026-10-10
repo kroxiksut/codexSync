@@ -166,6 +166,7 @@ codexsync -c config.toml codex repair --confirm-plan <plan-id>
 | `CATALOGUE_REBUILDING` | Codex пересобирает список прямо сейчас. | Не закрывать |
 | `CATALOGUE_MISSES_CHATS` | Файлы чатов на месте, а Codex их не показывает. | `sessions catalogue` |
 | `GLOBAL_STATE_MISSING`, `GLOBAL_STATE_INVALID` | Проекты, закрепления или привязки чатов к проектам пропали или оторваны. | `guardian restore` |
+| `GLOBAL_STATE_UNRECOGNISED` | Глобальное состояние в форме, которую эта версия не знает (такую пишет Codex без проектов). На Codex это не влияет; проекты не переносятся, пока форма не известна. | Чинить нечего |
 | `OPEN_JOURNAL` | Операция codexSync остановилась посередине и блокирует любую запись. | [Прерванные операции](#прерванные-операции) |
 
 Как пересборка застревает: Codex собирает список чатов из файлов во время

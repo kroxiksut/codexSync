@@ -38,6 +38,8 @@ from typing import Any, Callable, TypeVar
 
 from ..app import (
     close_codex_for_sync,
+    place_project,
+    project_places,
     known_machines,
     session_pair_name,
     __version__,
@@ -917,6 +919,23 @@ class Controller:
         or `.codex`; reads every folder afresh, since they change at any time.
         """
         return run(lambda: check_project_files(self._config_path, publish=True))
+
+    def project_places(self) -> Outcome:
+        """Where each project of another machine is on this one (D-033). Reads only."""
+        return run(lambda: project_places(self._config_path))
+
+    def place_project(
+        self, project_id: str, *, path: str | None = None, skip: bool = False, forget: bool = False,
+        whole_folder: bool = True,
+    ) -> Outcome:
+        """Remember where another machine's project is here, or not to carry it (D-033).
+
+        Writes only this machine's own file in the shared workspace, never
+        `.codex`; the next synchronisation applies the answer.
+        """
+        return run(lambda: place_project(
+            self._config_path, project_id, path=path, skip=skip, forget=forget, whole_folder=whole_folder,
+        ))
 
     # --- guardian restore and project move ------------------------------------
 

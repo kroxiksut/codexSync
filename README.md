@@ -25,10 +25,11 @@
 </p>
 
 > [!IMPORTANT]
-> Validated in practice Windows → Windows only. macOS and Linux are
-> experimental: reads, diagnostics and plans work, and writes stay closed until
-> process detection has been proven against a live Codex there (Codex's own
-> Linux app is a preview too).
+> Validated in practice Windows → Windows only. Linux and macOS are
+> experimental. On Linux, process detection has been watched against a live
+> Codex and writes are open, but no handoff to or from Linux has been tried yet
+> (Codex's own Linux app is a preview too). On macOS reads, diagnostics and
+> plans work, and writes stay closed until the same has been done on a Mac.
 
 <p align="center">
   <a href="docs/en/GUI.md"><img src="docs/screenshots/en/02-overview.png" width="85%" alt="The CodexSync window: overview"></a>
@@ -65,7 +66,7 @@ state as a guarded handoff, not as ordinary file synchronisation.
   snapshots are ordinary tasks of your OS. → [Automation](docs/en/CONFIGURATION.md#automation)
 
 Not a Codex client and not a real-time sync. It never terminates Codex by
-force, and edits Codex's databases only in two narrow, backed-up ways:
+force, and edits Codex's databases only in three narrow, backed-up ways:
 [what it does not do](docs/en/README.md#what-it-does-not-do).
 
 ## Privacy and safety
@@ -90,8 +91,8 @@ subcommands. Windows 10 (1809) or later.
 
 **With Python 3.11+**, on Windows, macOS or Linux — `--pre` while 0.2 is an
 alpha, or pip installs 0.1, and `--upgrade` so that an installed 0.1 is
-replaced too. On macOS and Linux every read and plan works, but writes are
-refused until the process detector is proven there
+replaced too. On macOS every read and plan works, but writes are refused
+until the process detector is proven there; on Linux it has been
 ([platforms](docs/en/README.md#platforms)). On Linux the system Python refuses
 `pip install` (PEP 668), so install into a virtual environment:
 `python3 -m venv ~/.venvs/codexsync && ~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"`

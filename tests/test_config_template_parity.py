@@ -41,6 +41,24 @@ class ConfigTemplateParityTests(unittest.TestCase):
         """
         _require_mutation_compatible_config(load_config(PACKAGED_TEMPLATE))
 
+    def test_template_hands_off_where_a_config_without_the_key_does(self) -> None:
+        """A fresh config and an older one must meet in one handoff folder.
+
+        The template once named `${workspace_root}/handoff` while a config
+        without the key used `handoff` beside the manifest: a machine set up
+        from the template never saw the handoffs of one set up earlier, and a
+        full sync paired its chats with itself (observed on Linux, 2026-10-09).
+        """
+        template = load_config(PACKAGED_TEMPLATE)
+        text = PACKAGED_TEMPLATE.read_bytes().decode("utf-8").replace("\r\n", "\n")
+        handoff_key = "other's handoffs.\nroot_dir = \"\"\n"
+        self.assertEqual(text.count(handoff_key), 1)
+        without_key = parse_config_text(
+            text.replace(handoff_key, "other's handoffs.\n"), base_dir=PACKAGED_TEMPLATE.parent,
+        )
+        self.assertEqual(template.handoff.root_dir, template.state.manifest_file.parent / "handoff")
+        self.assertEqual(template.handoff.root_dir, without_key.handoff.root_dir)
+
 
     def test_template_process_lists_match_process_knowledge(self) -> None:
         """The template may not know more -- or less -- than the code does.

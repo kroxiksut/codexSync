@@ -25,11 +25,12 @@ the way.
 * Do not check cloud client process state or free space on cloud storage
 * Never terminate Codex by force. With `[sync] close_codex = true` a sync may
   *ask* the desktop app to quit (`D-029`) and refuses if it does not
-* Codex's SQLite is written in exactly two narrow places, with Codex closed,
+* Codex's SQLite is written in exactly three narrow places, with Codex closed,
   inside the mutation envelope: the `backfill_state` row -- `pending` when a
   person asks Codex to rebuild its chat list (`D-024`), back to `complete` when
-  a rebuild is stuck (`codex repair`, `D-032`) -- and `threads.name` where it
-  is unset (`D-025`). A sync never asks for a rebuild. Never a `threads` row,
+  a rebuild is stuck (`codex repair`, `D-032`) -- `threads.name` where it
+  is unset (`D-025`), and `rollout_path`/`archived`/`archived_at` of a chat
+  whose file an archive move left elsewhere (`D-035`). A sync never asks for a rebuild. Never a `threads` row,
   never project records, never `session_index.jsonl`
 
 ## Sync model
@@ -67,7 +68,7 @@ the way.
 * `PROVEN_LAYOUTS`: a general placement rule for new sessions (today:
   `same_path`)
 * `PROVEN_CONTRACTS`: rewriting `session_index.jsonl`
-* `PROVEN_DETECTORS`: macOS/Linux process detection; writes refused there
+* `PROVEN_DETECTORS`: macOS process detection; writes refused there (Linux observed 2026-10-09, writes open)
 * `PROVEN_PROJECT_REGISTRY`: project delete/merge, SQLite project roots
 
 ## Expected output

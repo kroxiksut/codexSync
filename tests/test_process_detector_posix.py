@@ -6,7 +6,8 @@ cuts every name to fifteen characters. Both are matched here without a live
 machine, which is also the limit of what these tests prove -- whether a running
 Codex really produces these lines is what
 `docs/dev/experiments/process-detector-macos.md` is for, and until someone runs it
-`capability()` keeps the platform closed.
+`capability()` keeps the platform closed. Linux has been run (2026-10-09), and
+`LinuxObservedTests` holds what that machine printed.
 """
 from __future__ import annotations
 
@@ -162,6 +163,82 @@ class LinuxMatchingTests(unittest.TestCase):
         self.assertEqual([proc.pid for proc in found], [901, 902, 903])
 
 
+# Recorded on Ubuntu 26.04 with the Codex desktop deb 26.1002.52244 while a
+# chat ran `sleep 600` in the sandbox (2026-10-09), trimmed to one process of
+# each kind; home directory and working folder renamed. Renderer, zygote and
+# GPU processes are more `ChatGPT` lines under the same path.
+LINUX_OBSERVED_COMM = """\
+ 27204 ChatGPT
+ 27209 browser_crashpa
+ 28047 codex
+ 193343 codex-code-mode
+ 193758 codex-linux-san
+ 193763 bwrap
+ 193764 codex
+ 193765 sleep
+"""
+LINUX_OBSERVED_COMMAND = """\
+ 27204 /usr/lib/chatgpt/ChatGPT
+ 27209 /usr/lib/chatgpt/browser_crashpad_handler --monitor-self
+ 28047 /usr/lib/chatgpt/resources/codex -c features.code_mode_host=true app-server
+ 193343 /usr/lib/chatgpt/resources/codex-code-mode-host
+ 193758 /home/someone/.codex/tmp/arg0/codex-arg0j0lyuT/codex-linux-sandbox --sandbox-policy-cwd /home/someone/work
+ 193763 bwrap --as-pid-1 --new-session --die-with-parent --ro-bind / /
+ 193764 codex-linux-sandbox --sandbox-policy-cwd /home/someone/work
+ 193765 sleep 600
+"""
+# The same machine after the app was asked to quit (SIGTERM to the main
+# process): the window, the app-server and the outer helper were gone, the
+# command and the sandbox process holding it were not -- re-parented to the
+# user's systemd and alive until `sleep` ended nine minutes later.
+LINUX_AFTER_QUIT_COMM = """\
+ 1613 systemd
+ 193764 codex
+ 193765 sleep
+"""
+LINUX_AFTER_QUIT_COMMAND = """\
+ 1613 /usr/lib/systemd/systemd --user
+ 193764 codex-linux-sandbox --sandbox-policy-cwd /home/someone/work
+ 193765 sleep 600
+"""
+
+
+class LinuxObservedTests(unittest.TestCase):
+    """The shipped names against what a live Linux Codex actually produced."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch("codexsync.process_detector.sys.platform", "linux")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def shipped() -> tuple[list[str], list[str]]:
+        from codexsync.process_knowledge import BACKGROUND_PROCESS_NAMES, PROCESS_NAMES
+
+        return list(PROCESS_NAMES), list(BACKGROUND_PROCESS_NAMES["linux"])
+
+    def test_the_open_app_is_found_by_name_and_by_its_install_path(self) -> None:
+        names, markers = self.shipped()
+        listing = processes(LINUX_OBSERVED_COMM, LINUX_OBSERVED_COMMAND)
+        self.assertEqual([p.pid for p in _match_posix(listing, names)], [28047, 193764])
+        background = {p.pid for p in _match_posix(listing, markers)}
+        self.assertTrue({27204, 27209, 28047, 193343, 193758} <= background)
+        self.assertNotIn(193765, background, "the user's own command is not a marker")
+
+    def test_the_sandbox_helper_lives_outside_the_install_path(self) -> None:
+        """So the path marker alone would miss it; the truncated name finds it."""
+        listing = processes(LINUX_OBSERVED_COMM, LINUX_OBSERVED_COMMAND)
+        helper = [p for p in listing if p.pid == 193758]
+        self.assertEqual(_match_posix(helper, ["/usr/lib/chatgpt/"]), [])
+        self.assertEqual(_match_posix(helper, ["codex-linux-sandbox"]), helper)
+
+    def test_a_command_that_outlives_the_app_still_reads_as_running(self) -> None:
+        """Codex's work is still in flight, so a write must still wait."""
+        names, markers = self.shipped()
+        listing = processes(LINUX_AFTER_QUIT_COMM, LINUX_AFTER_QUIT_COMMAND)
+        self.assertEqual([p.pid for p in _match_posix(listing, names + markers)], [193764])
+
+
 class CapabilityTests(unittest.TestCase):
     def test_an_unproven_platform_is_not_supported_and_says_why(self) -> None:
         with mock.patch("codexsync.process_detector.sys.platform", "darwin"):
@@ -176,9 +253,14 @@ class CapabilityTests(unittest.TestCase):
         self.assertTrue(capability.supported)
         self.assertIn("macOS 15.5", capability.detail)
 
-    def test_the_gate_is_empty_until_someone_runs_the_experiment(self) -> None:
-        """Filled from a live machine, never from reading the parser."""
-        self.assertEqual(PROVEN_DETECTORS, {})
+    def test_only_an_observed_platform_is_in_the_gate(self) -> None:
+        """Filled from a live machine, never from reading the parser.
+
+        Linux was watched on 2026-10-09 (`LinuxObservedTests` replays it); no
+        Mac has been, so `darwin` must not appear until one is.
+        """
+        self.assertEqual(set(PROVEN_DETECTORS), {"linux"})
+        self.assertIn("observed 2026-10-09", PROVEN_DETECTORS["linux"])
 
     def test_an_unsupported_platform_leaves_the_state_unknown(self) -> None:
         """And `fail_on_unknown` turns unknown into a refusal, not into a write."""

@@ -164,7 +164,7 @@ codexSync 所针对的流程是：在工作过的电脑上关闭 Codex，等待�
 
 ```toml
 [handoff]
-root_dir = "${workspace_root}/handoff"   # 可选：留空即 state.manifest_file 旁边的 handoff 文件夹
+root_dir = ""                            # 留空即 state.manifest_file 旁边的 handoff 文件夹，每台机器相同
 enabled = true                           # 下面的监视器任务
 delivery_wait_minutes = 15
 notify = true

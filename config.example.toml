@@ -288,8 +288,11 @@ keep = 5
 # must be inside the folder your cloud client syncs, and outside the Codex
 # state directory, backup_dir, temp_dir, the cloud mirror, guardian.root_dir,
 # semantic.root_dir and state_backup.root_dir. Empty: the "handoff" folder
-# beside state.manifest_file, which is already the shared one.
-root_dir = "${workspace_root}/handoff"
+# beside state.manifest_file, which is already the shared one -- and the
+# folder every machine uses unless told otherwise, so set it only on all
+# machines at once: two machines in different folders never see each
+# other's handoffs.
+root_dir = ""
 # Install the background watcher that runs from sign-in: it loads at sign-in
 # and hands off whenever Codex closes. Replaces scheduler.sync_at_login.
 enabled = false

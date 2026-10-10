@@ -482,6 +482,11 @@ What was decided:
   the JSON order and pins exactly. Whether a project *added* to the JSON after
   `projectsMigrated: true` shows up has to be confirmed on the laptop; if it
   does not, this meets `PROVEN_PROJECT_REGISTRY` (CS-238).
+  *Observed 2026-10-09 (Linux, Codex 26.1002):* it does. 17 projects added to
+  the JSON of a Codex with `projectsMigrated: true` and an empty `projects`
+  table were all shown, and on its next start Codex wrote them into
+  `projects`/`project_roots` itself and recorded their app-server ids in the
+  JSON. SQLite is still never written by codexSync.
 - **Synchronise is the full sync.** The window's button runs what
   `handoff sync` runs — settings, chats, projects, one confirmation, stages
   reported as progress — and the handoff folder defaults to `handoff` beside
@@ -804,6 +809,15 @@ matrix; it becomes a required job when Linux stops being experimental. Python
 3.14 joins the matrix on all three systems as a supported version: the Ubuntu
 26.04 machine the Linux checks run on ships it.
 
+Amendment (2026-10-09, same day): the detector was observed on that machine
+(Ubuntu 26.04, Codex desktop deb 26.1002.52244) -- idle, with a chat command
+running in the sandbox, and after the app quit -- following
+`docs/dev/experiments/process-detector-macos.md`, and `PROVEN_DETECTORS["linux"]`
+records it, so writes are open on Linux. The shipped names needed no change.
+Linux stays experimental: no handoff to or from it has been tried, `close_codex`
+has no `PROVEN_CLOSERS` entry there (a request is refused, as designed), and
+the user-level scheduler is unproven on it.
+
 ## D-032: A sync never asks Codex to rebuild its chat list; Codex's state can be checked and repaired
 On 2026-10-09 Codex stopped starting on the owner's main machine, with "could
 not load your organization's settings". The chain, each step proven on the
@@ -857,3 +871,200 @@ The check is meant to grow into the place for "Codex broke, put it right"
 (the owner's request: chats torn from projects after a crash, and whatever
 comes next). A new finding is added only from a breakage observed on a real
 machine, with its repair going through an existing envelope.
+
+## D-033: Where a project is on each machine is asked once and remembered
+
+0.1 assumed every machine kept a project at the same path, which held while
+every machine was Windows on one cloud drive. Between Windows, Linux and macOS
+it never holds (`D:\Projects\atlas`, `/opt/atlas`, `/Users/u/code/atlas`), and
+the first Windows -> Linux handoff (2026-10-09) showed three faults: a root with
+no rule was written into the Linux state as `D:\...` (CS-403); two Windows
+projects whose different folders the rules sent to one Linux folder were merged
+into one, with the chats of both (CS-402); and the projects arrived without
+their chats, because Codex places most chats by their folder alone and a
+Windows folder falls under no Linux project. `[[path_mappings]]` could express
+the mapping, but only by hand, one direction per rule, in one machine's config;
+the owner: "otherwise setting up paths every time is no fun" -- for 0.2.0a1.
+
+What was decided:
+
+- **The memory is a board in the shared workspace** (`path_places.py`,
+  `<manifest folder>/path-places/<machine>.json`, self-verifying, written only
+  by its machine, like every other board). It holds the machine's operating
+  system, each answer "the peer's folder `there` is `here`" (for one project,
+  and, when both ends end in the project's folder name, for the folder above
+  it, so its neighbours need no question; never a drive or `/` itself), and
+  the peer projects this machine was told not to carry. It is not in
+  `config.toml`: it is about the machines, not about one of them, and survives
+  a machine set up again. Answering writes nothing into Codex; the next sync
+  applies it through the ordinary envelope.
+- **Every answer is ordinary rules, and every consumer gets them.**
+  `app.path_rules(cfg)` is `[[path_mappings]]` plus: what this machine was
+  told; what any other machine was told *about this one*, read backwards; two
+  machines told about one folder of a third, joined through it; and each
+  project two machines hold under different roots (`project_root_rules`, from the
+  project boards -- a carried project keeps its id, so that pair is a fact,
+  not a guess). Projects, chats, the working set, repair and the session
+  transfer all map through that one list. The usual longest-prefix rule
+  decides, and two answers that disagree at equal length are ambiguous, never
+  a pick. Whether paths differ by case follows the machine's system (macOS
+  writes POSIX paths but ignores case), not the look of the path.
+- **Another system's path is never written as it is.** With no rule, a root
+  from the other kind of system is `UNPLACED` (`NO_PLACE_HERE`): not added, no
+  binding to it, listed by `projects places` and the window with a suggestion
+  (a folder of the same name beside a project already placed -- offered,
+  never chosen). Same-system roots keep D-022's behaviour: added, and
+  `FOLDER_MISSING_HERE` said. *Superseded by D-034 (2026-10-10): such a
+  project is carried with that root as it is.*
+- **Two folders mapped onto one are two projects.** Peer projects whose
+  *different* roots map onto one folder here are `ROOTS_COLLAPSE`: neither is
+  added or matched, and neither passes on a chat. The same folder under two ids
+  on one machine is still one folder, and the same folder on two machines is
+  still one project.
+- **An answer given later still takes effect.** Every peer list, taken or not,
+  is read for a project that can now be added, or that was carried with the
+  peer's root, naming nothing here, and now has a place whose folder exists
+  (`PLACED`: only `rootPaths` changes). Order, pins and the other bindings
+  still come only from a list not taken yet (D-022).
+- **Chats follow the project Codex put them under *there*.** A chat with no
+  binding whose folder falls under no project here is bound to the
+  counterpart of the peer project whose root holds its folder (`bound_by_folder`
+  in the plan). A chat with a binding, or one Codex places by itself here, is
+  never touched; two answers are none. Nor is a chat Codex shows as "no
+  project" here or on the peer (`projectless-thread-ids`, published with the
+  project list as `projectless`, CS-406): the owner, 2026-10-09 -- "a chat with
+  a binding travels with it; a plain chat is not bound until the user binds
+  it". Without the list that held only because such a chat's folder happened
+  to lie outside every project; the list is what Codex keeps for a chat inside
+  a project's folder that is still no project's. It stays outside the content
+  id, so taking a chat out of a project there never makes that machine's order
+  and pins win here again.
+
+## D-034: A project without a folder here is carried with its chats
+
+**Status:** accepted 2026-10-10 (owner). Amends D-033.
+
+D-033 held back a project whose root is another system's path until someone
+said where it is here: "a Windows path in a Linux Codex names nothing". The
+owner's case (2026-10-09) showed the cost: most projects on a machine are
+ones nobody works on there (old modules, finished work), and the person
+names the folders of the few that matter. Holding the rest back hid their
+chats, and every sync raised a warning nobody was going to act on.
+
+The question D-033 assumed was answered on the Linux laptop on 2026-10-10: a
+project whose `rootPaths` holds `D:\Yandex.Disk\Projects\...` was shown by
+Codex 26.1002 with its chats, both chats opened, and Codex started normally
+(`backfill_state` stayed `complete`). Codex did not copy that project into
+`state_5.sqlite` (`project_roots` has no Windows row), so it lives in the JSON
+only -- the same file codexSync writes.
+
+What was decided:
+
+- **A project with no folder here is carried, with its chats, and nothing
+  warns.** A same-system root keeps D-022's behaviour (added as the rules make
+  it, `FOLDER_MISSING_HERE`); a root of the other system that no rule or
+  answer places is added *as it is* (`NO_PLACE_HERE`, kind `ADD`). Both are a
+  state, not a fault: logged at info, no "attention" tone in the window, and
+  the sync note says the chats can be read and offers a button to the
+  Projects page. `projects places` lists them (`without_folder`); only two
+  rules that disagree (`AMBIGUOUS`) still wait for an answer.
+- **One folder is still one project.** Two machines of one system may hold
+  one folder under two ids; when another machine's project with that very
+  root is already here (placed under this machine's root), a root carried as
+  it is matches it instead of arriving a second time. Without this the first
+  preview on the Linux laptop without path rules added seven duplicates.
+- **Giving it a folder is the switch to "in work".** `projects place` (or the
+  window) records the place (D-033) and the next sync moves the root there
+  (`PLACED`, which already handled a verbatim peer root naming nothing here).
+  `--skip` is "do not carry it here", per machine.
+- **Its chats are bound, not left to Codex.** A chat's folder under a root
+  written the other system's way is not something to rely on Codex matching,
+  so `_bind_by_folder` counts only roots written this system's way
+  (`native`) as placing a chat by itself.
+- **Archive means Codex's own archive.** The owner: right-click a chat ->
+  Archive, or a project -> archive all its chats. That travels as the chat
+  files' archive moves (D-023); making Codex's catalogue follow is CS-407.
+- **When machines disagree, the later work wins.** The model is sequential:
+  work on one machine, synchronise, continue on the other. Every carried
+  decision already follows that (a peer list not yet taken wins, D-022; an
+  archive move follows the side that changed, D-023).
+
+Not decided here: the optional "only chats of projects in work go into
+`.codex`" (the working set, `session_scope.py`, already narrows writes into
+`.codex`; a switch that builds it from the projects with a folder is left
+for when someone asks for it).
+
+## D-035: Codex's catalogue follows an archive move
+
+**Status:** accepted 2026-10-10 (owner: "yes, on the laptop first").
+
+D-023 carries a chat archived or brought back on one machine as a file move
+between `sessions/<y>/<m>/<d>/` and `archived_sessions/` on the other. The
+thread catalogue row kept naming the old path and flag, so Codex listed the
+chat where it was and found no file -- the 2026-10-09 incident began exactly
+there, and D-032 removed the only thing that ever repaired it (a rebuild
+request). The owner wants archiving to travel: right-click a chat -> Archive,
+or a project -> archive all its chats, on any machine.
+
+Codex has no narrow archive statement: `codex.exe` 26.1002 archives and
+restores through its full thread upsert (`ON CONFLICT(id) DO UPDATE SET
+rollout_path = excluded.rollout_path, ..., archived = excluded.archived,
+archived_at = excluded.archived_at, ...`), rebuilding the row from the file.
+Observed on the Linux laptop on 2026-10-10: a file moved into
+`archived_sessions/` plus one guarded update of those three columns made
+Codex show the chat in its archive and open it; brought back with Codex's own
+button, Codex moved the file to the same dated path and wrote the row the
+same way (`archived_at` cleared; its own archived rows hold `archived_at`
+equal to the file's mtime in seconds).
+
+What was decided:
+
+- **The third and last SQLite write** (`chat_archive.py`,
+  `app.follow_chat_archive`, family `chat-archive`): a row whose file is gone
+  from the path it names, while exactly one file of the same name -- carrying
+  the thread id -- sits in the *other* state folder and no other row names it,
+  is pointed at that file with the archive state its folder means. Nothing
+  else: a file gone and not moved, two candidates, or a row another thread
+  already names is counted (`unresolved`) and left.
+- **The statement** sets `rollout_path`, `archived` and `archived_at` with
+  `WHERE id = ? AND rollout_path = ? AND archived = ?` -- the values the plan
+  saw -- in one transaction; the path keeps the form the row had (an
+  extended-length prefix, the separator). It runs inside
+  `app._write_codex_catalogue`: lock, journal, verified backup of the
+  database, plan rebuilt and gate re-checked right before, read back after.
+- **It runs in every full sync** (step `chat_archive` of `run_handoff`, after
+  the transfer that moved the files) and by hand as `sessions archive`. A
+  failure is a step not done, never a lost handoff.
+
+## D-036: Sidebar sections travel with the project list
+
+**Status:** accepted 2026-10-10 (owner: "carry them; a section holds projects
+and single chats").
+
+Codex 26.1002 groups projects and chats into named sections. They are kept
+per account in the global state (`electron-persisted-atom-state` ->
+`sidebar-custom-sections-v3` -> `<account>`: `sections[]` with `id`, `name`,
+`hostSectionIds`, `itemKeys` -- `codex:project:<legacy id>` and
+`codex:thread:local:<thread id>` -- and `appearance`; `sectionOrder` as
+`custom:<id>`; `threadHostIds`), and also in SQLite (`thread_sections`,
+`threads.thread_section_id`), where `hostSectionIds.local` is that machine's
+row id. Observed on the Linux laptop on 2026-10-10: a section written into the
+JSON alone -- no `hostSectionIds`, no row -- was shown by Codex with its
+project and its chat, and Codex did not create the row.
+
+What was decided:
+
+- **JSON only, like projects.** Each machine's project publication carries its
+  one account's sections (`sidebar_sections.published_sections`), without
+  `hostSectionIds`; no SQLite write. The `sections` field is in the content id
+  only when present, so a list without sections keeps its id.
+- **The merge follows the project merge.** Match by section id, add a section
+  new here (with empty `hostSectionIds`), never remove one. Project items are
+  translated through the project merge (an item for a project or chat not
+  here is dropped). From a list not taken yet the peer's name, appearance,
+  items and order win, and an item the peer put into a section leaves any
+  other section here; a list already taken only adds sections new here, with
+  items no section here holds. Sections of another account are not carried.
+- **Last work wins**, as for everything carried (D-034): the person worked on
+  the machine whose list is new.
+

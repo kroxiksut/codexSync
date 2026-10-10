@@ -336,6 +336,42 @@ def read_thread_names(state_root: Path, *, timeout_seconds: float = 2.0) -> Thre
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadArchiveRows:
+    """Each thread's rollout path and archive state, as stored (D-035).
+
+    Only ``rollout_path``, ``archived`` and ``archived_at`` are read, kept
+    exactly as stored: a write requires the row to still hold these values.
+    """
+    status: PlacementStatus
+    database: str | None = None
+    #: Thread id -> (rollout path as stored, archived flag, archived_at).
+    rows: dict[str, tuple[str, int, int | None]] = field(default_factory=dict)
+    codes: tuple[str, ...] = ()
+
+
+def read_thread_archive_rows(state_root: Path, *, timeout_seconds: float = 2.0) -> ThreadArchiveRows:
+    """Rollout path and archive state of every thread, strictly read-only.
+
+    A catalogue without these columns is ``INDETERMINATE`` with
+    ``NO_ARCHIVE_COLUMNS``: a Codex whose archive is kept some other way.
+    """
+
+    def query(connection: sqlite3.Connection) -> dict[str, tuple[str, int, int | None]]:
+        if not {"rollout_path", "archived", "archived_at"}.issubset(_columns(connection, "threads")):
+            raise _Refused("NO_ARCHIVE_COLUMNS")
+        rows: dict[str, tuple[str, int, int | None]] = {}
+        for thread_id, path, archived, archived_at in connection.execute(
+            "SELECT id, rollout_path, archived, archived_at FROM threads"
+        ):
+            if isinstance(thread_id, str) and thread_id and isinstance(path, str) and isinstance(archived, int):
+                rows[thread_id] = (path, archived, archived_at if isinstance(archived_at, int) else None)
+        return rows
+
+    status, relative, rows, codes = _query_the_catalogue(state_root, query, timeout_seconds=timeout_seconds)
+    return ThreadArchiveRows(status, relative, rows or {}, codes)
+
+
+@dataclass(frozen=True, slots=True)
 class ThreadActivity:
     """When each thread last changed and in which folder (D-026).
 

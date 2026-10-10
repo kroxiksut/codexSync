@@ -1,10 +1,12 @@
 # Experiment: does the POSIX process detector see a running Codex?
 
-**Status: not run on a Mac; the GitHub runner workflow below is the stand-in.** `PROVEN_DETECTORS` in `src/codexsync/process_detector.py`
-is empty, so on macOS and Linux `capability()` reports `supported=False`, every
-process reading is `UNKNOWN`, and `safety.fail_on_unknown` turns that into a
-refusal. Every mutating command therefore exits 3 on those platforms. That is
-the intended state until this page has been filled in from a real machine.
+**Status: run on Linux (2026-10-09, [below](#linux)); not run on a Mac -- the
+GitHub runner workflow below is the stand-in there.** `PROVEN_DETECTORS` in
+`src/codexsync/process_detector.py` holds `linux` only, so on macOS
+`capability()` reports `supported=False`, every process reading is `UNKNOWN`,
+and `safety.fail_on_unknown` turns that into a refusal: every mutating command
+exits 3 there. That is the intended state until this page has been filled in
+from a real Mac.
 
 ## Why it cannot be decided by reading the code
 
@@ -124,9 +126,50 @@ statement that someone watched a live Codex and saw it detected.
 
 ## Linux
 
-Out of MVP scope (`AI_RULES` 4) and not in CI, but the adapter and the template
-entries exist so that the same procedure works there. The Linux specifics worth
-remembering while running it: `comm` is cut to fifteen characters, so
-`codex-linux-sandbox` shows as `codex-linux-san`, and the desktop preview
-installs under `/usr/lib/chatgpt/`, which is why that path is the marker rather
-than any process name.
+Experimental (`D-031`). The Linux specifics worth remembering while running the
+procedure: `comm` is cut to fifteen characters, so `codex-linux-sandbox` shows
+as `codex-linux-san`, and the desktop preview installs under
+`/usr/lib/chatgpt/`, which is why that path is the marker rather than any
+process name.
+
+### Observed 2026-10-09
+
+Ubuntu 26.04 LTS, kernel 7.0.0-38, GNOME; Codex desktop from the
+`chatgpt` deb 26.1002.52244, signed in; codexSync 0.2.0a1 in a venv on
+Python 3.14.4. Each reading went through `collect_process_snapshot` with the
+names the shipped template configures, polled every half second for the whole
+session; the listings stayed on the machine.
+
+1. **Open, idle.** Main: `codex` twice --
+   `/usr/lib/chatgpt/resources/codex ... app-server` and `codex exec-server
+   --remote ...` (a cloud environment the app keeps connected). Background:
+   19 processes under `/usr/lib/chatgpt/` (`ChatGPT` -- the main process,
+   zygotes, GPU, renderers, utilities -- and `browser_crashpad_handler`, which
+   `comm` shows as `browser_crashpa`). User data is in `~/.config/Codex`; the
+   state in `~/.codex`.
+2. **A chat running `sleep 600` locally.** Added: `codex-code-mode-host`
+   (`/usr/lib/chatgpt/resources/`, `comm` `codex-code-mode`), and the sandbox:
+   `codex-linux-sandbox` started from
+   `~/.codex/tmp/arg0/codex-arg0<random>/codex-linux-sandbox` -- **outside the
+   install path**, so only its (truncated) name finds it -- then `bwrap`, then
+   `codex-linux-sandbox` again inside it with `comm` `codex`, then the command.
+   `node_repl` and a `MainThread` came and went while the chat was set up.
+   Never seen: `codex-app-server` and `codex-execve-wrapper` as process names
+   (the app-server runs as `codex app-server`); both stay in the list, harmless.
+3. **Quit while the command ran** (SIGTERM to the main `ChatGPT` process, which
+   Electron treats as a normal quit). After 2 s every process under
+   `/usr/lib/chatgpt/`, the app-server and the outer helper were gone. The inner
+   sandbox process (`comm` `codex`) and `sleep` were not: re-parented to the
+   user's `systemd --user`, alive until `sleep` ended nine minutes later. The
+   detector read that as running the whole time (main name `codex`) and as
+   stopped from the moment it ended. That is the intended answer -- work Codex
+   started is still in flight -- and the message names `codex (pid N)`.
+4. **Closed**, read twice five seconds apart: nothing, stopped. `doctor`
+   reported `codex_process` as undetermined (the gate was still closed). With
+   `PROVEN_DETECTORS["linux"]` set in memory, `SafetyGate.check(SYNC)` passed
+   its two-second stopped window.
+
+The shipped names needed no change. `tests/test_process_detector_posix.py`
+(`LinuxObservedTests`) replays the trimmed listings. What this does not cover:
+a handoff to or from Linux, asking Codex to close (`PROVEN_CLOSERS` has no
+Linux entry), and the user-level scheduler.

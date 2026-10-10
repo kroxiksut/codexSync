@@ -23,7 +23,9 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
-from PySide6.QtWidgets import QCheckBox, QComboBox, QHeaderView, QMenu, QTreeWidget, QTreeWidgetItem
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QFileDialog, QHeaderView, QMenu, QTreeWidget, QTreeWidgetItem,
+)
 
 from .. import theme
 
@@ -49,6 +51,9 @@ from .base import Model, Screen
 WRITING_KINDS = {"ADD_PROJECT", "REMAP_ROOT", "ADD_BINDING"}
 BLOCKING_KINDS = {"AMBIGUOUS_PROJECT", "UNSUPPORTED_BACKEND"}
 QUIET_KINDS = {"KEEP_PROJECT", "KEEP_BINDING", "SKIP_UNMAPPED"}
+#: How a project of another machine stands here (`app.PlaceStatus`).
+#: Without a folder here is a state, not a fault (D-034), so it has no tone.
+PLACE_TONES = {"HERE": "ok", "COMING": "ok", "AMBIGUOUS": "danger"}
 KIND_TONES = {"REMAP_ROOT": "attention", "ADD_BINDING": "ok", "ADD_PROJECT": "ok", "SKIP_NO_PROJECT": "attention", "AMBIGUOUS_PROJECT": "danger", "UNSUPPORTED_BACKEND": "danger"}
 
 
@@ -76,6 +81,12 @@ class ProjectsModel(Model):
         #: The last comparison of project folders with the other machines (D-026).
         self.files: Outcome | None = None
         self.files_busy = False
+        #: Where other machines' projects are here, and the last answer given (D-033).
+        self.places: Outcome | None = None
+        self.places_busy = False
+        self.places_all = False
+        self.places_whole_folder = True
+        self.place_result: Outcome | None = None
 
     def reset_plans(self) -> None:
         self.directory = None
@@ -139,6 +150,41 @@ class ProjectsScreen(Screen):
             self.show_chats_button, self.move_here_button, self.open_folder_button,
         ))
         self.body.addWidget(frame)
+
+        # A folder rarely has one path on Windows, Linux and macOS (D-033):
+        # answered once here, kept in the shared folder for every direction.
+        self.places_summary = label()
+        places, places_inner = card(self.t("projects.places.title"), self.places_summary)
+        places_inner.addWidget(label(self.t("projects.places.caption"), "muted", wrap=True))
+        self.places_table = table([
+            self.t("projects.column.name"),
+            self.t("projects.places.column.machine"),
+            self.t("projects.places.column.there"),
+            self.t("projects.places.column.state"),
+            self.t("projects.places.column.here"),
+        ], selectable=True)
+        self.places_table.setMinimumHeight(220)
+        self.places_table.itemSelectionChanged.connect(self._render_place_buttons)
+        places_inner.addWidget(self.places_table, stretch=1)
+        self.places_show_all = QCheckBox(self.t("projects.places.show_all"))
+        self.places_show_all.setChecked(m.places_all)
+        self.places_show_all.toggled.connect(self._toggle_places_all)
+        self.places_whole = QCheckBox(self.t("projects.places.whole_folder"))
+        self.places_whole.setChecked(m.places_whole_folder)
+        self.places_whole.toggled.connect(self._toggle_whole_folder)
+        places_inner.addLayout(row(self.places_show_all, self.places_whole))
+        self.places_button = button(self.t("projects.places.check"))
+        self.places_button.clicked.connect(self.check_places)
+        self.place_choose = button(self.t("projects.places.choose"), primary=True)
+        self.place_choose.clicked.connect(self.choose_place)
+        self.place_skip = button(self.t("projects.places.skip"))
+        self.place_skip.clicked.connect(lambda: self.answer_place(skip=True))
+        self.place_forget = button(self.t("projects.places.forget"))
+        self.place_forget.clicked.connect(lambda: self.answer_place(forget=True))
+        places_inner.addLayout(row(self.places_button, self.place_choose, self.place_skip, self.place_forget))
+        self.place_status = label("", wrap=True)
+        places_inner.addWidget(self.place_status)
+        self.body.addWidget(places)
 
         # Chats travel, project folders do not (D-026): which projects and
         # which files here hold less than another machine had.
@@ -325,6 +371,131 @@ class ProjectsScreen(Screen):
     def reveal(self, target: str) -> None:
         if target == "files":
             self.show_widget(self.files_tree)
+        elif target == "places":
+            self.show_widget(self.places_table)
+
+    # --- where other machines' projects are here (D-033) ---------------------
+
+    def check_places(self) -> None:
+        if self.model.places_busy:
+            return
+        self.model.places_busy = True
+        self.render()
+
+        def apply(model: ProjectsModel, outcome: Outcome) -> None:
+            model.places_busy = False
+            model.places = outcome
+
+        self.read(lambda: self.host.controller.project_places(), apply)
+
+    def _toggle_places_all(self, checked: bool) -> None:
+        self.model.places_all = checked
+        self._places_drawn = None
+        self._render_places()
+
+    def _toggle_whole_folder(self, checked: bool) -> None:
+        self.model.places_whole_folder = checked
+
+    def _chosen_place(self):
+        chosen = selected_data(self.places_table)
+        return chosen[0] if chosen else None
+
+    def choose_place(self) -> None:  # pragma: no cover - opens a native dialog
+        item = self._chosen_place()
+        if item is None:
+            return
+        start = (item.suggestions or item.here or ("",))[0]
+        folder = QFileDialog.getExistingDirectory(self, self.t("projects.places.dialog", name=item.name), start)
+        if folder:
+            self.answer_place(path=folder)
+
+    def answer_place(self, *, path: str | None = None, skip: bool = False, forget: bool = False) -> None:
+        item = self._chosen_place()
+        if item is None or self.model.places_busy:
+            return
+        self.model.places_busy = True
+        whole = self.model.places_whole_folder
+        self.render()
+
+        def call() -> Outcome:
+            answered = self.host.controller.place_project(
+                item.project_id, path=path, skip=skip, forget=forget, whole_folder=whole,
+            )
+            if not answered.ok:
+                return answered
+            return self.host.controller.project_places()
+
+        def apply(model: ProjectsModel, outcome: Outcome) -> None:
+            model.places_busy = False
+            model.place_result = outcome
+            if outcome.ok:
+                model.places = outcome
+
+        self.run(call, apply)
+
+    def _render_place_buttons(self) -> None:
+        item = self._chosen_place()
+        busy = self.model.places_busy
+        self.places_button.setEnabled(not busy)
+        for widget in (self.place_choose, self.place_skip, self.place_forget):
+            widget.setEnabled(item is not None and not busy)
+
+    def _render_places(self) -> None:
+        model = self.model
+        palette = self.palette_
+        self._render_place_buttons()
+        result = model.place_result
+        if result is not None and not result.ok:
+            self.place_status.setText(self.failure_text(result))
+            set_tone(self.place_status, "danger", palette)
+        elif result is not None:
+            self.place_status.setText(self.t("projects.places.saved"))
+            set_tone(self.place_status, "ok", palette)
+        else:
+            self.place_status.setText("")
+        outcome = model.places
+        if getattr(self, "_places_drawn", None) is outcome and not model.places_busy:
+            return
+        self._places_drawn = outcome
+        if model.places_busy:
+            self.places_summary.setText(self.t("projects.places.checking"))
+            return
+        if outcome is None:
+            self.places_summary.setText(self.t("projects.places.not_checked"))
+            self.places_table.setRowCount(0)
+            return
+        if not outcome.ok:
+            self.places_summary.setText(self.failure_text(outcome))
+            set_tone(self.places_summary, "danger", palette)
+            self.places_table.setRowCount(0)
+            return
+        report = outcome.value
+        waiting = report.waiting
+        without = report.without_folder
+        if not report.projects:
+            self.places_summary.setText(self.t("projects.places.none"))
+        elif waiting:
+            self.places_summary.setText(self.p("projects.places.waiting", len(waiting)))
+        elif without:
+            self.places_summary.setText(self.p("projects.places.without_folder", len(without)))
+        else:
+            self.places_summary.setText(self.p("projects.places.all_placed", len(report.projects)))
+        set_tone(self.places_summary, "attention" if waiting else None, palette)
+        shown = report.projects if model.places_all else waiting + without
+        rows = []
+        for item in shown:
+            status = item.status.value
+            here = "; ".join(item.here)
+            if item.suggestions:
+                here = self.join([here, self.t("projects.places.suggestion", path=item.suggestions[0])])
+            rows.append([
+                Cell(item.name or item.project_id, data=item, tooltip=item.project_id),
+                Cell(", ".join(item.peers), muted=True),
+                Cell("; ".join(item.there)),
+                Cell(self.t(f"projects.places.status.{status}"), tone=PLACE_TONES.get(status)),
+                Cell(here, muted=not item.here),
+            ])
+        fill_table(self.places_table, rows, palette)
 
     def check_files(self) -> None:
         """Read every project folder afresh and compare it with the others."""
@@ -699,6 +870,7 @@ class ProjectsScreen(Screen):
             self._fill_move_projects()
             self._move_drawn = model.directory
         self._render_move()
+        self._render_places()
         self._render_files()
 
     def _fill_actions(self) -> None:

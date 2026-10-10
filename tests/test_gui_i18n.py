@@ -19,7 +19,7 @@ import re
 import tempfile
 import unittest
 
-from codexsync.app import HANDOFF_STEPS
+from codexsync.app import HANDOFF_STEPS, PlaceStatus
 from codexsync.chat_directory import Association
 from codexsync.chat_move import ChatMoveKind
 from codexsync.codex_health import FINDING_CODES as CODEX_FINDING_CODES, Severity as CodexSeverity
@@ -150,6 +150,7 @@ class CatalogueCompletenessTests(unittest.TestCase):
         computed |= {f"sessions.choice.{item.value}" for item in ResolutionChoice}
         computed |= {f"sessions.category.{value}" for value in set(_module_constant(GUI / "screens" / "sessions.py", "CATEGORIES").values())}
         computed |= {f"repair.kind.{item.value}" for item in RepairActionKind}
+        computed |= {f"projects.places.status.{item.value}" for item in PlaceStatus}
         computed |= {f"guardian.result.{item.value}" for item in GuardianResultStatus}
         computed |= {f"journal.state.{item.value}" for item in JournalState}
         computed |= {f"recovery.action.{item.value}" for item in RecoveryAction}

@@ -204,6 +204,11 @@ only), plus chats under no project. Select a project to **show its chats**,
 - **Move its folder…** copies the project into a new folder, verifies every
   file, and only then points Codex at the new root. The old folder is never
   modified or deleted.
+- **Other machines' projects on this one** lists the projects that have no
+  folder here (another operating system, or no folder by that path). They
+  come with their chats anyway; to work on one's files here, select it and
+  **choose its folder here**, or **do not carry it**. The answer is
+  remembered for every direction and the next synchronisation applies it.
 - **Repair after moving to another machine** runs the sessions' recorded folders
   through `[[path_mappings]]` and builds a plan: pin chats, or remap a moved
   project's root. A remap always also pins every chat still under the old root,
