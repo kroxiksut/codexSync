@@ -29,7 +29,8 @@
 > experimental. On Linux, process detection has been watched against a live
 > Codex and writes are open, but no handoff to or from Linux has been tried yet
 > (Codex's own Linux app is a preview too). On macOS reads, diagnostics and
-> plans work, and writes stay closed until the same has been done on a Mac.
+> plans work, and writes stay closed until the same has been done on a Mac —
+> [a two-minute check helps](#have-a-mac).
 
 <p align="center">
   <a href="docs/en/GUI.md"><img src="docs/screenshots/en/02-overview.png" width="85%" alt="The CodexSync window: overview"></a>
@@ -137,6 +138,33 @@ and every write still goes through the lock, journal and verified backup, but it
 needs more machines than ours before 0.2.0. If you use Codex on two or more
 machines, please try it and [tell us](https://github.com/kroxiksut/codexSync/issues/new/choose)
 what happened. Data an alpha writes stays readable by every later version.
+
+### Have a Mac?
+
+Writes stay closed on macOS until someone has watched the process check work
+against a real Codex on a Mac. That is the first thing we need, and it is small:
+one Terminal command that only reads the list of running programs. It does not
+need codexSync installed, does not touch `~/.codex`, and changes nothing.
+
+```sh
+ps -A -o pid=,ppid=,comm= | grep -i -E 'codex|chatgpt'
+```
+
+It prints one line per program whose path mentions Codex or ChatGPT: its
+process id, its parent's id and the program's path. Please run it:
+
+1. with Codex fully quit (⌘Q, not only the window closed);
+2. with Codex open;
+3. while a chat is running a command (ask it to run `sleep 60`);
+4. right after quitting Codex while that command still runs, and again
+   10 seconds later.
+
+Do this with each Codex client you use — the desktop app (now named ChatGPT),
+the `codex` command line, the extension in VS Code or Cursor — and
+[send the output](https://github.com/kroxiksut/codexSync/issues/new?template=macos_process_check.yml)
+with your macOS version and the app or CLI version. The paths may contain your
+user name; replace it if you like. A full handoff between a Mac and another
+machine is the next step, once writes are open there.
 
 **Upgrading from 0.1.** codexSync 0.2 recognises configurations created by 0.1
 and upgrades them in place, from the window or with `config check` and

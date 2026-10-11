@@ -1,0 +1,76 @@
+name: macOS process check
+description: What a Mac shows while Codex is quit, open, and running a command (read-only, no install)
+labels: ["macos"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. This needs one Terminal command and nothing else — codexSync does not
+        have to be installed, and the command only reads the list of running programs:
+
+        ```sh
+        ps -A -o pid=,ppid=,comm= | grep -i -E 'codex|chatgpt'
+        ```
+
+        Paste its output for each state below. Paths may contain your user name; replace
+        it if you like. Please do not attach anything from `~/.codex`.
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: "Apple menu → About This Mac"
+      placeholder: "macOS 15.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Chip
+      options:
+        - Apple silicon
+        - Intel
+    validations:
+      required: true
+  - type: checkboxes
+    id: clients
+    attributes:
+      label: Codex clients checked
+      options:
+        - label: Desktop app (now named ChatGPT)
+        - label: "`codex` command line"
+        - label: Extension in VS Code, Cursor or another editor
+  - type: input
+    id: versions
+    attributes:
+      label: App / CLI / extension versions
+      placeholder: "ChatGPT 1.2026.280, codex-cli 0.160.0"
+  - type: textarea
+    id: quit
+    attributes:
+      label: 1. Codex fully quit (⌘Q)
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: open
+    attributes:
+      label: 2. Codex open
+      description: One block per client, with the client named above it.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: 3. A chat running a command (`sleep 60`)
+      render: text
+  - type: textarea
+    id: after
+    attributes:
+      label: 4. Right after quitting while the command runs, and 10 seconds later
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Anything that surprised you, e.g. a program that stayed after Codex quit.

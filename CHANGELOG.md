@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.2.0a1] - 2026-10-09
+## [0.2.0a1] - 2026-10-11
 
 **The first alpha of 0.2.** codexSync now hands your Codex work between
 machines as one guarded step — settings, chats, chat names and the project

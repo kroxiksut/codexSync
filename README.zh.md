@@ -26,7 +26,8 @@
 > [!IMPORTANT]
 > 实测验证过的只有 Windows → Windows。Linux 和 macOS 处于实验阶段。在 Linux 上，进程检测已经对着真实运行的
 > Codex 观察过，写入已开放，但还没有试过与 Linux 之间的交接（Codex 自己的 Linux 应用也还是预览版）。
-> 在 macOS 上读取、诊断和计划都能用，但在 Mac 上做过同样的观察之前，写入一直关闭。
+> 在 macOS 上读取、诊断和计划都能用，但在 Mac 上做过同样的观察之前，写入一直关闭——
+> [两分钟的检查就能帮上忙](#如果你有-mac)。
 
 <p align="center">
   <a href="docs/zh/GUI.md"><img src="docs/screenshots/zh/02-overview.png" width="85%" alt="CodexSync 窗口：概览"></a>
@@ -116,6 +117,29 @@ codexsync -c config.toml doctor
 日志和经过校验的备份，但在 0.2.0 之前，它需要在比我们更多的机器上运行。如果你在两台或更多机器上使用 Codex，
 请试用并[告诉我们](https://github.com/kroxiksut/codexSync/issues/new/choose)结果。alpha 写入的数据，
 之后的每个版本都能读取。
+
+### 如果你有 Mac
+
+在有人于 Mac 上对着真实的 Codex 看到进程检查正常工作之前，macOS 上的写入一直关闭。
+这是我们最先需要的，而且很简单：在终端里运行一条只读取正在运行的程序列表的命令。
+它不需要安装 codexSync，不碰 `~/.codex`，也不改变任何东西。
+
+```sh
+ps -A -o pid=,ppid=,comm= | grep -i -E 'codex|chatgpt'
+```
+
+它为路径中含有 Codex 或 ChatGPT 的每个程序打印一行：进程号、父进程号和程序路径。请在以下情况各运行一次：
+
+1. Codex 完全退出时（⌘Q，而不只是关闭窗口）；
+2. Codex 打开时；
+3. 某个对话正在执行命令时（让它运行 `sleep 60`）；
+4. 在该命令仍在运行时退出 Codex 后立即运行，10 秒后再运行一次。
+
+对你使用的每个 Codex 客户端都这样做——桌面应用（现在名为 ChatGPT）、`codex` 命令行、
+VS Code 或 Cursor 中的扩展——然后连同 macOS 版本和应用或 CLI 的版本一起
+[把输出发给我们](https://github.com/kroxiksut/codexSync/issues/new?template=macos_process_check.yml)。
+路径中可能含有你的用户名，愿意的话可以替换掉。Mac 与其他机器之间的完整交接是下一步，
+等那里的写入开放之后再做。
 
 **从 0.1 升级。** codexSync 0.2 能识别 0.1 创建的配置，并就地升级它——在窗口里，或用
 `config check` 和 `config upgrade`：0.1 的少数取值会被所有写入命令拒绝，升级会在修改前
