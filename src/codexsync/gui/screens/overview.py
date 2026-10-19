@@ -12,11 +12,13 @@ closed underneath them -- behind an animation they did not ask for.
 """
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
+
 from .. import theme
 from ..controller import Outcome
-from ..widgets import Banner, Cell, button, card, fill_table, label, row, set_tone, table
+from ..widgets import Banner, Cell, button, card, fill_table, label, make_copyable, row, set_tone, table
 from .base import Model, Screen
-from .sync import local_time, run_result
+from .sync import full_preview_text, local_time, run_result
 
 
 class OverviewModel(Model):
@@ -29,6 +31,11 @@ class OverviewModel(Model):
         #: the automation line is what the mock-up puts under the dry run.
         self.journals: Outcome | None = None
         self.automation: Outcome | None = None
+
+    def receive(self, kind: str, outcome: Outcome) -> None:
+        if kind == "dry_run":
+            # Started on Synchronisation: the same dry run, shown here too.
+            self.dry_run = outcome
 
 
 class OverviewScreen(Screen):
@@ -54,6 +61,12 @@ class OverviewScreen(Screen):
             self.t("checks.column.status"),
             self.t("checks.column.details"),
         ])
+        # Sorted by a click on a column -- the status by how bad it is -- and
+        # in the diagnostic's own order until then (CS-338).
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        self.table.setWordWrap(True)
+        make_copyable(self.table, copy_row=self.t("checks.copy.row"), copy_all=self.t("checks.copy.all"))
         inner.addWidget(self.table, stretch=1)
         self.body.addWidget(frame, stretch=1)
 
@@ -104,7 +117,7 @@ class OverviewScreen(Screen):
             # journal are worth seeing (CS-274).
             return Outcome(value=(controller.state(), controller.journals(), controller.automation()))
 
-        self.read(go, _apply_state)
+        self.read(go, _apply_state, kind="environment")
 
     def render(self) -> None:
         model = self.model
@@ -120,7 +133,7 @@ class OverviewScreen(Screen):
         elif outcome.ok:
             self._show_state(outcome.value)
         else:
-            self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
             if not self.banner.isVisible():
                 self.banner.setVisible(True)
             self.table.setRowCount(0)
@@ -213,8 +226,12 @@ class OverviewScreen(Screen):
             # between "Codex is open" and "an unrelated service is running"
             # (CS-260). Without it, an empty tray makes the banner look broken.
             detail = self.t("banner.running.detail")
-            found = next(
-                (check.details for check in view.checks if check.name == "codex_process"), ""
+            process = next((check for check in view.checks if check.name == "codex_process"), None)
+            # The process names alone (CS-338); the gate's whole English
+            # sentence only from a core that does not name them separately.
+            found = "" if process is None else next(
+                (str(params.get("processes", "")) for code, params in process.parts if code == "codex_process.found"),
+                "" if process.parts else process.details,
             )
             if found:
                 named = self.t("banner.running.processes", processes=found)
@@ -230,10 +247,16 @@ class OverviewScreen(Screen):
             status = self.t(status_key) if self.host.catalog.has(status_key) else check.status
             rows.append([
                 Cell(name, tooltip=check.name),
-                Cell(f"●  {status}", tone=theme.STATUS_TONES.get(check.status, "neutral")),
-                Cell(check.details, muted=True),
+                Cell(
+                    f"●  {status}", tone=theme.STATUS_TONES.get(check.status, "neutral"),
+                    sort=SEVERITY.get(check.status, len(SEVERITY)),
+                ),
+                # The English line stays one hover away: it is what `doctor`
+                # prints, and what an issue report quotes.
+                Cell(detail_text(self, check), muted=True, tooltip=check.details),
             ])
         fill_table(self.table, rows, palette)
+        self.table.resizeRowsToContents()
         passed = len(view.checks) - view.warnings - view.failures
         parts = [self.p("checks.summary.passed", passed)]
         if view.warnings:
@@ -245,23 +268,34 @@ class OverviewScreen(Screen):
     # --- the dry run -------------------------------------------------------------
 
     def start_dry_run(self) -> None:
-        """Build and check the sync plan through the gated path; write nothing."""
-        if self.model.dry_run_busy:
+        """What *Synchronise* would do, and nothing written (CS-411): see `Controller.dry_run`."""
+        if self.model.dry_run_busy or self.shared_busy("dry_run", "full_sync"):
             return
         self.model.dry_run_busy = True
         self.model.dry_run = None
         self.render()
         controller = self.host.controller
-        self.run(lambda: controller.sync(dry_run=True), _apply_dry_run)
+        self.read(
+            lambda progress=None: controller.dry_run(progress=progress), _apply_dry_run,
+            progress=True, kind="dry_run",
+        )
 
     def _render_dry_run(self) -> None:
         model = self.model
-        self.dry_run_button.setEnabled(not model.dry_run_busy)
+        # Busy too when the Synchronisation page started it, or is syncing (CS-336).
+        running = model.dry_run_busy or self.shared_busy("dry_run")
+        self.dry_run_button.setEnabled(not running and not self.shared_busy("full_sync"))
         outcome = model.dry_run
-        if outcome is None:
-            key = "dry_run.running" if model.dry_run_busy else "dry_run.caption"
-            self.dry_run_result.setText(self.t(key))
+        if running:
+            self.dry_run_result.setText(self.progress_text("dry_run") or self.t("dry_run.running"))
             set_tone(self.dry_run_result, None, self.palette_)
+        elif outcome is None:
+            self.dry_run_result.setText(self.t("dry_run.caption"))
+            set_tone(self.dry_run_result, None, self.palette_)
+        elif outcome.ok and hasattr(outcome.value, "chats_to_codex"):
+            self.dry_run_result.setText(full_preview_text(self, outcome.value))
+            tone = "attention" if outcome.value.volatile or outcome.value.chats_to_decide else "ok"
+            set_tone(self.dry_run_result, tone, self.palette_)
         elif outcome.ok:
             result = outcome.value
             plan = self.join([
@@ -273,6 +307,52 @@ class OverviewScreen(Screen):
         else:
             self.dry_run_result.setText(self.failure_text(outcome))
             set_tone(self.dry_run_result, "danger", self.palette_)
+
+
+#: How a status sorts: the worst first.
+SEVERITY = {"FAIL": 0, "WARN": 1, "PASS": 2}
+
+#: Values that are the config's own words, said with the Settings page's label.
+PARAM_LABELS = {
+    "direction": "settings.choice.sync.direction.{}",
+    "delete_policy": "settings.choice.sync.delete_policy.{}",
+}
+
+
+def detail_text(screen: Screen, check) -> str:
+    """A check's details in the window's language (CS-338).
+
+    Each part is a sentence code from `preflight.DETAIL_CODES` with its
+    values. A part the catalogue has no sentence for -- a newer core than
+    this window, say -- makes the whole line fall back to the English one,
+    never to half a translation.
+    """
+    catalog = screen.host.catalog
+    if not check.parts:
+        return check.details
+    sentences = []
+    for code, params in check.parts:
+        key = f"check.detail.{code}"
+        if not catalog.has(key):
+            return check.details
+        values = dict(params)
+        for name, pattern in PARAM_LABELS.items():
+            label_key = pattern.format(values.get(name))
+            if name in values and catalog.has(label_key):
+                values[name] = catalog.text(label_key)
+        if code == "codex_startup.finding":
+            # The finding's own sentence is the Recovery page's (`codex.finding.*`).
+            nested = f"codex.finding.{values.get('code')}"
+            if not catalog.has(nested):
+                return check.details
+            values = {"finding": catalog.text(nested, **{"chats": 0, "megabytes": 0, "journals": 0, **params})}
+        if catalog.is_plural(key):
+            count = values.pop("count", 0)
+            sentences.append(catalog.plural(key, int(count), **values))
+        else:
+            sentences.append(catalog.text(key, **values))
+    # Chinese runs its sentences together; a space after 。 reads as a typo.
+    return catalog.text("checks.sentence_separator").join(sentences)
 
 
 def _apply_state(model: OverviewModel, outcome: Outcome) -> None:

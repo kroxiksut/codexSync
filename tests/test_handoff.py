@@ -265,6 +265,19 @@ class RunHandoffTests(_Workspace):
             board.pending("desktop"), [], "a machine that handed nothing off leaves nothing to wait for"
         )
 
+    def test_each_half_says_how_many_files_it_has_written(self) -> None:
+        # CS-339: "Syncing settings 1 of 1", not a bare phase name, while it writes.
+        desktop, desktop_codex = self.machine("desktop")
+        self.write(desktop_codex / "skills" / "tool.md", "from the desktop")
+        self.session(desktop_codex, "11111111-1111-1111-1111-111111111111")
+        reports: list[tuple[str, int, int]] = []
+        run_handoff(desktop, progress=lambda phase, done, total: reports.append((phase, done, total)))
+        for phase in ("sync_settings", "sync_chats"):
+            with self.subTest(phase=phase):
+                counted = [(done, total) for name, done, total in reports if name == phase and total]
+                self.assertTrue(counted, f"{phase} reported no count: {reports}")
+                self.assertEqual(counted[-1][0], counted[-1][1], "the last report is the whole set")
+
     def test_a_later_step_that_fails_does_not_cost_the_handoff(self) -> None:
         # A peer's names file arriving mid-run once made the names step refuse
         # its own plan after settings and chats were in the cloud, so no record
@@ -301,6 +314,42 @@ class RunHandoffTests(_Workspace):
         copied = [path for path in self.cloud.rglob("*") if path.is_file()]
         self.assertEqual(copied, [], "nothing copied into the cloud folder")
         self.assertEqual(read_board(self.handoff_root).records, {}, "no handoff is recorded")
+
+    def test_a_preview_while_codex_runs_is_a_picture_and_writes_nothing(self) -> None:
+        # CS-411: `plan` and the window's Dry run, which run while Codex is
+        # open; `sync --dry-run` still wants it closed.
+        desktop, desktop_codex = self.machine("desktop")
+        self.write(desktop_codex / "skills" / "tool.md", "from the desktop")
+        self.session(desktop_codex, "11111111-1111-1111-1111-111111111111")
+        self.gate.state = ProcessState.RUNNING
+        with self.assertRaises(SafetyPreconditionError):
+            app_module.preview_full_sync(desktop)
+        preview = app_module.preview_full_sync(desktop, enforce_safety=False)
+        self.assertTrue(preview.volatile)
+        summary = app_module.summarize_full_sync(preview)
+        self.assertEqual((summary.files, summary.chats_to_cloud, summary.chats_to_codex), (1, 1, 0))
+        self.assertEqual((summary.machine, summary.chats_to_decide), ("desktop", 0))
+        self.assertTrue(summary.volatile)
+        self.assertEqual([path for path in self.cloud.rglob("*") if path.is_file()], [], "nothing copied")
+        self.assertEqual(read_board(self.handoff_root).records, {}, "no handoff is recorded")
+
+    def test_plan_prints_the_whole_sync_while_codex_runs(self) -> None:
+        from codexsync.cli import main
+        import contextlib
+        import io
+
+        desktop, desktop_codex = self.machine("desktop")
+        self.session(desktop_codex, "11111111-1111-1111-1111-111111111111")
+        self.gate.state = ProcessState.RUNNING
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch("codexsync.cli.configure_logging"), \
+                mock.patch("codexsync.cli._emit_verbose_process_snapshot"):
+            code = main(["-c", str(desktop), "plan"])
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("Full sync plan on desktop", text)
+        self.assertIn("Codex is running", text)
+        self.assertIn("chats: 1 to the cloud copy, 0 into .codex", text)
 
     def test_each_later_step_builds_its_plan_once(self) -> None:
         desktop, desktop_codex = self.machine("desktop")
@@ -538,6 +587,135 @@ class RunHandoffTests(_Workspace):
         self.assertEqual(status.pending, ("desktop",))
         self.assertEqual(status.working_elsewhere, ("desktop",))
         self.assertTrue(status.deliveries[0].delivered)
+
+
+class ContinuedOnBothMachinesTests(_Workspace):
+    """CS-417: one chat continued on both machines offline, end to end.
+
+    Each half was covered on its own -- the stop on a divergence, a bundle on a
+    decision, an in-place write of a fast-forward -- but no test crossed from a
+    decided divergence to the write over the file Codex's catalogue names.
+    The other machine's branch wins in both variants, so that write is the one
+    being proven.
+    """
+
+    SESSION = "66666666-6666-6666-6666-666666666666"
+
+    @staticmethod
+    def history(root: Path, session_id: str, *events: tuple[str, str]) -> Path:
+        path = root / "sessions" / "2026" / "10" / "01" / f"rollout-{session_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [{"type": "session_meta", "payload": {"id": session_id, "cwd": "C:/work"}}]
+        rows += [{"type": "event", "timestamp": stamp, "text": text} for stamp, text in events]
+        path.write_bytes(b"".join(json.dumps(row, sort_keys=True).encode() + b"\n" for row in rows))
+        return path
+
+    def two_machines_that_continued_one_chat(self, *, conflict_policy: str | None = None):
+        base = ("2026-10-01T10:00:00.000Z", "common")
+        desktop, desktop_codex = self.machine("desktop", conflict_policy=conflict_policy)
+        laptop, laptop_codex = self.machine("laptop", conflict_policy=conflict_policy)
+        self.history(desktop_codex, self.SESSION, base)
+        here = self.history(laptop_codex, self.SESSION, base)
+        connection = sqlite3.connect(laptop_codex / "state_5.sqlite")
+        try:
+            connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, archived INTEGER)")
+            connection.execute("INSERT INTO threads VALUES (?, ?, 0)", (self.SESSION, str(here)))
+            connection.commit()
+        finally:
+            connection.close()
+        run_handoff(desktop)
+        run_handoff(laptop)
+
+        # Offline on both: each adds its own turn to the common history. The
+        # desktop's is the later one, so `newer` keeps it too.
+        there = self.history(desktop_codex, self.SESSION, base, ("2026-10-03T10:00:00.000Z", "desktop"))
+        self.history(laptop_codex, self.SESSION, base, ("2026-10-02T10:00:00.000Z", "laptop"))
+        self.winner = there.read_bytes()
+        self.loser = here.read_bytes()
+        run_handoff(desktop)
+        return desktop, laptop, laptop_codex, here
+
+    def mirrored(self) -> bytes:
+        from codexsync.jsonl_codec import open_jsonl
+
+        (path,) = [path for path in self.cloud.rglob("rollout-*") if path.is_file()]
+        with open_jsonl(path) as handle:
+            return handle.read()
+
+    def assert_resolved_and_kept(self, laptop_codex: Path, here: Path, conflict_id: str) -> Path:
+        from codexsync.sqlite_audit import read_thread_placements
+
+        # (1) The winning branch is in .codex byte for byte, at the path the
+        # catalogue names, and it is the only file of the chat.
+        self.assertEqual(here.read_bytes(), self.winner)
+        placements = read_thread_placements(laptop_codex)
+        self.assertEqual(placements.by_session[self.SESSION], here.relative_to(laptop_codex).as_posix())
+        chat_files = [path for path in laptop_codex.rglob(f"rollout-{self.SESSION}*") if path.is_file()]
+        self.assertEqual(chat_files, [here], "one file for one chat")
+        # (2) Both branches are kept whole in the bundle the decision names.
+        bundle = self.workspace / "semantic" / "conflicts" / conflict_id
+        self.assertTrue((bundle / "COMMITTED").is_file())
+        kept = sorted((bundle / name).read_bytes() for name in ("left.jsonl", "right.jsonl"))
+        self.assertEqual(kept, sorted((self.winner, self.loser)))
+        # (3) The mirror holds the winner.
+        self.assertEqual(self.mirrored(), self.winner)
+        return bundle
+
+    def assert_quiet_afterwards(self, desktop: Path, laptop: Path, here: Path, bundle: Path) -> None:
+        # The bundle does not depend on a backup: every snapshot expiring
+        # takes nothing of it.
+        shutil.rmtree(self.workspace / "backups", ignore_errors=True)
+        before = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in bundle.iterdir()}
+        # (4) Nothing left to decide or write, on either machine.
+        for config in (desktop, laptop, desktop, laptop):
+            result = run_handoff(config)
+            self.assertEqual(result.session_actions, 0, config.parent.name)
+            self.assertEqual(result.chats_not_loaded, 0, config.parent.name)
+        self.assertEqual(here.read_bytes(), self.winner)
+        self.assertEqual(self.mirrored(), self.winner)
+        after = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in bundle.iterdir()}
+        self.assertEqual(after, before, "the bundle is never rewritten")
+        self.assertEqual(len(list(bundle.parent.iterdir())), 1, "one bundle for one conflict")
+
+    def test_a_person_keeps_the_other_machines_branch(self) -> None:
+        from codexsync.app import record_branch_resolution, scan_session_transfer, session_pair_name
+        from codexsync.exceptions import ChatDecisionsNeeded
+        from codexsync.semantic_transfer import save_transfer_plan
+
+        desktop, laptop, laptop_codex, here = self.two_machines_that_continued_one_chat(
+            conflict_policy="manual_abort",
+        )
+        with self.assertRaises(ChatDecisionsNeeded):
+            run_handoff(laptop)
+        self.assertEqual(here.read_bytes(), self.loser, "nothing written before the decision")
+
+        # What the Sessions page does: scan the pair, record the choice where
+        # the full sync looks for it.
+        plan = scan_session_transfer(laptop, source_machine="desktop", target_machine="laptop")
+        plans = self.workspace / "plans"
+        plan_path = save_transfer_plan(plan, plans / "decide.json")
+        (item,) = [item for item in plan.items if item.conflict_id]
+        record_branch_resolution(
+            plan_path, conflict_id=item.conflict_id, choice="KEEP_REMOTE",
+            output_path=plans / f"sessions-resolutions-{session_pair_name('desktop', 'laptop')}.json",
+        )
+
+        loaded = run_handoff(laptop)
+        self.assertEqual(loaded.session_actions, 1)
+        bundle = self.assert_resolved_and_kept(laptop_codex, here, item.conflict_id)
+        self.assert_quiet_afterwards(desktop, laptop, here, bundle)
+
+    def test_the_newer_rule_keeps_the_other_machines_branch(self) -> None:
+        from codexsync.semantic_transfer import load_transfer_plan
+
+        desktop, laptop, laptop_codex, here = self.two_machines_that_continued_one_chat()
+        loaded = run_handoff(laptop)
+        self.assertEqual(loaded.chats_decided_by_rule, 1)
+        self.assertEqual(loaded.session_actions, 1)
+        plan = load_transfer_plan(self.workspace / "plans" / "handoff-sessions-plan-desktop-laptop.json")
+        (item,) = [item for item in plan.items if item.conflict_id]
+        bundle = self.assert_resolved_and_kept(laptop_codex, here, item.conflict_id)
+        self.assert_quiet_afterwards(desktop, laptop, here, bundle)
 
 
 class WatchTests(_Workspace):

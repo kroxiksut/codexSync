@@ -64,6 +64,7 @@ from xml.etree import ElementTree
 from xml.sax.saxutils import escape as _xml_escape
 
 from .fs_replace import replace_with_retry
+from .program_file import frozen_program
 
 
 # --------------------------------------------------------------------------
@@ -211,10 +212,15 @@ def job_command(
     every minute or so and ``python.exe`` would flash a console window each
     time.
     """
-    exe = Path(sys.executable) if executable is None else Path(executable)
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    if executable is not None:
+        exe = Path(executable)
+    else:
+        # A frozen build's own file, which inside an AppImage is `$APPIMAGE`,
+        # never its temporary mount (CS-420).
+        exe = (frozen_program() if is_frozen else None) or Path(sys.executable)
     if not str(exe) or str(exe) == ".":
         raise ValueError("Cannot determine the interpreter that runs codexSync")
-    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     if is_frozen:
         return [str(exe)]
     if _platform_key(platform) == "windows":

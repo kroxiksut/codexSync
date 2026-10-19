@@ -29,10 +29,21 @@ from __future__ import annotations
 from enum import Enum
 import gzip
 import lzma
+import os
 from pathlib import Path
+import re
 import shutil
 from typing import BinaryIO
 import zlib
+
+try:  # Python 3.14+
+    from compression import zstd as _zstd
+except ImportError:  # pragma: no cover - depends on the interpreter
+    _zstd = None
+
+#: Whether this interpreter reads zstd: the standard library has it from
+#: Python 3.14 on (`compression.zstd`), and the core takes no dependency.
+ZSTD_READABLE = _zstd is not None
 
 
 #: Suffix a branch keeps in every container. What precedes it is the logical
@@ -54,7 +65,9 @@ _COPY_CHUNK = 1024 * 1024
 #: client writes on its own schedule, so every reader catches these together
 #: rather than dying with a traceback on a file that will be complete a second
 #: later.
-JSONL_READ_ERRORS: tuple[type[BaseException], ...] = (OSError, EOFError, lzma.LZMAError, zlib.error)
+JSONL_READ_ERRORS: tuple[type[BaseException], ...] = (OSError, EOFError, lzma.LZMAError, zlib.error) + (
+    (_zstd.ZstdError,) if _zstd is not None else ()
+)
 
 
 class JsonlCodec(str, Enum):
@@ -63,6 +76,11 @@ class JsonlCodec(str, Enum):
     NONE = "none"
     GZIP = "gzip"
     XZ = "xz"
+    #: Read only, and only where `ZSTD_READABLE` (CS-425): Codex 0.163 keeps
+    #: chats it has not touched for a while as `.jsonl.zst`. codexSync never
+    #: writes it -- not into `.codex`, which is always plain, and not into the
+    #: mirror, which an interpreter without zstd must still read.
+    ZSTD = "zstd"
 
     @property
     def suffix(self) -> str:
@@ -78,12 +96,20 @@ _SUFFIXES: dict[JsonlCodec, str] = {
     JsonlCodec.NONE: "",
     JsonlCodec.GZIP: ".gz",
     JsonlCodec.XZ: ".xz",
+    JsonlCodec.ZSTD: ".zst",
 }
+
+#: The containers codexSync writes, and the only ones `[semantic]
+#: mirror_compression` may name.
+WRITABLE_CODECS: tuple[JsonlCodec, ...] = (JsonlCodec.NONE, JsonlCodec.GZIP, JsonlCodec.XZ)
+#: The containers this interpreter reads. Without zstd a `.jsonl.zst` is not a
+#: known container at all, and `unsupported_container` reports it instead.
+READABLE_CODECS: tuple[JsonlCodec, ...] = WRITABLE_CODECS + ((JsonlCodec.ZSTD,) if ZSTD_READABLE else ())
 
 #: Longest suffix first, so ``.jsonl.gz`` is never read as ``.jsonl``.
 _BY_SUFFIX: tuple[tuple[str, JsonlCodec], ...] = tuple(
     sorted(
-        ((codec.file_suffix, codec) for codec in JsonlCodec),
+        ((codec.file_suffix, codec) for codec in READABLE_CODECS),
         key=lambda pair: len(pair[0]),
         reverse=True,
     )
@@ -99,6 +125,28 @@ def codec_of(name: str | Path) -> JsonlCodec | None:
     return None
 
 
+#: A branch in a container this version cannot open: one suffix after
+#: `.jsonl`. Codex itself stores chats so -- `rollout-...jsonl.zst` (zstd),
+#: first seen 2026-10-15 on Codex 0.163 for every chat not touched for a
+#: while, while its catalogue still names the plain `.jsonl` (CS-394).
+_UNSUPPORTED_CONTAINER = re.compile(r"\.jsonl\.([a-z0-9]{1,10})$", re.IGNORECASE)
+
+
+def unsupported_container(name: str | Path) -> str | None:
+    """The container suffix (``"zst"``) of a branch this version cannot read, or ``None``.
+
+    Such a file is still that chat's history: it is reported and blocks the
+    chat, never skipped -- a skipped copy made the chat look absent here, and
+    the mirror's older copy was then planned into `.codex` beside it. A
+    hidden name (a staging file) is never a branch.
+    """
+    text = name.name if isinstance(name, Path) else name
+    if text.startswith(".") or codec_of(text) is not None:
+        return None
+    match = _UNSUPPORTED_CONTAINER.search(text)
+    return match.group(1).lower() if match else None
+
+
 def is_branch_file(name: str | Path) -> bool:
     return codec_of(name) is not None
 
@@ -107,12 +155,35 @@ def logical_name(name: str) -> str:
     """The name this branch would have as plain JSONL.
 
     Two sides may store one branch in different containers, so anything that
-    compares or derives a path works on the logical name.
+    compares or derives a path works on the logical name -- a container this
+    version cannot read included.
     """
     codec = codec_of(name)
-    if codec is None or codec is JsonlCodec.NONE:
+    if codec is None:
+        unsupported = unsupported_container(name)
+        return name[: -(len(unsupported) + 1)] if unsupported else name
+    if codec is JsonlCodec.NONE:
         return name
     return name[: -len(codec.suffix)]
+
+
+def held_in_any_container(path: Path) -> bool:
+    """Whether the branch ``path`` names exists in some container, readable here or not.
+
+    Codex's catalogue names `x.jsonl` while the file is `x.jsonl.zst`, so a
+    plain existence check reports a chat Codex reads as gone. Reads only.
+    """
+    if os.path.lexists(path):
+        return True
+    base = logical_name(path.name).lower()
+    try:
+        names = os.listdir(path.parent)
+    except OSError:
+        return False
+    return any(
+        logical_name(name).lower() == base and (codec_of(name) is not None or unsupported_container(name))
+        for name in names
+    )
 
 
 def logical_relative_path(relative_path: str) -> str:
@@ -143,6 +214,10 @@ def open_jsonl(path: Path, codec: JsonlCodec | None = None) -> BinaryIO:
         return gzip.open(path, "rb")  # type: ignore[return-value]
     if codec is JsonlCodec.XZ:
         return lzma.open(path, "rb")  # type: ignore[return-value]
+    if codec is JsonlCodec.ZSTD:
+        if _zstd is None:
+            raise OSError(f"this Python cannot read zstd: {path.name}")
+        return _zstd.open(path, "rb")  # type: ignore[return-value]
     return path.open("rb")
 
 
@@ -157,6 +232,8 @@ def transcode(
     in one place is what keeps a compressed body from ever landing under a
     plain name.
     """
+    if destination_codec not in WRITABLE_CODECS:
+        raise ValueError(f"codexSync never writes {destination_codec.value}")
     if source_codec is destination_codec:
         shutil.copyfile(source, destination)
         return
@@ -191,8 +268,12 @@ def compress_file(source: Path, destination: Path, codec: JsonlCodec) -> None:
 
 
 def parse_codec(value: str) -> JsonlCodec:
+    """A container codexSync may write, as `[semantic] mirror_compression` names it."""
+    allowed = ", ".join(codec.value for codec in WRITABLE_CODECS)
     try:
-        return JsonlCodec(value)
+        codec = JsonlCodec(value)
     except ValueError as exc:
-        allowed = ", ".join(codec.value for codec in JsonlCodec)
         raise ValueError(f"unknown compression {value!r}; expected one of {allowed}") from exc
+    if codec not in WRITABLE_CODECS:
+        raise ValueError(f"compression {value!r} is read, never written; expected one of {allowed}")
+    return codec

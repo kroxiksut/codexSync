@@ -36,6 +36,7 @@ import sqlite3
 
 from .exceptions import FailSafeError
 from .fs_links import is_link as _is_link
+from .jsonl_codec import held_in_any_container
 from .sqlite_audit import BackfillReading, PlacementStatus, ThreadPlacements
 
 #: The status Codex writes when its backfill has run, and the one it starts from.
@@ -134,7 +135,8 @@ def find_unnamed_chat_files(state_root: Path, placements: ThreadPlacements) -> t
                 named = placements.placement_of(thread_id)
                 if named is None or named == relative:
                     continue
-                if not (root / Path(named)).is_file():
+                # Codex names `x.jsonl` and reads `x.jsonl.zst` (CS-394).
+                if not held_in_any_container(root / Path(named)):
                     found.append(relative)
     return tuple(sorted(found))
 

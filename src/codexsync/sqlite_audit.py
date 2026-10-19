@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 from pathlib import Path
+import re
 import sqlite3
 from typing import Callable, TypeVar
 from urllib.parse import quote
@@ -140,9 +141,16 @@ def read_thread_placements(
         return ThreadPlacements(
             PlacementStatus.INDETERMINATE, {}, codes=("CATALOG_UNAVAILABLE",)
         )
+    if _shape_unknown(shapes):
+        return ThreadPlacements(PlacementStatus.INDETERMINATE, {}, codes=(CATALOG_SHAPE_UNKNOWN,))
     catalogues = [item for item, shape in shapes if shape]
     if not catalogues:
         return ThreadPlacements(PlacementStatus.ABSENT, {})
+    if len(catalogues) > 1:
+        # Merging two would answer "where does Codex read this chat" from
+        # whichever was read last (CS-394), the same guess the backfill
+        # reading refuses.
+        return ThreadPlacements(PlacementStatus.INDETERMINATE, {}, codes=("SEVERAL_CATALOGUES",))
 
     by_session: dict[str, str | None] = {}
     archived: set[str] = set()
@@ -241,6 +249,8 @@ def _query_the_catalogue(
     shapes = [(item, _looks_like_thread_catalogue(root, item, timeout_seconds)) for item in discovered]
     if any(shape is None for _, shape in shapes):
         return PlacementStatus.INDETERMINATE, None, None, ("CATALOG_UNAVAILABLE",)
+    if _shape_unknown(shapes):
+        return PlacementStatus.INDETERMINATE, None, None, (CATALOG_SHAPE_UNKNOWN,)
     catalogues = [item for item, shape in shapes if shape]
     if not catalogues:
         return PlacementStatus.ABSENT, None, None, ()
@@ -467,6 +477,22 @@ def _wal_appeared(database: Path, opened_immutable: bool) -> bool:
     if not opened_immutable:
         return False
     return _has_pending_frames(database)
+
+
+#: Codex's state database exists, but its `threads` table is missing or lacks
+#: a column codexSync reads (CS-394). That is a catalogue in a format this
+#: version does not know, not the absence of one: `ABSENT` constrains nothing
+#: and let a new chat be written with no catalogue check at all.
+CATALOG_SHAPE_UNKNOWN = "CATALOG_SHAPE_UNKNOWN"
+_RUNTIME_STATE = re.compile(r"^state_\d+\.sqlite$", re.IGNORECASE)
+
+
+def _shape_unknown(shapes: list[tuple[SQLiteSet, bool | None]]) -> bool:
+    """Whether a `state_<n>.sqlite` was read and holds no catalogue this version recognises."""
+    return any(
+        shape is False and _RUNTIME_STATE.match(Path(item.database.relative_path).name)
+        for item, shape in shapes
+    )
 
 
 def _looks_like_thread_catalogue(root: Path, item: SQLiteSet, timeout_seconds: float) -> bool | None:

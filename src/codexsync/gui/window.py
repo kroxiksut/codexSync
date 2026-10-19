@@ -40,12 +40,15 @@ from . import BRAND_NAME
 from . import theme
 from .controller import ConfigInfo, Controller, Failure, Outcome
 from .i18n import Catalog, available_languages, load, pick_language
+from .jobs import JobBook, sharing_pages
 from .locations import (
     CONFIG_NAME,
     ConfigChoice,
     choose_config_path,
+    codex_folder_holding,
     frozen_executable_dir,
     read_config_pointer,
+    standard_config_path,
     write_config_pointer,
 )
 from .screens.about import AboutModel, AboutScreen
@@ -63,6 +66,7 @@ from .screens.no_config import NoConfigScreen
 from .screens.sessions import SessionsModel, SessionsScreen
 from .screens.settings import SettingsModel, SettingsScreen
 from .screens.sync import SyncModel, SyncScreen
+from .screens.tasks import TasksDialog
 from .widgets import JobRunner, button, install_wheel_guard, label, set_tone
 
 RESOURCES = Path(__file__).resolve().parent / "resources"
@@ -170,6 +174,8 @@ class MainWindow(QMainWindow):
         self._config_info: ConfigInfo | None = None
         #: Replaced in tests; a real window asks with a dialog.
         self.confirm: Callable[..., bool] = self._confirm_with_dialog
+        #: Replaced in tests; a real window tells with a dialog.
+        self.inform: Callable[[str, str], None] = self._inform_with_dialog
 
         if language is None:
             stored = self._setting(SETTING_LANGUAGE)
@@ -186,12 +192,12 @@ class MainWindow(QMainWindow):
 
         self._remember_config()
         self.setStatusBar(QStatusBar())
-        #: token -> (page, apply, cancellable, started, model); what the status
-        #: bar counts. The model is the one the job started with: after a switch
-        #: to another config file a late result must not land on the new pages.
-        self._active: dict[Any, tuple[str, Callable[[Any, Outcome], None], bool, float, Model]] = {}
-        #: token -> (phase, done, total); the last report a running read made.
-        self._progress: dict[Any, tuple[str, int, int]] = {}
+        #: Every running job by token, and the last few that ended: what the
+        #: status bar counts and the task list shows. A job keeps the model it
+        #: started with: after a switch to another config file a late result
+        #: must not land on the new pages.
+        self._jobs_book = JobBook()
+        self._tasks_dialog: TasksDialog | None = None
         #: Bumped whenever the same config file is saved. A read started under
         #: an older generation built its result from the previous rules, and
         #: is not delivered as if it had not (see `run`).
@@ -247,6 +253,8 @@ class MainWindow(QMainWindow):
         *,
         cancellable: bool = False,
         progress: bool = False,
+        kind: str | None = None,
+        dry_run: bool = False,
     ) -> None:
         """Run ``call`` off the UI thread and apply its outcome to the page's model.
 
@@ -259,14 +267,24 @@ class MainWindow(QMainWindow):
         report how far it has got. Reports arrive on this thread through the
         runner's slot and are kept per job, so the status bar and the page can
         both show the same number without either of them polling.
+
+        ``kind`` names the work (`jobs.JOB_KINDS`) for the task list. A kind
+        offered on several pages (`jobs.SHARED_KINDS`) is busy on all of them
+        while it runs, and its outcome is handed to each of their models
+        (`Model.receive`), so a dry run started on Overview is the one the
+        Synchronisation page shows (CS-336).
         """
-        key: list[Any] = [None]
+        key: list[Any] = [object()]
         model = self._models[page]
         generation = self._generation
+        self._jobs_book.start(
+            key[0], page=page, kind=kind, apply=apply, model=model,
+            cancellable=cancellable, dry_run=dry_run,
+        )
 
         def done(outcome: Outcome) -> None:
-            self._active.pop(key[0], None)
-            self._progress.pop(key[0], None)
+            if self._jobs_book.finish(key[0], outcome) is None:
+                return  # abandoned: the "stopped waiting" outcome was applied already
             stale = cancellable and generation != self._generation
             if stale:
                 # The file was saved while this read ran: `config_changed`
@@ -278,68 +296,108 @@ class MainWindow(QMainWindow):
             apply(model, outcome)
             if stale:
                 model.reset_plans()
+            current = self._models[page] is model
+            if current and not stale:
+                for other in sharing_pages(kind, page):
+                    self._models[other].receive(kind, outcome)
             screen = self._screens.get(page)
-            if screen is not None and self._models[page] is model:
+            if screen is not None and current:
                 screen.render()
                 if stale and self._stack.currentWidget() is screen:
                     # A page that reads on arrival reads again now.
                     screen.activated()
+            if current:
+                self._render_pages(sharing_pages(kind, page))
             self._update_activity()
 
         def report(phase: str, count: int, total: int) -> None:
-            if key[0] not in self._active:
+            if not self._jobs_book.report(key[0], phase, count, total):
                 return
-            self._progress[key[0]] = (phase, count, total)
             self._update_activity()
-            screen = self._screens.get(page)
+            if self._models[page] is model:
+                self._render_pages((page, *sharing_pages(kind, page)))
+
+        token = self._jobs.start(call, done, report) if progress else self._jobs.start(call, done)
+        if key[0] in self._jobs_book.running:
+            if token is not None:
+                self._jobs_book.retoken(key[0], token)
+                key[0] = token
+            # The other pages offering this work are busy from now on.
+            self._render_pages(sharing_pages(kind, page))
+            self._update_activity()
+
+    def busy(self, kind: str) -> bool:
+        """Is work of ``kind`` running for the pages of the config open now?"""
+        return self._jobs_book.busy(kind, self._models.values())
+
+    def jobs(self) -> JobBook:
+        """What runs and what ended lately; the task list draws it."""
+        return self._jobs_book
+
+    def _render_pages(self, pages) -> None:
+        for name in pages:
+            screen = self._screens.get(name)
             if screen is not None:
                 screen.render()
 
-        key[0] = object()
-        self._active[key[0]] = (page, apply, cancellable, time.monotonic(), model)
-        started = self._jobs.start(call, done, report) if progress else self._jobs.start(call, done)
-        token = started
-        if key[0] in self._active:
-            if token is not None:
-                entry = self._active.pop(key[0])
-                carried = self._progress.pop(key[0], None)
-                key[0] = token
-                self._active[token] = entry
-                if carried is not None:
-                    self._progress[token] = carried
-            self._update_activity()
+    def cancel_job(self, token: Any) -> bool:
+        """Stop waiting for one cancellable (read-only) job. False if it cannot be."""
+        job = self._jobs_book.running.get(token)
+        if job is None or not job.cancellable or not self._jobs.abandon(token):
+            return False
+        self._jobs_book.finish(token, None, abandoned=True)
+        job.apply(job.model, Outcome(failure=Failure.STOPPED_SAFELY, message=self._catalog.text("activity.cancelled")))
+        if self._models.get(job.page) is job.model:
+            self._render_pages((job.page, *sharing_pages(job.kind, job.page)))
+        self._update_activity()
+        return True
 
     def cancel_waiting(self) -> None:
         """Stop waiting for every cancellable (read-only) job."""
-        for token, (page, apply, cancellable, _, model) in list(self._active.items()):
-            if not cancellable or not self._jobs.abandon(token):
-                continue
-            self._active.pop(token, None)
-            self._progress.pop(token, None)
-            apply(model, Outcome(failure=Failure.STOPPED_SAFELY, message=self._catalog.text("activity.cancelled")))
-            screen = self._screens.get(page)
-            if screen is not None and self._models[page] is model:
-                screen.render()
+        for token, job in list(self._jobs_book.running.items()):
+            if job.cancellable:
+                self.cancel_job(token)
         self._update_activity()
 
-    def progress_text(self, page: str) -> str:
-        """The latest "reading 120 of 252" line for this page, or nothing."""
-        for token, (running_page, _apply, _cancellable, _started, model) in self._active.items():
-            report = self._progress.get(token)
-            if running_page != page or report is None or self._models[page] is not model:
+    def job_title(self, kind: str | None, page: str, *, dry_run: bool = False, cancellable: bool = False) -> str:
+        """What a job is, in words: its kind's sentence, else its page's."""
+        key = f"job.{kind}" if kind else ""
+        if key and self._catalog.has(key):
+            title = self._catalog.text(key)
+        else:
+            title = self._catalog.text(
+                "job.page.read" if cancellable else "job.page.write", page=self._catalog.text(f"nav.{page}")
+            )
+        return self._catalog.text("job.as_dry_run", job=title) if dry_run else title
+
+    def phase_text(self, report: tuple[str, int, int] | None) -> str:
+        """``Reading sessions 120 of 252`` for a progress report, or ''."""
+        if report is None:
+            return ""
+        phase, count, total = report
+        key = f"progress.phase.{phase}"
+        name = self._catalog.text(key) if self._catalog.has(key) else phase
+        if total <= 0:
+            return name
+        return self._catalog.text("progress.of", phase=name, done=count, total=total)
+
+    def progress_text(self, page: str, kind: str | None = None) -> str:
+        """The latest "reading 120 of 252" line for this page -- or for ``kind`` -- or nothing."""
+        for job in self._jobs_book.running.values():
+            if job.progress is None or self._models.get(job.page) is not job.model:
                 continue
-            phase, count, total = report
-            key = f"progress.phase.{phase}"
-            name = self._catalog.text(key) if self._catalog.has(key) else phase
-            if total <= 0:
-                return name
-            return self._catalog.text("progress.of", phase=name, done=count, total=total)
+            if (kind is not None and job.kind == kind) or (kind is None and job.page == page):
+                return self.phase_text(job.progress)
         return ""
 
     def _update_activity(self) -> None:
         if not hasattr(self, "_activity_label"):
             return
-        count = len(self._active)
+        running = self._jobs_book.running
+        count = len(running)
+        self._activity_open.setVisible(bool(running or self._jobs_book.recent))
+        if self._tasks_dialog is not None:
+            self._tasks_dialog.render()
         if count == 0:
             self._activity_timer.stop()
             self._activity_label.setText("")
@@ -351,24 +409,36 @@ class MainWindow(QMainWindow):
             return
         if not self._activity_timer.isActive():
             self._activity_timer.start()
-        oldest = min(started for _, _, _, started, _ in self._active.values())
-        reported = next(iter(sorted(self._progress.values(), key=lambda item: -item[2])), None)
+        oldest = min(job.started for job in running.values())
+        reported = next(iter(sorted(
+            (job.progress for job in running.values() if job.progress is not None), key=lambda item: -item[2],
+        )), None)
         if reported is not None and reported[2] > 0:
-            phase, done, total = reported
-            key = f"progress.phase.{phase}"
-            name = self._catalog.text(key) if self._catalog.has(key) else phase
+            _phase, done, total = reported
             self._activity_bar.setRange(0, total)
             self._activity_bar.setValue(done)
-            self._activity_label.setText(
-                self._catalog.text("progress.of", phase=name, done=done, total=total)
-            )
+            self._activity_label.setText(self.phase_text(reported))
         else:
             self._activity_bar.setRange(0, 0)
             self._activity_label.setText(self._catalog.plural(
                 "activity.running", count, seconds=int(time.monotonic() - oldest)
             ))
         self._activity_bar.setVisible(True)
-        self._activity_cancel.setVisible(any(cancellable for _, _, cancellable, _, _ in self._active.values()))
+        self._activity_cancel.setVisible(any(job.cancellable for job in running.values()))
+
+    def show_tasks(self) -> None:
+        """Open the task list (CS-337): what runs, from where, how far; what ended."""
+        if self._tasks_dialog is None:
+            self._tasks_dialog = TasksDialog(self)
+            self._tasks_dialog.finished.connect(self._tasks_closed)
+        self._tasks_dialog.render()
+        self._tasks_dialog.show()
+        self._tasks_dialog.raise_()
+
+    def _tasks_closed(self, *_: object) -> None:
+        dialog, self._tasks_dialog = self._tasks_dialog, None
+        if dialog is not None:
+            dialog.deleteLater()
 
     def go_to(self, page: str, target: str | None = None) -> None:
         """Show ``page``; with ``target``, also the place on it a message named.
@@ -463,7 +533,19 @@ class MainWindow(QMainWindow):
             self._remember(self._controller.config_path)
 
     def open_config(self, path: Path) -> None:
-        """Switch the whole window to another existing config file."""
+        """Switch the whole window to another existing config file.
+
+        A file in Codex's own folder is Codex's configuration (CS-412): the
+        window says so and stays on the file it has, instead of switching to
+        one whose every page would fail.
+        """
+        folder = codex_folder_holding(Path(path))
+        if folder is not None:
+            self.inform(
+                self._catalog.text("config.codex_folder.title"),
+                self._catalog.text("config.codex_folder.body", path=path, folder=folder),
+            )
+            return
         self.config_changed(Path(path))
 
     def _remembered_size(self) -> tuple[int, int]:
@@ -718,7 +800,7 @@ class MainWindow(QMainWindow):
     def _update_status_bar(self) -> None:
         bar = self.statusBar()
         bar.showMessage(self._config_line())
-        for name in ("_activity_bar", "_activity_label", "_activity_cancel"):
+        for name in ("_activity_bar", "_activity_label", "_activity_cancel", "_activity_open"):
             old = getattr(self, name, None)
             if old is not None:
                 bar.removeWidget(old)
@@ -732,9 +814,16 @@ class MainWindow(QMainWindow):
         self._activity_cancel = QPushButton(self._catalog.text("activity.cancel"))
         self._activity_cancel.setObjectName("statusAction")
         self._activity_cancel.clicked.connect(self.cancel_waiting)
+        self._activity_open = QPushButton(self._catalog.text("activity.open"))
+        self._activity_open.setObjectName("statusAction")
+        self._activity_open.clicked.connect(self.show_tasks)
         bar.addPermanentWidget(self._activity_label)
         bar.addPermanentWidget(self._activity_bar)
         bar.addPermanentWidget(self._activity_cancel)
+        bar.addPermanentWidget(self._activity_open)
+        if self._tasks_dialog is not None:
+            # A language switch rebuilds everything; the open list follows.
+            self._tasks_dialog.rebuild()
         self._update_activity()
 
     # --- theme -------------------------------------------------------------------
@@ -743,6 +832,14 @@ class MainWindow(QMainWindow):
         self._build(self._stack.currentIndex())
 
     # --- dialogs -----------------------------------------------------------------
+
+    def _inform_with_dialog(self, title: str, text: str) -> None:  # pragma: no cover - modal
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle(title)
+        box.setText(title)
+        box.setInformativeText(text)
+        box.exec()
 
     def _confirm_with_dialog(
         self, title: str, text: str, confirm_label: str, *, details: str | None = None
@@ -787,6 +884,10 @@ def launch(config: str | Path | Controller | None = None) -> int:
     _claim_taskbar_identity()
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(BRAND_NAME)
+    # The menu entry a Linux package or AppImage installs is codexsync.desktop;
+    # without this name GNOME on Wayland cannot tie the window to it and shows
+    # a generic icon in the dock. Elsewhere it is ignored.
+    app.setDesktopFileName("codexsync")
     app.setStyle("Fusion")
     if APP_ICON.is_file():
         app.setWindowIcon(QIcon(str(APP_ICON)))
@@ -800,7 +901,7 @@ def launch(config: str | Path | Controller | None = None) -> int:
         remembered = read_config_pointer() or settings.value(LEGACY_SETTING_CONFIG)
         settings.remove(LEGACY_SETTING_CONFIG)
         choice = choose_config_path(
-            config, remembered, executable_dir=frozen_executable_dir(),
+            config, remembered, executable_dir=frozen_executable_dir(), standard=standard_config_path(),
         )
         controller = Controller(choice.path)
     window = MainWindow(controller, settings=settings, choice=choice, remember=write_config_pointer)

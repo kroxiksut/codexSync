@@ -74,9 +74,18 @@ class SessionsModel(Model):
         #: A rule chosen on this page for every conflict of the next scans of
         #: this pair, instead of `[conflict] policy`. ``None`` follows the config.
         self.rule: str | None = None
+        #: A decision was recorded on this page for this pair: the page then
+        #: says what comes next and offers the sync that applies it (CS-343).
+        self.decided = False
+
+    def receive(self, kind: str, outcome: Outcome) -> None:
+        if kind == "chat_list":
+            # The Projects page read the same list (CS-336).
+            self.directory = outcome
 
     def reset_plans(self) -> None:
         self.rule = None
+        self.decided = False
         self.scan = None
         self.action_result = None
         self.scope = None
@@ -194,6 +203,18 @@ class SessionsScreen(Screen):
         plan_inner.addWidget(self.status)
         self.body.addWidget(plan)
 
+        # After a decision: what comes next, and the sync that applies it, in
+        # place of "now go back and find the right button" (CS-343).
+        self.after_frame, after_inner = card()
+        self.after_text = label("", wrap=True)
+        self.after_sync = button(self.t("sessions.after.sync"), primary=True)
+        self.after_sync.clicked.connect(self.sync_with_decisions)
+        line = row(self.after_text, self.after_sync, stretch_last=False, spacing=18)
+        line.setStretchFactor(self.after_text, 1)
+        after_inner.addLayout(line)
+        # Right under the list of chats, where the decision was just made.
+        self.body.insertWidget(self.body.indexOf(frame) + 1, self.after_frame)
+
         self.index_summary = label()
         index, index_inner = card(self.t("sessions.index.title"), self.index_summary)
         index_inner.addWidget(label(self.t("sessions.index.caption"), "muted", wrap=True))
@@ -215,7 +236,7 @@ class SessionsScreen(Screen):
             model.index_busy = False
             model.index = outcome
 
-        self.read(self.host.controller.session_index, apply)
+        self.read(self.host.controller.session_index, apply, kind="session_index")
 
     def _render_index(self) -> None:
         model = self.model
@@ -346,11 +367,12 @@ class SessionsScreen(Screen):
             return
         self.model.source, self.model.target = self._pair()
         self.model.rule = None
+        self.model.decided = False
         self.load_working_set()
 
     def load_projects(self) -> None:
         """Read the chats once, to draw the tree of projects."""
-        if self.model.directory_busy:
+        if self.model.directory_busy or self.shared_busy("chat_list"):
             return
         self.model.directory_busy = True
 
@@ -360,7 +382,7 @@ class SessionsScreen(Screen):
 
         self.read(
             lambda progress=None: self.host.controller.chats(progress=progress),
-            apply, progress=True,
+            apply, progress=True, kind="chat_list",
         )
 
     def _scope_changed(self, item, column: int) -> None:
@@ -411,7 +433,7 @@ class SessionsScreen(Screen):
                 projects=projects, chats=chats,
                 source_machine=source, target_machine=target, progress=progress,
             ),
-            apply, progress=True,
+            apply, progress=True, kind="working_set",
         )
 
     def clear_working_set(self) -> None:
@@ -451,7 +473,7 @@ class SessionsScreen(Screen):
             lambda: controller.save_working_set(
                 projects=(), chats=(), source_machine=source, target_machine=target,
             ),
-            apply,
+            apply, kind="working_set",
         )
 
     def _scope_key(self) -> tuple:
@@ -556,8 +578,23 @@ class SessionsScreen(Screen):
             lambda progress=None: controller.scan_sessions(
                 source_machine=source, target_machine=target, progress=progress, conflict_policy=rule,
             ),
-            apply, progress=True,
+            apply, progress=True, kind="sessions_scan",
         )
+
+    def sync_with_decisions(self) -> None:
+        """Go to Synchronisation and run the full sync these decisions are for.
+
+        Recorded choices are read by every full sync of this pair; a rule
+        chosen here is not in the config, so that sync runs with it, as the
+        Synchronisation page's own answer buttons do. Either asks first there.
+        """
+        rule = self.model.rule
+        self.host.go_to("sync")
+        sync = self.host.screen("sync")
+        if rule:
+            sync.decide(rule)
+        else:
+            sync.start_run(dry_run=False)
 
     def decide_all(self, policy: str) -> None:
         """Scan again with every conflict decided by ``policy``.
@@ -568,6 +605,7 @@ class SessionsScreen(Screen):
         if self.model.busy or self.model.action_busy:
             return
         self.model.rule = policy
+        self.model.decided = True
         self.scan()
 
     def resolve(self) -> None:
@@ -601,10 +639,11 @@ class SessionsScreen(Screen):
             if outcome.ok:
                 model.scan = outcome
                 model.action_result = Outcome(value="resolved")
+                model.decided = True
             else:
                 model.action_result = outcome
 
-        self.run(go, apply)
+        self.run(go, apply, kind="sessions_resolve")
 
     def resolve_format_migrations(self) -> None:
         model = self.model
@@ -631,10 +670,11 @@ class SessionsScreen(Screen):
             if outcome.ok:
                 model.scan = outcome
                 model.action_result = Outcome(value="resolved")
+                model.decided = True
             else:
                 model.action_result = outcome
 
-        self.run(go, apply)
+        self.run(go, apply, kind="sessions_resolve")
 
     def apply(self, *, dry_run: bool) -> None:
         model = self.model
@@ -662,7 +702,10 @@ class SessionsScreen(Screen):
             if outcome.ok and not dry_run:
                 model.scan = None
 
-        self.run(lambda: controller.apply_sessions(scan, confirm_plan=plan.plan_id, dry_run=dry_run), apply)
+        self.run(
+            lambda: controller.apply_sessions(scan, confirm_plan=plan.plan_id, dry_run=dry_run), apply,
+            kind="sessions_apply", dry_run=dry_run,
+        )
 
     def _category_changed(self) -> None:
         self.model.category = self.category.currentData() or ""
@@ -689,7 +732,7 @@ class SessionsScreen(Screen):
         elif model.scan is None:
             self.banner.show_message("neutral", "", "", palette)
         elif not model.scan.ok:
-            self.banner.show_message("danger", self.headline(model.scan.failure), model.scan.message, palette)
+            self.banner.show_message("danger", self.headline(model.scan.failure), self.refusal_text(model.scan), palette)
         else:
             plan = scan.plan
             decide = sum(1 for item in plan.items if CATEGORIES.get(item.action.value) == "decide")
@@ -757,8 +800,20 @@ class SessionsScreen(Screen):
         enabled = bool(conflict) and not self.model.action_busy
         self.choice.setEnabled(enabled)
         self.resolve_button.setEnabled(enabled)
+        # The two choices name the machines, so "this machine" and "the
+        # cloud" are never a riddle (CS-343).
+        machines = {"KEEP_LOCAL": self.model.target or "?", "KEEP_REMOTE": self.model.source or "?"}
+        for index in range(self.choice.count()):
+            value = self.choice.itemData(index)
+            if value in machines:
+                self.choice.setItemText(index, self.t(f"sessions.choice.{value}", machine=machines[value]))
         if conflict:
-            self.resolution_hint.setText(self.t("sessions.resolve.hint", conflict_id=conflict[:16]))
+            item = items[0]
+            self.resolution_hint.setText(self.t(
+                "sessions.resolve.hint",
+                chat=scan.titles.get(item.session_hash) or item.session_hash[:12],
+                local=item.local_records, remote=item.remote_records,
+            ))
         else:
             self.resolution_hint.setText(self.t("sessions.resolve.select"))
         conflicts = scan is not None and any(
@@ -823,6 +878,19 @@ class SessionsScreen(Screen):
         self.status.setText(text)
         set_tone(self.status, tone, palette)
         self.status.setVisible(bool(text))
+        self._render_after(scan)
+
+    def _render_after(self, scan) -> None:
+        model = self.model
+        shown = bool(model.decided and scan is not None and not scan.plan.volatile and not model.busy)
+        self.after_frame.setVisible(shown)
+        if not shown:
+            return
+        left = sum(1 for item in scan.plan.items if CATEGORIES.get(item.action.value) == "decide")
+        self.after_text.setText(self.p("sessions.after.left", left) if left else self.t("sessions.after.ready"))
+        set_tone(self.after_text, "attention" if left else "ok", self.palette_)
+        self.after_sync.setVisible(not left)
+        self.after_sync.setEnabled(not (model.action_busy or self.shared_busy("dry_run", "full_sync")))
 
 
 #: Notes about chats a plan does not carry, as opposed to notes about what it

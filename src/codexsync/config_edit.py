@@ -35,7 +35,7 @@ import tempfile
 import tomllib
 from typing import Any
 
-from .config import _paths_overlap, decode_config_bytes, parse_config_text
+from .config import _paths_overlap, decode_config_bytes, parse_config_text, require_config_outside_codex
 from .exceptions import ConfigError, ConflictError, FailSafeError
 from .guardian_models import require_guardian_machine_id
 from .models import AppConfig
@@ -927,6 +927,7 @@ class ConfigHistoryEntry:
 
 
 def read_config_document(path: Path) -> ConfigDocument:
+    require_config_outside_codex(path)
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
     try:
@@ -1096,13 +1097,7 @@ def create_config(
 
 
 def _require_outside_state_dir(cfg: AppConfig, path: Path) -> None:
-    state_dir = cfg.paths.local_state_dir
-    if state_dir is None:
-        return
-    target = path.resolve()
-    root = state_dir.resolve()
-    if target == root or root in target.parents:
-        raise ConfigError(f"The config file must be outside paths.local_state_dir: {path}")
+    require_config_outside_codex(path, cfg.paths.local_state_dir)
 
 
 def _read_if_present(path: Path) -> bytes | None:
@@ -1117,14 +1112,14 @@ def _read_if_present(path: Path) -> bytes | None:
 def _require_expected_base(path: Path, current: bytes | None, expected_sha256: str | None) -> None:
     if current is None:
         if expected_sha256 is not None:
-            raise ConflictError(f"{path.name} was removed on disk since it was opened; reload it")
+            raise ConflictError(f"{path.name} was removed on disk since it was opened; reload it", code="CONFIG_REMOVED_ON_DISK", params={"name": path.name})
         return
     if expected_sha256 is None:
         raise ConflictError(
-            f"{path.name} already exists; open it before saving so an edit made elsewhere is not overwritten"
+            f"{path.name} already exists; open it before saving so an edit made elsewhere is not overwritten", code="CONFIG_NOT_OPENED", params={"name": path.name}
         )
     if _sha256(current) != expected_sha256.lower():
-        raise ConflictError(f"{path.name} changed on disk since it was opened; reload it")
+        raise ConflictError(f"{path.name} changed on disk since it was opened; reload it", code="CONFIG_CHANGED_ON_DISK", params={"name": path.name})
 
 
 def _bytes_validate(data: bytes, path: Path) -> bool:

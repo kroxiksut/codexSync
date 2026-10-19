@@ -25,6 +25,11 @@ ENV/
 .idea/
 .vscode/
 
+# Local agent state and skills (junctions to private material outside the repo)
+.claude/
+.agents/
+.codex/
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -51,6 +56,7 @@ config.local.toml
 CLAUDE.md
 # Exception: user-facing translations are tracked (docs/ru/*.md never matches *.ru.md)
 !README.ru.md
+!ROADMAP.ru.md
 
 # Saved operation plans: local, machine-specific, and pinned to state bytes
 sessions-plan.json

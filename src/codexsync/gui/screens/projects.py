@@ -88,6 +88,11 @@ class ProjectsModel(Model):
         self.places_whole_folder = True
         self.place_result: Outcome | None = None
 
+    def receive(self, kind: str, outcome: Outcome) -> None:
+        if kind == "chat_list":
+            # The Sessions page read the same list (CS-336).
+            self.directory = outcome
+
     def reset_plans(self) -> None:
         self.directory = None
         self.scan = None
@@ -386,7 +391,7 @@ class ProjectsScreen(Screen):
             model.places_busy = False
             model.places = outcome
 
-        self.read(lambda: self.host.controller.project_places(), apply)
+        self.read(lambda: self.host.controller.project_places(), apply, kind="project_places")
 
     def _toggle_places_all(self, checked: bool) -> None:
         self.model.places_all = checked
@@ -431,7 +436,7 @@ class ProjectsScreen(Screen):
             if outcome.ok:
                 model.places = outcome
 
-        self.run(call, apply)
+        self.run(call, apply, kind="project_place")
 
     def _render_place_buttons(self) -> None:
         item = self._chosen_place()
@@ -508,7 +513,7 @@ class ProjectsScreen(Screen):
             model.files_busy = False
             model.files = outcome
 
-        self.read(lambda: self.host.controller.project_files(), apply)
+        self.read(lambda: self.host.controller.project_files(), apply, kind="project_files")
 
     def _render_files(self) -> None:
         model = self.model
@@ -569,7 +574,7 @@ class ProjectsScreen(Screen):
     # --- actions -----------------------------------------------------------------------
 
     def refresh(self) -> None:
-        if self.model.busy:
+        if self.model.busy or self.shared_busy("chat_list"):
             return
         self.model.busy = True
         self.render()
@@ -580,7 +585,7 @@ class ProjectsScreen(Screen):
 
         self.read(
             lambda progress=None: self.host.controller.chats(progress=progress),
-            apply, progress=True,
+            apply, progress=True, kind="chat_list",
         )
 
     def scan(self) -> None:
@@ -607,7 +612,7 @@ class ProjectsScreen(Screen):
             lambda progress=None: controller.scan_repair(
                 source_machine=source, target_machine=target, progress=progress,
             ),
-            apply, progress=True,
+            apply, progress=True, kind="repair_scan",
         )
 
     def apply(self, *, dry_run: bool) -> None:
@@ -636,7 +641,10 @@ class ProjectsScreen(Screen):
                 model.scan = None
                 model.directory = None
 
-        self.run(lambda: controller.apply_repair(scan, confirm_plan=plan.plan_id, dry_run=dry_run), apply)
+        self.run(
+            lambda: controller.apply_repair(scan, confirm_plan=plan.plan_id, dry_run=dry_run), apply,
+            kind="repair_apply", dry_run=dry_run,
+        )
 
     # --- moving a project ------------------------------------------------------------------
 
@@ -681,7 +689,10 @@ class ProjectsScreen(Screen):
             if (model.move_project, model.move_target) == (project, target):
                 model.move_scan = outcome
 
-        self.read(lambda: controller.scan_project_move(project_id=project, new_root=Path(target)), apply)
+        self.read(
+            lambda: controller.scan_project_move(project_id=project, new_root=Path(target)), apply,
+            kind="project_move_scan",
+        )
 
     def apply_move(self, *, dry_run: bool) -> None:
         model = self.model
@@ -716,7 +727,10 @@ class ProjectsScreen(Screen):
                 model.move_checked = None
                 model.directory = None
 
-        self.run(lambda: controller.apply_project_move(scan, confirm_plan=plan_id, dry_run=dry_run), apply)
+        self.run(
+            lambda: controller.apply_project_move(scan, confirm_plan=plan_id, dry_run=dry_run), apply,
+            kind="project_move", dry_run=dry_run,
+        )
 
     def _fill_move_projects(self) -> None:
         outcome = self.model.directory
@@ -810,13 +824,14 @@ class ProjectsScreen(Screen):
     def render(self) -> None:
         model = self.model
         palette = self.palette_
-        self.refresh_button.setEnabled(not model.busy)
+        listing = model.busy or self.shared_busy("chat_list")
+        self.refresh_button.setEnabled(not listing)
         self.scan_button.setEnabled(not (model.scan_busy or model.action_busy))
 
         outcome = model.directory
         self.lost_button.setVisible(False)
-        if model.busy:
-            self.banner.show_message("neutral", self.t("projects.loading"), self.progress_text(), palette)
+        if listing:
+            self.banner.show_message("neutral", self.t("projects.loading"), self.progress_text("chat_list"), palette)
             self.projects.setRowCount(0)
             self.summary.setText("")
         elif outcome is None:
@@ -824,7 +839,7 @@ class ProjectsScreen(Screen):
             self.projects.setRowCount(0)
             self.summary.setText("")
         elif not outcome.ok:
-            self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
             self.projects.setRowCount(0)
             self.summary.setText("")
         else:

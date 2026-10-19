@@ -40,6 +40,7 @@ import zipfile
 from .config import load_config
 from .exceptions import ConfigError, FailSafeError
 from .guardian_models import ValidationStatus
+from .guardian_restore import carries_project_state
 from .guardian_schema import validate_global_state_references
 from .models import AppConfig, SyncPlan
 from .mutation_journal import (
@@ -332,7 +333,7 @@ def rollback_operation(
         raise FailSafeError(f"Operation {journal.operation_id} cannot be rolled back: {refusal}")
     snapshot = _locate_snapshot(cfg.paths.backup_dir, journal.backup_snapshot)
     if snapshot is None:  # _rollback_refusal proved it is there; re-checked, never assumed
-        raise FailSafeError(f"Backup snapshot {journal.backup_snapshot} is not in the backup directory")
+        raise FailSafeError(f"Backup snapshot {journal.backup_snapshot} is not in the backup directory", code="ROLLBACK_SNAPSHOT_MISSING", params={"snapshot": journal.backup_snapshot})
     if not _backup_manifest_path(snapshot).is_file():
         # finalize() runs before the first replace, so an unstamped snapshot
         # means no destination was replaced.
@@ -361,7 +362,7 @@ def rollback_operation(
         ):
             # Re-read under the lock: another `recover` may have closed it.
             if store.load(journal.operation_id) != journal:
-                raise FailSafeError(f"Operation {journal.operation_id} changed while the rollback was prepared")
+                raise FailSafeError(f"Operation {journal.operation_id} changed while the rollback was prepared", code="STATE_CHANGED_RETRY")
             rollback.recheck()
             _close(store, journal)
             restored = rollback.execute(cfg, gate)
@@ -533,7 +534,7 @@ class _GlobalStateRollback(_Rollback):
         except OSError as exc:
             raise FailSafeError(f"{_GLOBAL_STATE_FILE} cannot be read: {exc}") from exc
         if current != self.live:
-            raise FailSafeError(f"{_GLOBAL_STATE_FILE} changed while the rollback was prepared; run it again")
+            raise FailSafeError(f"{_GLOBAL_STATE_FILE} changed while the rollback was prepared; run it again", code="STATE_CHANGED_RETRY")
 
     def execute(self, cfg: AppConfig, gate) -> int:
         # `app` imports this module; the envelope is reached lazily.
@@ -583,6 +584,15 @@ def _plan_global_state_rollback(snapshot: Path, local_root: Path, target: str | 
         raise FailSafeError(
             f"The live global state is schema {live_report.schema_id!r} and the snapshot's is "
             f"{report.schema_id!r}; Codex changed its format since, so the old state is not written back"
+        )
+    if live_report.schema_id is None and carries_project_state(live):
+        # Projects in a shape no adapter knows: Codex wrote a newer format
+        # after this operation, and the old one is not written over it
+        # (CS-394) -- the rule `guardian restore` applies. A live file that is
+        # not JSON at all is still put back: that is damage, not a format.
+        raise FailSafeError(
+            "The live global state holds projects in a format this version does not know; Codex changed "
+            "its format since, so the old state is not written back"
         )
     return _GlobalStateRollback(source, live, candidate)
 

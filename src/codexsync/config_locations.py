@@ -30,7 +30,9 @@ from pathlib import Path
 import sys
 import tempfile
 
+from .config import codex_folder_holding
 from .fs_replace import replace_with_retry
+from .program_file import frozen_program
 
 CONFIG_NAME = "config.toml"
 #: The file holding the path of the config the window last opened.
@@ -83,6 +85,19 @@ def pointer_path() -> Path:
     return root / "codexsync" / POINTER_NAME
 
 
+def standard_config_path() -> Path:
+    """The standard place for this machine's CodexSync config (CS-410, U-11 option C).
+
+    Beside the pointer, local and never roaming: `%LOCALAPPDATA%\\CodexSync`
+    on Windows, `~/Library/Application Support/CodexSync` on macOS,
+    `$XDG_CONFIG_HOME/codexsync` (else `~/.config/codexsync`) on Linux. It is
+    only ever *offered*: the window writes it into the field on a button, the
+    file is created by *Create*, and the search looks there last. Nothing
+    creates a config here on its own (CS-258, CS-268).
+    """
+    return pointer_path().with_name(CONFIG_NAME)
+
+
 def cache_dir() -> Path:
     """The application's own cache folder: numbers that are slow to compute.
 
@@ -128,7 +143,7 @@ def write_config_pointer(config: Path, pointer: Path | None = None) -> bool:
     step, so a reader never sees half a path.
     """
     config = Path(config)
-    if not config.is_file() or is_under_temp(config):
+    if not config.is_file() or is_under_temp(config) or codex_folder_holding(config) is not None:
         return False
     target = pointer if pointer is not None else pointer_path()
     try:
@@ -150,13 +165,16 @@ def choose_config_path(
     *,
     cwd: Path | None = None,
     executable_dir: Path | None = None,
+    standard: Path | None = None,
 ) -> ConfigChoice:
     """Pick the config file to open.
 
     ``-c`` wins even when the file is absent: naming a path that does not exist
     yet is a request to create it there, not a typo to route around. Everything
-    after it is tried only if the file is actually there. When nothing is,
-    the answer has no path at all.
+    after it is tried only if the file is actually there: the remembered path,
+    the current folder, the program's folder, then ``standard`` (the standard
+    place, `standard_config_path`, which callers pass). When nothing is, the
+    answer has no path at all.
     """
     if explicit is not None:
         path = Path(explicit).expanduser()
@@ -167,26 +185,41 @@ def choose_config_path(
     if remembered is not None:
         candidate = Path(remembered).expanduser()
         # A remembered path is only a hint, and a hint pointing into the
-        # temporary directory is not one worth following.
-        if is_under_temp(candidate):
+        # temporary directory -- or into Codex's own folder -- is not one
+        # worth following.
+        if is_under_temp(candidate) or codex_folder_holding(candidate) is not None:
             rejected = candidate
         else:
             ordered.append((candidate, "remembered"))
     ordered.append(((cwd or Path.cwd()) / CONFIG_NAME, "cwd"))
     if executable_dir is not None:
         ordered.append((Path(executable_dir) / CONFIG_NAME, "executable"))
+    if standard is not None:
+        ordered.append((Path(standard), "standard"))
 
     for path, source in ordered:
-        if path.is_file():
+        # A start from inside `.codex` finds Codex's own `config.toml` here
+        # (CS-412); only `-c` may name such a file, and loading refuses it.
+        if path.is_file() and codex_folder_holding(path) is None:
             return ConfigChoice(path, source, True, rejected)
     return ConfigChoice(None, "none", False, rejected)
 
 
 def frozen_executable_dir() -> Path | None:
-    """The folder of a PyInstaller build, or ``None`` in a source checkout."""
-    if not getattr(sys, "frozen", False):
+    """Where a frozen build's own file lies, for the "beside the program" search.
+
+    ``None`` in a source checkout, and also for a folder this user cannot write
+    (a package installs into one only root may change): a config there could
+    never be saved, so it is not looked for (CS-420). Inside an AppImage this
+    is the AppImage's folder, not its temporary mount (`program_file`).
+    """
+    program = frozen_program()
+    if program is None:
         return None
-    return Path(sys.executable).resolve().parent
+    folder = program.parent
+    if not sys.platform.startswith("win") and not os.access(folder, os.W_OK):
+        return None
+    return folder
 
 
 __all__ = [
@@ -194,9 +227,11 @@ __all__ = [
     "cache_dir",
     "ConfigChoice",
     "choose_config_path",
+    "codex_folder_holding",
     "frozen_executable_dir",
     "is_under_temp",
     "pointer_path",
     "read_config_pointer",
+    "standard_config_path",
     "write_config_pointer",
 ]

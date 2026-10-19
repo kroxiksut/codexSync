@@ -123,13 +123,18 @@ class ThreadPlacementTests(unittest.TestCase):
         self._catalogue([("thread-d", str(target), 1)])
         self.assertIn("thread-d", read_thread_placements(self.root).archived)
 
-    def test_a_database_without_the_columns_is_not_a_catalogue(self) -> None:
+    def test_a_state_database_without_the_columns_is_an_unknown_shape(self) -> None:
+        # CS-394: Codex's catalogue in a shape this version does not read is
+        # not the absence of one -- `ABSENT` would let a chat be written with
+        # no catalogue check at all.
         database = self.root / "state_8.sqlite"
         connection = sqlite3.connect(database)
         connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, archived INTEGER)")
         connection.commit()
         connection.close()
-        self.assertIs(read_thread_placements(self.root).status, PlacementStatus.ABSENT)
+        placements = read_thread_placements(self.root)
+        self.assertIs(placements.status, PlacementStatus.INDETERMINATE)
+        self.assertEqual(placements.codes, ("CATALOG_SHAPE_UNKNOWN",))
 
     def test_reading_leaves_the_database_untouched(self) -> None:
         target = self.root / "sessions" / "e.jsonl"

@@ -250,6 +250,8 @@ Both executables are published by the same manual workflow.
   | `codexsync-gui-<tag>-windows-arm64.zip` | window + command line | `windows-11-arm` |
   | `codexsync-<tag>-windows-amd64.zip` | command line | `windows-latest` |
   | `codexsync-<tag>-windows-arm64.zip` | command line | `windows-11-arm` |
+  | `codexsync-<tag>-linux-amd64.{deb,rpm,AppImage,tar.gz}` | window + command line (section D) | `ubuntu-22.04` |
+  | `codexsync-<tag>-linux-arm64.{deb,rpm,AppImage,tar.gz}` | window + command line (section D) | `ubuntu-24.04-arm` |
   | `codexsync-<version>-py3-none-any.whl`, `codexsync-<version>.tar.gz` | the package PyPI gets | `ubuntu-latest` |
 
 - There is no 32-bit build: Codex itself is published for x64 and ARM64 only
@@ -260,5 +262,60 @@ Both executables are published by the same manual workflow.
   --version` names the release and that `scripts/check_exe_version.py` reads the
   expected version resource back out of every exe.
 - Minimum versions the builds carry: Windows 10 (1809) or later for the window
-  (Qt 6); the command-line builds run on Python 3.12's own minimum, but only
+  (Qt 6); the command-line builds run on Python 3.14's own minimum, but only
   Windows 10 and 11 are tested.
+- The programs are built with Python 3.14 because it is the first whose
+  standard library reads zstd (`compression.zstd`): Codex 0.163 keeps chats it
+  has not touched for a while as `.jsonl.zst`, and an older interpreter can
+  only block them (CS-394/CS-425). Keep the `exe` job at 3.14 or later; a pip
+  install on 3.11-3.13 works, with those chats blocked.
+
+## D. Linux packages
+
+D-037: the same frozen build packed four ways — `.deb`, `.rpm`, AppImage and
+`tar.gz` — for x64 and ARM64, and never snap or Flatpak.
+
+- **The build** is `codexsync-linux.spec`: one folder (`dist/codexsync`) with
+  both programs, `codexsync` (no Qt) and `codexsync-gui` (the window, and the
+  command line when given a command), over one shared `_internal`. A folder,
+  not one file per program: a one-file build unpacks itself into `/tmp` on
+  every start, and the scheduler starts it every half hour. Qt modules the
+  window never loads (QML, Quick, PDF, the on-screen keyboard, EGLFS and other
+  embedded platforms, network status) are left out in the spec.
+- **The base system** is the oldest the PySide6 of the Windows builds runs on:
+  glibc 2.35 (Ubuntu 22.04) for x64, 2.39 (Ubuntu 24.04) for ARM64. Python
+  3.14 comes from `setup-python`, which links `libpython` dynamically as
+  PyInstaller needs. Desktop Codex supports Ubuntu 24.04/26.04, Debian 13 and
+  Fedora 43/44; 22.04 is covered for people who run only Codex CLI there.
+- **Packing** is `scripts/linux_packages.py --tag <tag>`. It fetches nfpm,
+  appimagetool and the static AppImage runtime at the versions
+  `packaging/linux/tools.json` pins and refuses a file whose SHA-256 differs.
+  To move a tool to a newer release, take the new hashes from its release
+  page and change version and hashes together.
+- **What a package does:** the folder under `/opt/codexsync`, both commands
+  linked into `/usr/bin`, a menu entry and a 256-pixel icon. No install or
+  remove script exists, so a package never creates or deletes anything in a
+  home directory — not the config, the workspace, `.codex` or a scheduler
+  task. The install pages say to run `automation remove` before removing it.
+- **The dependencies** a package declares are the system half of Qt (OpenGL
+  and EGL, fontconfig, xkbcommon, D-Bus, the X11 and Wayland client
+  libraries); `DEB_DEPENDS` and `RPM_DEPENDS` in the script, one per family.
+- **The `linux-check` job** installs each file on a clean container of its
+  family — the `.deb` on `ubuntu:24.04`, the `.rpm` on `fedora:43`, the
+  AppImage and the `tar.gz` on the oldest base — with
+  `scripts/linux_package_check.sh`: both programs report the version; for the
+  packages, every library the programs and the xcb, Wayland and offscreen
+  platforms need resolves (`ldd`; a theme or input-device plugin without its
+  libraries is reported, not refused), the window starts offscreen and stays
+  up, removal leaves nothing in `/opt` or `/usr/bin`, and no home directory
+  changed. PyPI and the GitHub release wait for it.
+- **Local smoke test** on any Linux (or WSL) with Python 3.11 or later:
+
+  ```sh
+  python3 -m venv .venv && .venv/bin/pip install -e ".[gui]" pyinstaller
+  .venv/bin/python -m PyInstaller --clean --noconfirm codexsync-linux.spec
+  .venv/bin/python scripts/linux_packages.py --tag v0.0.0-local --out release
+  ```
+
+- **The package Maintainer field** holds the author's name from
+  `pyproject.toml` and no address, since none is published there.

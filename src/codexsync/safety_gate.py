@@ -136,8 +136,14 @@ class SafetyGate:
         if decision.allowed:
             return decision
         if decision.process_state is ProcessState.RUNNING:
-            raise SafetyPreconditionError(f"Codex is running; {operation.value} requires it to be stopped. {decision.reason}")
-        raise FailSafeError(f"Cannot safely verify Codex process state for {operation.value}. {decision.reason}")
+            raise SafetyPreconditionError(
+                f"Codex is running; {operation.value} requires it to be stopped. {decision.reason}",
+                code="CODEX_RUNNING",
+            )
+        raise FailSafeError(
+            f"Cannot safely verify Codex process state for {operation.value}. {decision.reason}",
+            code="CODEX_STATE_UNKNOWN",
+        )
 
     def _sample_state(self) -> tuple[ProcessState, str]:
         try:

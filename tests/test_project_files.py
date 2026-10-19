@@ -18,6 +18,8 @@ import unittest
 from codexsync.app import check_project_files, run_handoff
 from codexsync.project_files import (
     FilesKind,
+    FilesState,
+    SecretRule,
     Verdict,
     compare,
     read_files_board,
@@ -102,6 +104,123 @@ class PlainFolderTests(_Workspace):
         state = read_files_state(self.root / "nowhere")
         self.assertIs(state.kind, FilesKind.MISSING)
         self.assertIs(compare(self.root / "nowhere", state, read_files_state(there)).verdict, Verdict.MISSING_HERE)
+
+
+class SecretFileTests(_Workspace):
+    """D-038: a plain folder's secrets go out without their hash unless chosen.
+
+    The publication sits in a cloud folder, and a short secret in a known
+    format can be found from its SHA-256 by guessing.
+    """
+
+    def folder(self, name: str = "here") -> Path:
+        root = self.root / name
+        write(root / ".env", "TOKEN=abc")
+        write(root / "keys" / "server.PEM", "-----BEGIN-----")
+        write(root / "ssh" / "id_ed25519", "private")
+        write(root / "ssh" / "id_ed25519.pub", "public")
+        write(root / "config" / "keys" / "db.yml", "password: x")
+        write(root / "notes.md", "plain")
+        return root
+
+    def read_without_opening_secrets(self, root: Path, rule: SecretRule, cache: Path | None = None) -> FilesState:
+        import codexsync.project_files as module
+
+        real = module._hash
+        opened: list[str] = []
+
+        def spy(path: Path) -> str:
+            opened.append(path.relative_to(root).as_posix())
+            return real(path)
+
+        from unittest import mock
+
+        with mock.patch.object(module, "_hash", side_effect=spy):
+            state = read_files_state(root, secrets=rule, cache_root=cache)
+        self.opened = sorted(opened)
+        return state
+
+    def test_by_default_a_secret_has_size_and_time_but_no_hash_and_is_never_opened(self) -> None:
+        root = self.folder()
+        cache = self.root / "cache"
+        state = self.read_without_opening_secrets(root, SecretRule(patterns=("config/keys/**",)), cache)
+        self.assertEqual(self.opened, ["notes.md", "ssh/id_ed25519.pub"])
+        for path in (".env", "keys/server.PEM", "ssh/id_ed25519", "config/keys/db.yml"):
+            size, digest, mtime = state.entries[path]
+            self.assertIsNone(digest, path)
+            self.assertGreater(size, 0)
+            self.assertGreater(mtime, 0)
+            self.assertEqual(state.secret[path], "no_hash")
+        self.assertIsNotNone(state.entries["notes.md"][1])
+        cached = json.loads(next(cache.glob("*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(sorted(cached), ["notes.md", "ssh/id_ed25519.pub"])
+
+    def test_presence_publishes_the_name_alone(self) -> None:
+        root = self.folder()
+        state = self.read_without_opening_secrets(root, SecretRule("presence"))
+        self.assertEqual(state.entries[".env"], (0, None, 0))
+        self.assertEqual(state.to_json()["entries"][".env"], [0, None, 0])
+        self.assertEqual(state.secret[".env"], "presence")
+        self.assertEqual(FilesState.from_json(state.to_json()), state)
+
+    def test_hash_keeps_the_old_behaviour(self) -> None:
+        root = self.folder()
+        state = self.read_without_opening_secrets(root, SecretRule("hash"))
+        self.assertIn(".env", self.opened)
+        self.assertIsNotNone(state.entries[".env"][1])
+        self.assertEqual(state.secret, {})
+
+    def test_a_hash_cached_before_is_dropped_once_secrets_go_unhashed(self) -> None:
+        root = self.folder()
+        cache = self.root / "cache"
+        read_files_state(root, secrets=SecretRule("hash"), cache_root=cache)
+        read_files_state(root, cache_root=cache)
+        cached = json.loads(next(cache.glob("*.json")).read_text(encoding="utf-8"))
+        self.assertNotIn(".env", cached)
+
+    def test_two_machines_with_different_settings_compare_by_what_both_published(self) -> None:
+        here, there = self.folder("here"), self.folder("there")
+        for root in (here, there):
+            for path in root.rglob("*"):
+                if path.is_file():
+                    os.utime(path, ns=(5_000_000_000, 5_000_000_000))
+        hashed = read_files_state(here, secrets=SecretRule("hash"))
+        for rule in (SecretRule("no_hash"), SecretRule("presence")):
+            other = read_files_state(there, secrets=rule)
+            self.assertIs(compare(here, hashed, other).verdict, Verdict.IN_STEP, rule.mode)
+            self.assertIs(compare(there, other, hashed).verdict, Verdict.IN_STEP, rule.mode)
+
+    def test_presence_never_says_newer_there_but_still_says_missing(self) -> None:
+        here, there = self.root / "here", self.root / "there"
+        write(here / ".env", "old")
+        write(there / ".env", "newer and longer")
+        write(there / ".env.local", "only there")
+        os.utime(here / ".env", ns=(1_000_000_000, 1_000_000_000))
+        os.utime(there / ".env", ns=(9_000_000_000, 9_000_000_000))
+        under_no_hash = compare(here, read_files_state(here), read_files_state(there))
+        self.assertEqual(under_no_hash.newer_there, (".env",))
+        result = compare(
+            here, read_files_state(here, secrets=SecretRule("presence")), read_files_state(there),
+        )
+        self.assertEqual((result.newer_there, result.missing_here), ((), (".env.local",)))
+
+    def test_a_full_sync_publishes_no_hash_of_a_secret(self) -> None:
+        desktop, desktop_codex = self.machine("desktop")
+        self.machine("laptop")
+        work = self.folder("desktop-work")
+        FullSyncTests.codex_state(self, desktop_codex, {"proj": work})  # type: ignore[arg-type]
+        with desktop.open("a", encoding="utf-8") as handle:
+            handle.write('\n[project_files]\nsecret_files = "presence"\nsecret_patterns = ["config/keys/**"]\n')
+        run_handoff(desktop)
+        published = read_files_board(self.workspace / "project-files").publications["desktop"]
+        state = published.projects["proj"]["state"]
+        for path in (".env", "keys/server.PEM", "ssh/id_ed25519", "config/keys/db.yml"):
+            self.assertEqual(state.entries[path], (0, None, 0), path)
+        raw = next((self.workspace / "project-files").glob("desktop*.json")).read_text(encoding="utf-8")
+        from codexsync.project_files import _hash
+
+        self.assertNotIn(_hash(work / ".env"), raw)
+        self.assertIn(_hash(work / "notes.md"), raw)
 
 
 def make_writable(root: Path) -> None:

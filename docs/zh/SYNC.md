@@ -11,7 +11,7 @@
 ## 命令
 
 ```powershell
-codexsync -c config.toml plan              # 一次同步会复制什么；Codex 开着也能用
+codexsync -c config.toml plan              # 一次同步会做什么（文件、聊天、项目）；Codex 开着也能用
 codexsync -c config.toml -v plan           # 同上，外加看到的 Codex 进程
 codexsync -c config.toml sync --dry-run    # 同步的全部检查，不写入任何内容
 codexsync -c config.toml sync --apply      # 真正的同步
@@ -21,8 +21,8 @@ codexsync -c config.toml sync --apply      # 真正的同步
 始终需要 `--apply`。
 
 **`sync` 同步什么**由 `[sync] scope` 决定。设为 `full`（默认）时，它就是窗口里的“同步”：
-设置文件、对话和项目——与 [`handoff sync`](#在电脑之间交接工作) 是同一次运行，试运行会构建
-其中每一个计划。设为 `settings` 时，只复制 `targets.include_roots` 下的文件，也就是
+设置文件、对话和项目——与 [`handoff sync`](#在电脑之间交接工作) 是同一次运行，试运行会在 Codex 关闭时构建
+其中每一个计划；`plan` 在 Codex 开着时构建它们，并把结果标记为 volatile，与窗口中的「试运行」相同。设为 `settings` 时，只复制 `targets.include_roots` 下的文件，也就是
 0.2 之前 `sync` 所做的全部。`--scope` 只对一次运行生效，`--direction`（`bidirectional`、`to_cloud`、`to_local`）则在一次运行中替代 `sync.direction`——“同步”按钮旁的「本次运行」下拉框作用相同。登录时的任务运行的是 `sync`，
 因此遵循同一设置。
 

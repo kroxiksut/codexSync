@@ -116,7 +116,7 @@ class HomeScreen(Screen):
             model.busy = False
             model.summary = outcome
 
-        self.read(self.host.controller.home, apply)
+        self.read(self.host.controller.home, apply, kind="home")
 
     def recount(self) -> None:
         """Scan the chats now; the tile shows the new counts when it is done."""
@@ -131,7 +131,7 @@ class HomeScreen(Screen):
             model.recount_busy = False
             model.recount = outcome
 
-        self.read(lambda progress=None: controller.recount_state(progress=progress), apply, progress=True)
+        self.read(lambda progress=None: controller.recount_state(progress=progress), apply, progress=True, kind="recount")
 
     # --- drawing -----------------------------------------------------------------
 
@@ -143,7 +143,7 @@ class HomeScreen(Screen):
         if outcome is None:
             self.banner.show_message("neutral", self.t("banner.reading") if self.model.busy else "", "", palette)
         elif not outcome.ok:
-            self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
         else:
             tone = {"stopped": "ok", "running": "attention"}.get(summary.codex, "attention")
             self.banner.show_message(

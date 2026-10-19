@@ -30,7 +30,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `config roots` | 否 | 列出 `.codex` 与云端副本的一层内容，用于选择 `targets.include_roots` | [见下](#窗口与控制台) |
 | `config history` | 否 | `config.toml` 的已保存版本 | [见下](#窗口与控制台) |
 | `doctor` / `preflight` | 否 | 环境诊断；两者相同且无副作用 | [见下](#上手) |
-| `plan` | 否 | 显示一次同步会复制什么（Codex 开着时标记为 `volatile`） | [同步](SYNC.md) |
+| `plan` | 否 | 显示一次同步会做什么——在 `scope = "full"` 下包括文件、聊天和项目，与窗口中的「试运行」相同（Codex 开着时标记为 `volatile`） | [同步](SYNC.md) |
 | `sync` | **是** | 设置、对话和项目，与“同步”按钮相同（`[sync] scope`；`--scope settings` 只复制文件；`--direction` 单次指定方向），先备份 | [同步](SYNC.md) |
 | `restore` | **是** | 从经过校验的备份还原文件 | [恢复](RECOVERY.md#还原一份备份) |
 | `guardian watch` | 否 | 在 Codex 运行期间持续拍摄全局状态的快照 | [守护](GUARDIAN.md) |
@@ -58,6 +58,8 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `sessions catalogue` | **是** | 列出 Codex 不显示的聊天文件；加 `--confirm-plan` 时请 Codex 重建聊天列表 | [会话](SESSIONS.md#写入-codex) |
 | `codex check` | 否 | Codex 为什么可能无法启动或不显示聊天；只读取 | [恢复](RECOVERY.md#codex-无法启动时) |
 | `codex repair` | **是** | 预览，或加 `--confirm-plan` 执行 `codex check` 给出的修复 | [恢复](RECOVERY.md#codex-无法启动时) |
+| `codex processes` | 否 | 进程检查看到了哪些 Codex 进程，按进程号和规则列出；不需要配置，不打印路径，不写入任何内容 | [平台](README.md#平台) |
+| `shortcut install` / `remove` / `status` | 否 | Linux：把窗口加入当前用户的应用程序菜单（适用于 pipx、虚拟环境、AppImage 或 `tar.gz`）；不需要配置，只写入 `~/.local/share` | [安装](README.md#在-linux-上) |
 | `chats list` / `chats tree` | 否 | 查找对话，看每个对话属于哪个项目 | [项目](PROJECTS.md#对话) |
 | `chats move` | **是** | 把选定的对话放到一个项目下 | [项目](PROJECTS.md#把对话移到某个项目) |
 | `projects sync` | **是** | 把其他电脑的项目列表合并到本机，再发布本机的列表（不带 `--confirm-plan` 时只是预览） | [项目](PROJECTS.md#机器之间的项目) |
@@ -97,8 +99,14 @@ codexsync init-config --output config.toml --machine-id laptop-1 --local-state-d
 ### 打开的是哪个配置
 
 `-c` 指明文件，而指向一个还不存在的路径就是要求在那里创建它。配置可以放在任何
-文件夹里。不带 `-c` 时，搜索顺序与窗口一致：窗口上次打开的配置，然后是当前目录下
-的 `config.toml`，再然后是可执行文件旁边。如果都没有，命令以退出码 4 结束并说明
+文件夹里，但 Codex 自己的文件夹除外（`.codex`、`CODEX_HOME` 或 `paths.local_state_dir`）：
+Codex 在那里保存它自己的 `config.toml`，所以该文件夹里的文件在读取之前就会以退出码 4
+被拒绝，搜索也从不选中它。不带 `-c` 时，搜索顺序与窗口一致：窗口上次打开的配置，然后是当前目录下
+的 `config.toml`，再然后是可执行文件旁边，最后是标准位置 —— 下文所述指针文件旁边的
+`config.toml`（Windows 上为 `%LOCALAPPDATA%\CodexSync\config.toml`，macOS 上为
+`~/Library/Application Support/CodexSync/config.toml`，Linux 上为
+`$XDG_CONFIG_HOME/codexsync/config.toml`）。不会有任何东西自行在那里创建配置：窗口用一个
+按钮提供这个位置，`init-config` 在把文件写到别处之后会说明它。如果都没有，命令以退出码 4 结束并说明
 如何指定 —— 绝不会替你编造一个位置。在当前目录以外找到的文件会被明确说明，这样
 命令就不会悄悄地对着一个你没在看的文件工作。
 
@@ -116,10 +124,16 @@ codexsync -c config.toml doctor
 ```
 
 `doctor`（以及与它相同的 `preflight`）只读取、不创建任何东西 —— 尤其不会在 `.codex`
-里面创建。它会检查配置和各个目录、Codex 是否在运行、全局状态的结构与最近一张可还原的
+里面创建。它首先给出 Codex 的版本，并用一个结论说明 codexSync 是否认识它写入的每一种格式
+（`codex_compat`：某一部分格式不认识 —— Codex 用本版本读不了的容器保存的聊天、形式不认识的
+聊天列表或项目 —— 会作为警告列出哪些写入被关闭）。然后它会检查配置和各个目录、Codex 是否在运行、全局状态的结构与最近一张可还原的
 快照、会话文件与会话索引、SQLite 线程目录、一次同步被允许做什么、同步清单、遗留的
 临时文件、Codex 能否启动（`codex_startup`：卡住的聊天列表重建在 `codex repair` 把它设回之前
 算作失败），以及是否有未完成的写操作仍在阻止一切写入（在 `recover` 关闭它之前算作失败）。
+
+`doctor --report` 以 JSON 打印同一次读取的结果，供提交 issue 使用：codexSync、Python、操作系统和
+Codex 的版本，本机有哪些格式和闸门，每项检查的状态（不含详情，详情里有路径）以及各项计数 ——
+不含任何名称、路径、标题或聊天 id，可以原样粘贴。
 
 ## 窗口与控制台
 

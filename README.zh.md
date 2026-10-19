@@ -78,9 +78,7 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 **使用 Python 3.11+**，在 Windows、macOS 或 Linux 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1；
 加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
 写入会被拒绝；在 Linux 上它已经得到验证（[平台](docs/zh/README.md#平台)）。在 Linux 上系统自带的 Python 不允许 `pip install`（PEP 668），
-请安装到虚拟环境中：
-`python3 -m venv ~/.venvs/codexsync && ~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"`
-（在 Ubuntu 和 Debian 上先执行 `sudo apt install python3-venv`）。
+请使用 `pipx` 或虚拟环境——两种方式及其更新和卸载见[在 Linux 上安装](docs/zh/README.md#在-linux-上)。
 
 ```powershell
 python -m pip install --upgrade --pre "codexsync[gui]"    # 窗口和命令行
@@ -108,7 +106,7 @@ codexsync -c config.toml doctor
 | [备份与恢复](docs/zh/RECOVERY.md) | 备份、还原、被中断的写操作、Codex 无法启动时 |
 
 全部页面汇总在一处：[docs/](docs/README.zh.md)。面向贡献者（均为英文）：
-[开发者文档](docs/dev/README.md)。更新日志：[CHANGELOG.md](./CHANGELOG.md)。
+[开发者文档](docs/dev/README.md)。更新日志：[CHANGELOG.md](./CHANGELOG.md)。后续计划（英文）：[ROADMAP.md](./ROADMAP.md)。
 
 ## 状态
 
@@ -122,13 +120,23 @@ codexsync -c config.toml doctor
 
 在有人于 Mac 上对着真实的 Codex 看到进程检查正常工作之前，macOS 上的写入一直关闭。
 这是我们最先需要的，而且很简单：在终端里运行一条只读取正在运行的程序列表的命令。
-它不需要安装 codexSync，不碰 `~/.codex`，也不改变任何东西。
+它不需要配置，不碰 `~/.codex`，什么都不写入——连日志文件也不写——也不打印任何路径或命令行，
+所以输出可以原样粘贴：
+
+```sh
+codexsync codex processes
+```
+
+它显示安全检查会据以判断的内容：每个匹配的程序的进程号、父进程号和短名称，以及匹配它的规则——
+名称，或桌面应用对应的 `ChatGPT.app/Contents/MacOS/` 标记。在 Mac 上，检查在得到验证之前读作
+`UNKNOWN`；下面一行说明如果信任它，它会读到什么。这需要 codexSync 0.2.0a2 或更新版本。
+不安装任何东西时，可以用下面的命令查看原始列表（路径中可能含有你的用户名）：
 
 ```sh
 ps -A -o pid=,ppid=,comm= | grep -i -E 'codex|chatgpt'
 ```
 
-它为路径中含有 Codex 或 ChatGPT 的每个程序打印一行：进程号、父进程号和程序路径。请在以下情况各运行一次：
+请在以下情况各运行一次：
 
 1. Codex 完全退出时（⌘Q，而不只是关闭窗口）；
 2. Codex 打开时；
@@ -137,8 +145,7 @@ ps -A -o pid=,ppid=,comm= | grep -i -E 'codex|chatgpt'
 
 对你使用的每个 Codex 客户端都这样做——桌面应用（现在名为 ChatGPT）、`codex` 命令行、
 VS Code 或 Cursor 中的扩展——然后连同 macOS 版本和应用或 CLI 的版本一起
-[把输出发给我们](https://github.com/kroxiksut/codexSync/issues/new?template=macos_process_check.yml)。
-路径中可能含有你的用户名，愿意的话可以替换掉。Mac 与其他机器之间的完整交接是下一步，
+[把输出发给我们](https://github.com/kroxiksut/codexSync/issues/new?template=macos_process_check.yml)。Mac 与其他机器之间的完整交接是下一步，
 等那里的写入开放之后再做。
 
 **从 0.1 升级。** codexSync 0.2 能识别 0.1 创建的配置，并就地升级它——在窗口里，或用
@@ -151,6 +158,5 @@ VS Code 或 Cursor 中的扩展——然后连同 macOS 版本和应用或 CLI �
 
 ## 许可
 
-双重许可：开源部分采用 `GPL-3.0-or-later`（[LICENSE](./LICENSE)），商业路径见
-[COMMERCIAL_LICENSE.md](./COMMERCIAL_LICENSE.md)。贡献按
-[CONTRIBUTING.md](./CONTRIBUTING.md) 和 [CLA.md](./CLA.md) 的条款接受。
+开源，采用 `GPL-3.0-or-later`（[LICENSE](./LICENSE)）。贡献按同一许可接受，无需另签任何协议；
+见 [CONTRIBUTING.md](./CONTRIBUTING.md)。

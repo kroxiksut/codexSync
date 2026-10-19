@@ -31,7 +31,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `config roots` | no | One level of `.codex` and the cloud copy, to choose `targets.include_roots` | [below](#the-window-from-the-console) |
 | `config history` | no | Saved versions of `config.toml` | [below](#the-window-from-the-console) |
 | `doctor` / `preflight` | no | Environment diagnostics; identical and side-effect free | [below](#getting-started) |
-| `plan` | no | Show what a sync would copy (marked `volatile` if Codex is open) | [Sync](SYNC.md) |
+| `plan` | no | Show what a sync would do — at `scope = "full"` files, chats and projects, as the window's *Dry run* (marked `volatile` if Codex is open) | [Sync](SYNC.md) |
 | `sync` | **yes** | Settings, chats and projects, as *Synchronise* does (`[sync] scope`; `--scope settings` copies files only; `--direction` for one run), backup first | [Sync](SYNC.md) |
 | `restore` | **yes** | Restore files from a verified backup | [Recovery](RECOVERY.md#restoring-a-backup) |
 | `guardian watch` | no | Keep taking snapshots of the global state while Codex runs | [Guardian](GUARDIAN.md) |
@@ -59,6 +59,8 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `sessions catalogue` | **yes** | List chat files Codex does not show; with `--confirm-plan`, ask Codex to rebuild its chat list | [Sessions](SESSIONS.md#writing-into-codex) |
 | `codex check` | no | Why Codex may not start or show your chats; reads only | [Recovery](RECOVERY.md#when-codex-does-not-start) |
 | `codex repair` | **yes** | Preview, or with `--confirm-plan` apply, the repair `codex check` offers | [Recovery](RECOVERY.md#when-codex-does-not-start) |
+| `codex processes` | no | Which Codex processes the process check sees, by pid and rule; needs no config, prints no path, writes nothing | [Platforms](README.md#platforms) |
+| `shortcut install` / `remove` / `status` | no | Linux: put the window in this user's applications menu (for pipx, a virtual environment, the AppImage or the `tar.gz`); needs no config, writes only into `~/.local/share` | [Install](README.md#on-linux) |
 | `chats list` / `chats tree` | no | Find chats and see which project each is in | [Projects](PROJECTS.md#chats) |
 | `chats move` | **yes** | Put chosen chats under one project | [Projects](PROJECTS.md#moving-chats-to-a-project) |
 | `projects sync` | **yes** | Merge other machines' project lists into this one, then publish this one's (preview without `--confirm-plan`) | [Projects](PROJECTS.md#projects-between-machines) |
@@ -101,10 +103,18 @@ codexsync init-config --output config.toml --machine-id laptop-1 --local-state-d
 ### Which config is opened
 
 `-c` names the file, and naming one that does not exist yet is a request to
-create it there. The config can live in any folder you like. Without `-c` the
+create it there. The config can live in any folder you like except Codex's own
+(`.codex`, `CODEX_HOME`, or `paths.local_state_dir`): Codex keeps a `config.toml`
+of its own there, so a file in that folder is refused with exit code 4 before it
+is read, and a search never picks it. Without `-c` the
 search is the same one the window does: the config the window last opened,
-then `config.toml` in the current folder, then beside the executable. If none
-of them has a file, the command stops with exit code 4 and says how to name
+then `config.toml` in the current folder, then beside the executable, then the
+standard place — `config.toml` beside the pointer file below
+(`%LOCALAPPDATA%\CodexSync\config.toml` on Windows,
+`~/Library/Application Support/CodexSync/config.toml` on macOS,
+`$XDG_CONFIG_HOME/codexsync/config.toml` on Linux). Nothing creates a config
+there by itself: the window offers it with a button, and `init-config` names it
+after writing a file elsewhere. If none of them has a file, the command stops with exit code 4 and says how to name
 one — no location is ever made up for you. A file found anywhere but the
 current folder is announced, so a command never works quietly on a file you
 are not looking at.
@@ -125,13 +135,22 @@ codexsync -c config.toml doctor
 ```
 
 `doctor` (and its twin `preflight`) reads only and creates nothing — least of all
-inside `.codex`. It checks the configuration and directories, whether Codex is
+inside `.codex`. It first gives Codex's version and one answer to whether
+codexSync knows every format it writes into (`codex_compat`: a part in an
+unknown format — chats Codex keeps in a container this version cannot read, a
+chat list or projects in an unknown shape — is a warning naming the writes
+that are off). Then it checks the configuration and directories, whether Codex is
 running, whether Codex can start (`codex_startup`: a rebuild of its chat list
 left stuck is a failure until `codex repair` sets it back), the global-state
 schema and the latest restorable snapshot, session files and the session index,
 the SQLite thread catalogue, what a sync is allowed to do, the sync manifest,
 leftover temporary files, and whether an unfinished mutation still blocks every
 write (a failure until `recover` closes it).
+
+`doctor --report` prints the same reading as JSON for an issue: codexSync,
+Python, OS and Codex versions, which formats and gates this machine has, each
+check's status (not its detail, which names paths) and counts — never a name,
+a path, a title or a chat id, so it can be pasted as it is.
 
 ## The window from the console
 

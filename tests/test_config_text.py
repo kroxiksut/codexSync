@@ -173,5 +173,34 @@ class SchedulerConfigTests(unittest.TestCase):
             parse_config_text("scheduler = 5\n" + BASE, base_dir=SANDBOX / "unused")
 
 
+
+class ProjectFilesSectionTests(unittest.TestCase):
+    """`[project_files]` (D-038): a secret's hash stays home unless chosen."""
+
+    def test_an_absent_section_publishes_no_secret_hash(self) -> None:
+        cfg = _parse()
+        self.assertEqual((cfg.project_files.secret_files, cfg.project_files.secret_patterns), ("no_hash", []))
+
+    def test_each_choice_and_own_patterns_are_read(self) -> None:
+        for mode in ("no_hash", "presence", "hash"):
+            cfg = _parse(f'[project_files]\nsecret_files = "{mode}"\nsecret_patterns = [" *.secret "]\n')
+            self.assertEqual(cfg.project_files.secret_files, mode)
+            self.assertEqual(cfg.project_files.secret_patterns, ["*.secret"])
+
+    def test_an_unknown_choice_or_a_bad_pattern_list_is_refused(self) -> None:
+        for extra, message in (
+            ('secret_files = "hashed"\n', "project_files.secret_files"),
+            ('secret_files = true\n', "project_files.secret_files"),
+            ('secret_patterns = "*.key"\n', "project_files.secret_patterns"),
+            ('secret_patterns = ["", "*.key"]\n', "project_files.secret_patterns"),
+        ):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ConfigError, message):
+                _parse("[project_files]\n" + extra)
+
+    def test_the_shipped_template_chooses_no_hash(self) -> None:
+        cfg = parse_config_text(PACKAGED_TEMPLATE.read_text(encoding="utf-8"), base_dir=SANDBOX / "unused")
+        self.assertEqual(cfg.project_files.secret_files, "no_hash")
+
+
 if __name__ == "__main__":
     unittest.main()

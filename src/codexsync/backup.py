@@ -115,7 +115,19 @@ class BackupManager:
         snapshot at all. A snapshot an unfinished journal of this machine names
         is kept whatever its age, and when the journals cannot be read nothing
         is pruned -- a late prune costs disk space, an early one a rollback.
+
+        For the same reason a folder that cannot be listed or a snapshot that
+        cannot be removed ends the prune with a warning instead of an error:
+        every caller prunes after its journal is `COMMITTED`, and an error there
+        reported a delivered sync as failed (the journal cannot leave
+        `COMMITTED`). The next run prunes again.
         """
+        try:
+            self._prune()
+        except OSError as exc:
+            LOG.warning("backup prune stopped, the next run tries again: %s", exc)
+
+    def _prune(self) -> None:
         if not self._backup_root.exists():
             return
         protected = self._protected_snapshots()

@@ -95,9 +95,8 @@ alpha, or pip installs 0.1, and `--upgrade` so that an installed 0.1 is
 replaced too. On macOS every read and plan works, but writes are refused
 until the process detector is proven there; on Linux it has been
 ([platforms](docs/en/README.md#platforms)). On Linux the system Python refuses
-`pip install` (PEP 668), so install into a virtual environment:
-`python3 -m venv ~/.venvs/codexsync && ~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"`
-(on Ubuntu and Debian `sudo apt install python3-venv` first).
+`pip install` (PEP 668): use `pipx` or a virtual environment — both, with
+updating and removing, in [installing on Linux](docs/en/README.md#on-linux).
 
 ```powershell
 python -m pip install --upgrade --pre "codexsync[gui]"    # the window and the command line
@@ -127,7 +126,7 @@ From source, and the first run step by step:
 
 Every page in one place: [docs/](docs/README.md). For contributors:
 [developer documents](docs/dev/README.md). Release notes:
-[CHANGELOG.md](./CHANGELOG.md).
+[CHANGELOG.md](./CHANGELOG.md). What comes next: [ROADMAP.md](./ROADMAP.md).
 
 ## Status
 
@@ -143,15 +142,26 @@ what happened. Data an alpha writes stays readable by every later version.
 
 Writes stay closed on macOS until someone has watched the process check work
 against a real Codex on a Mac. That is the first thing we need, and it is small:
-one Terminal command that only reads the list of running programs. It does not
-need codexSync installed, does not touch `~/.codex`, and changes nothing.
+one Terminal command that only reads the list of running programs. It needs no
+config, does not touch `~/.codex`, writes nothing — not even a log file — and
+prints no path or command line, so its output can be pasted as it is:
+
+```sh
+codexsync codex processes
+```
+
+It shows what the safety check would act on: each matching program by process
+id, parent id and short name, and which rule matched it — a name, or the
+`ChatGPT.app/Contents/MacOS/` marker for the desktop app. On a Mac the check
+reads `UNKNOWN` until it is proven; the line under it says what it would read
+if it were trusted. This needs codexSync 0.2.0a2 or later. Without installing
+anything, this shows the raw list instead (paths may contain your user name):
 
 ```sh
 ps -A -o pid=,ppid=,comm= | grep -i -E 'codex|chatgpt'
 ```
 
-It prints one line per program whose path mentions Codex or ChatGPT: its
-process id, its parent's id and the program's path. Please run it:
+Please run it:
 
 1. with Codex fully quit (⌘Q, not only the window closed);
 2. with Codex open;
@@ -162,8 +172,7 @@ process id, its parent's id and the program's path. Please run it:
 Do this with each Codex client you use — the desktop app (now named ChatGPT),
 the `codex` command line, the extension in VS Code or Cursor — and
 [send the output](https://github.com/kroxiksut/codexSync/issues/new?template=macos_process_check.yml)
-with your macOS version and the app or CLI version. The paths may contain your
-user name; replace it if you like. A full handoff between a Mac and another
+with your macOS version and the app or CLI version. A full handoff between a Mac and another
 machine is the next step, once writes are open there.
 
 **Upgrading from 0.1.** codexSync 0.2 recognises configurations created by 0.1
@@ -179,7 +188,6 @@ until a controlled experiment records them — see
 
 ## License
 
-Dual-licensed: open source under `GPL-3.0-or-later` ([LICENSE](./LICENSE)), with
-a commercial path described in [COMMERCIAL_LICENSE.md](./COMMERCIAL_LICENSE.md).
-Contributions are accepted under [CONTRIBUTING.md](./CONTRIBUTING.md) and
-[CLA.md](./CLA.md).
+Open source under `GPL-3.0-or-later` ([LICENSE](./LICENSE)). Contributions are
+accepted under the same licence, with nothing extra to sign; see
+[CONTRIBUTING.md](./CONTRIBUTING.md).

@@ -1,9 +1,11 @@
 """About: what the program is, what it refuses to do, and which build this is.
 
-The only screen that asks the core nothing. Everything here is either a fact
-about the build (`Controller.about`, which reads no configuration and opens no
-state directory) or a sentence from the catalogue, so it draws instantly and
-cannot show a stale reading.
+Everything here is either a fact about the build (`Controller.about`, which
+reads no configuration and opens no state directory) or a sentence from the
+catalogue, so it draws instantly and cannot show a stale reading. The one
+exception is Linux's applications menu (CS-399): two files read, and a button
+that writes this user's menu entry -- pip, pipx, the tar.gz and the AppImage
+install none, a `.deb`/`.rpm` does.
 
 It is not decoration. Two of its blocks answer questions the rest of the window
 can only answer one screen at a time: *what is this program allowed to do to my
@@ -22,7 +24,7 @@ from __future__ import annotations
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QGridLayout, QLabel
 
-from ..controller import BuildInfo
+from ..controller import BuildInfo, Outcome
 from ..widgets import button, card, label, row
 from .base import Model, Screen
 
@@ -48,6 +50,8 @@ class AboutModel(Model):
         #: button can say so. Forgotten on any rebuild, which is correct: it
         #: describes a click, not a state.
         self.copied = False
+        #: The last add/remove of the menu entry, for the line under its buttons.
+        self.menu_result: Outcome | None = None
 
 
 class AboutScreen(Screen):
@@ -88,6 +92,21 @@ class AboutScreen(Screen):
         build_inner.addLayout(row(self.copy_button, self.copied_line))
         self.body.addWidget(build)
 
+        self.menu_card = None
+        menu = self.host.controller.menu_entry()
+        if menu.ok and menu.value.supported:
+            self.menu_card, menu_inner = card(self.t("about.menu.title"))
+            self.menu_state = label("", wrap=True)
+            menu_inner.addWidget(self.menu_state)
+            self.menu_add = button(self.t("about.menu.add"), primary=True)
+            self.menu_add.clicked.connect(lambda: self.change_menu_entry(add=True))
+            self.menu_remove = button(self.t("about.menu.remove"))
+            self.menu_remove.clicked.connect(lambda: self.change_menu_entry(add=False))
+            self.menu_line = label("", "muted", wrap=True)
+            menu_inner.addLayout(row(self.menu_add, self.menu_remove))
+            menu_inner.addWidget(self.menu_line)
+            self.body.addWidget(self.menu_card)
+
         rules, rules_inner = card(self.t("about.rules.title"))
         for rule in RULES:
             rules_inner.addWidget(label(self.t(f"about.rule.{rule}.title"), "cardTitle"))
@@ -120,6 +139,59 @@ class AboutScreen(Screen):
         for widget, (_name, value) in zip(self.values, self._rows()):
             widget.setText(value)
         self.copied_line.setText(self.t("about.build.copied") if self.model.copied else "")
+        if self.menu_card is not None:
+            self._render_menu()
+
+    # --- the applications menu (Linux) -----------------------------------------
+
+    def _render_menu(self) -> None:
+        busy = self.shared_busy("menu_entry")
+        menu = self.host.controller.menu_entry()
+        status = menu.value if menu.ok else None
+        can_add = can_remove = False
+        if status is None:
+            text = self.failure_text(menu)
+        elif status.system_entry is not None:
+            text = self.t("about.menu.package", path=str(status.system_entry))
+        elif status.present and not status.ours:
+            text = self.t("about.menu.foreign", path=str(status.entry))
+        elif status.ours and status.program_exists:
+            text = self.t("about.menu.ours", program=str(status.program))
+            can_add = status.would_start is not None and status.would_start != status.program
+            can_remove = True
+        elif status.ours:
+            text = self.t("about.menu.stale", program=str(status.program))
+            can_add, can_remove = status.would_start is not None, True
+        elif status.would_start is None:
+            text = self.t("about.menu.no_program")
+        else:
+            text = self.t("about.menu.absent")
+            can_add = True
+        self.menu_state.setText(text)
+        self.menu_add.setText(self.t("about.menu.update" if status is not None and status.ours else "about.menu.add"))
+        self.menu_add.setVisible(can_add)
+        self.menu_remove.setVisible(can_remove)
+        self.menu_add.setEnabled(not busy)
+        self.menu_remove.setEnabled(not busy)
+        result = self.model.menu_result
+        if busy:
+            self.menu_line.setText(self.t("about.menu.working"))
+        elif result is not None and not result.ok:
+            self.menu_line.setText(self.failure_text(result))
+        elif result is not None:
+            self.menu_line.setText(self.t("about.menu.done", path=str(result.value.entry)))
+        else:
+            self.menu_line.setText(self.t("about.menu.caption"))
+
+    def change_menu_entry(self, *, add: bool) -> None:
+        call = self.host.controller.add_menu_entry if add else self.host.controller.remove_menu_entry
+        self.model.menu_result = None
+
+        def apply(model: AboutModel, outcome: Outcome) -> None:
+            model.menu_result = outcome
+
+        self.run(call, apply, kind="menu_entry")
+        self.render()
 
     # --- the build facts ------------------------------------------------------
 

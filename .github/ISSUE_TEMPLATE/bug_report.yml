@@ -89,6 +89,15 @@ body:
     validations:
       required: true
   - type: textarea
+    id: report
+    attributes:
+      label: doctor --report
+      description: >-
+        `codexsync -c config.toml doctor --report` (codexSync 0.2.0a2 or later): versions,
+        formats, gates, check statuses and counts, with no name, path, title or chat id in it,
+        so it can be pasted as it is
+      render: json
+  - type: textarea
     id: doctor
     attributes:
       label: doctor output

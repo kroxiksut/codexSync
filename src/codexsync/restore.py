@@ -312,14 +312,14 @@ def _resolve_snapshot_dir(
                 if not _backup_manifest_path(zip_candidate).is_file() and not allow_legacy_snapshot:
                     raise ConfigError("Legacy backup requires --allow-legacy-snapshot and an explicit id")
                 return zip_candidate
-        raise ConfigError(f"Backup snapshot not found: {snapshot_name}")
+        raise ConfigError(f"Backup snapshot not found: {snapshot_name}", code="BACKUP_NOT_FOUND", params={"name": snapshot_name})
 
     snapshots = [
         p for p in backup_root.iterdir()
         if _is_supported_snapshot(p) and _backup_manifest_path(p).is_file()
     ] if backup_root.exists() else []
     if not snapshots:
-        raise ConfigError(f"No backup snapshots found in: {backup_root}")
+        raise ConfigError(f"No backup snapshots found in: {backup_root}", code="NO_BACKUPS", params={"path": str(backup_root)})
     snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return snapshots[0]
 
@@ -334,11 +334,11 @@ def _verify_backup_snapshot(snapshot: Path, *, allow_legacy_snapshot: bool) -> N
     if not manifest_path.is_file():
         if allow_legacy_snapshot:
             return
-        raise ConfigError("Backup snapshot has no committed codexSync manifest")
+        raise ConfigError("Backup snapshot has no committed codexSync manifest", code="BACKUP_UNTRUSTED")
     entries = _read_backup_manifest_entries(snapshot)
     actual = _snapshot_hash_inventory(snapshot)
     if actual != entries:
-        raise ConfigError("Backup snapshot contents do not match its committed manifest")
+        raise ConfigError("Backup snapshot contents do not match its committed manifest", code="BACKUP_UNTRUSTED")
 
 
 def _read_backup_manifest_entries(snapshot: Path) -> dict[str, tuple[str, int]]:

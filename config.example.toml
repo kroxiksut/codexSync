@@ -300,3 +300,19 @@ enabled = false
 delivery_wait_minutes = 15
 # Report what happened with a system notification.
 notify = true
+
+[project_files]
+# Comparing project folders between machines (see docs: Projects, "Project
+# folders"). A folder without git is published into the shared workspace as a
+# list of its files, each with its size, change time and SHA-256. For files
+# that look like secrets -- .env, .env.*, *.pem, *.key, *.p12, *.pfx, SSH
+# private keys (id_rsa, id_ed25519, ...) and the credential files codexSync
+# never copies -- choose what is published:
+# no_hash = name, size and change time; the file is never opened
+# presence = name only; "newer on the other machine" is not reported for it
+# hash = like every other file, with its SHA-256
+secret_files = "no_hash"
+# Your own secret patterns, added to the list above. Without "/" a pattern
+# names a file in any folder; with "/" a path from the project folder ("**"
+# for any folders). Case is ignored. Example: ["*.secret", "config/keys/**"]
+secret_patterns = []

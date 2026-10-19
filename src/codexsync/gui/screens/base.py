@@ -24,6 +24,13 @@ class Model:
         rules would otherwise stay on screen looking applicable.
         """
 
+    def receive(self, kind: str, outcome: Outcome) -> None:
+        """Take the outcome of shared work another page started (`jobs.SHARED_KINDS`).
+
+        The page that started it applies its own outcome; every other page
+        offering the same work gets it here, so both show the one result.
+        """
+
 
 class Screen(QWidget):
     page = ""
@@ -124,9 +131,21 @@ class Screen(QWidget):
     def palette_(self) -> theme.Palette:
         return self.host.palette()
 
-    def run(self, call: Callable[[], Outcome], apply: Callable[[Any, Outcome], None]) -> None:
-        """Run a job that may write; it cannot be abandoned."""
-        self.host.run(self.page, call, apply)
+    def run(
+        self,
+        call: Callable[..., Outcome],
+        apply: Callable[[Any, Outcome], None],
+        *,
+        kind: str | None = None,
+        dry_run: bool = False,
+        progress: bool = False,
+    ) -> None:
+        """Run a job that may write; it cannot be abandoned.
+
+        ``kind`` names the work for the task list (`jobs.JOB_KINDS`), and
+        ``dry_run`` says this run of it writes nothing.
+        """
+        self.host.run(self.page, call, apply, kind=kind, dry_run=dry_run, progress=progress)
 
     def read(
         self,
@@ -134,6 +153,7 @@ class Screen(QWidget):
         apply: Callable[[Any, Outcome], None],
         *,
         progress: bool = False,
+        kind: str | None = None,
     ) -> None:
         """Run a read-only job the person may stop waiting for.
 
@@ -141,11 +161,15 @@ class Screen(QWidget):
         hashes every file -- and means ``call`` accepts a ``progress=``
         callback. ``progress_text`` then has something to draw.
         """
-        self.host.run(self.page, call, apply, cancellable=True, progress=progress)
+        self.host.run(self.page, call, apply, cancellable=True, progress=progress, kind=kind)
 
-    def progress_text(self) -> str:
-        """How far this page's running read has got, as a sentence or ''."""
-        return self.host.progress_text(self.page)
+    def shared_busy(self, *kinds: str) -> bool:
+        """Is any of this work running, from whichever page started it (CS-336)?"""
+        return any(self.host.busy(kind) for kind in kinds)
+
+    def progress_text(self, kind: str | None = None) -> str:
+        """How far this page's running job -- or the job of ``kind`` -- has got, or ''."""
+        return self.host.progress_text(self.page, kind)
 
     def headline(self, failure: Failure) -> str:
         return self.t(f"failure.{failure.value}")
@@ -153,12 +177,45 @@ class Screen(QWidget):
     def failure_text(self, outcome: Outcome) -> str:
         if outcome.failure is None:
             return ""
-        # A refusal core names by kind is said in the window's language; the
-        # English message is only for kinds the catalogue has no sentence for.
+        body = self.refusal_text(outcome, sentence_start=False)
+        return f"{self.headline(outcome.failure)}: {body}" if body else self.headline(outcome.failure)
+
+    def refusal_text(self, outcome: Outcome, *, sentence_start: bool = True) -> str:
+        """Why ``outcome`` produced nothing, in the window's language when core named the kind.
+
+        A refusal core names by code is said from ``failure.code.<CODE>`` with
+        the values it attached (CS-332); the English message is only for kinds
+        the catalogue has no sentence for. The sentences are written to follow
+        a headline and a colon, so a banner body, which stands alone, starts
+        with a capital (``sentence_start``) -- unless it starts with a value:
+        ``config.toml`` stays as it is written.
+        """
+        if outcome.failure is None:
+            return ""
         known = f"failure.code.{outcome.code}" if outcome.code else ""
-        if known and self.host.catalog.has(known):
-            return f"{self.headline(outcome.failure)}: {self.t(known)}"
-        return f"{self.headline(outcome.failure)}: {outcome.message}" if outcome.message else self.headline(outcome.failure)
+        catalog = self.host.catalog
+        if not (known and catalog.has(known)):
+            return outcome.message
+        params = outcome.details if isinstance(outcome.details, dict) else {}
+        try:
+            if catalog.is_plural(known):
+                text = catalog.plural(known, int(params.get("count", 0)), **{
+                    name: value for name, value in params.items() if name != "count"
+                })
+            else:
+                # Formatted here even without values, so a placeholder left
+                # unfilled is noticed instead of drawn as ``{name}``.
+                text = catalog.text(known).format(**params)
+        except (KeyError, IndexError, ValueError, TypeError):
+            # A sentence naming a value the refusal did not carry: the English
+            # message still says it, rather than a half-filled template.
+            return outcome.message
+        # A plural form starts with its count or a word; a plain sentence may
+        # start with a value such as a file name, which keeps its own case.
+        starts_with_value = not catalog.is_plural(known) and catalog.text(known).startswith("{")
+        if not sentence_start or starts_with_value:
+            return text
+        return text[:1].upper() + text[1:]
 
     def join(self, parts: list[str]) -> str:
         return self.t("common.separator").join(part for part in parts if part)

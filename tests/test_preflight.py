@@ -9,6 +9,7 @@ import uuid
 from unittest.mock import patch
 
 from codexsync.app import ProcessSnapshot, run_preflight
+from codexsync.preflight import DETAIL_CODES, _part
 from codexsync.process_detector import ProcessInfo
 
 NEWLINE = b"\n"
@@ -57,6 +58,30 @@ def _write_config(root: Path, *, manifest_data_version: int = 1) -> Path:
     return config_path
 
 
+class DetailCodeTests(unittest.TestCase):
+    def test_a_code_outside_the_declared_set_is_refused(self) -> None:
+        """A code no language file has a sentence for must not slip through."""
+        with self.assertRaises(ValueError):
+            _part("config.no_such_sentence")
+
+    def test_every_code_used_in_the_module_is_declared(self) -> None:
+        """Every `<check>.<sentence>` literal, including those picked by a condition."""
+        import ast
+        import re
+
+        source = (Path(__file__).resolve().parents[1] / "src" / "codexsync" / "preflight.py").read_text(encoding="utf-8")
+        families = {code.split(".")[0] for code in DETAIL_CODES}
+        used = {
+            node.value for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and re.fullmatch(r"[a-z_]+\.[a-z_]+", node.value) and node.value.split(".")[0] in families
+            # A file name such as `manifest.json` is not a sentence.
+            and node.value.split(".")[1] not in {"json", "jsonl", "toml", "sqlite"}
+        }
+        self.assertIn("sqlite_audit.clear", used, "the scan sees codes chosen by a condition")
+        self.assertLessEqual(used, DETAIL_CODES)
+
+
 class PreflightTests(unittest.TestCase):
     def test_preflight_ok_for_healthy_environment(self) -> None:
         root = Path.cwd() / "test-sandbox" / f"preflight-ok-{uuid.uuid4().hex}"
@@ -71,6 +96,15 @@ class PreflightTests(unittest.TestCase):
 
             self.assertTrue(report.is_ok)
             self.assertFalse(report.failures)
+            # CS-338: every line also comes as sentence codes for the window,
+            # and the English line `doctor` prints is still there.
+            for item in report.checks:
+                with self.subTest(check=item.name):
+                    self.assertTrue(item.parts, "a check without parts shows English in the window")
+                    self.assertTrue(item.details)
+                    for code, params in item.parts:
+                        self.assertIn(code, DETAIL_CODES)
+                        self.assertIsInstance(params, dict)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

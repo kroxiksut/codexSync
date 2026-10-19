@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import threading
 from typing import Iterator
 
@@ -20,6 +21,7 @@ from .jsonl_codec import (
     logical_name,
     logical_relative_path,
     open_jsonl,
+    unsupported_container,
 )
 from .progress import ProgressCallback, report
 
@@ -52,6 +54,9 @@ RECORD_FORMAT_ORDINAL = "ordinal"
 #: Some records numbered and some not: an old history the new build appended to
 #: without rewriting it.
 RECORD_FORMAT_MIXED = "mixed"
+#: What `peek_record_formats` reports for a branch in a container this version
+#: cannot open (CS-394): its records are not read at all.
+RECORD_FORMAT_UNSUPPORTED = "unsupported"
 #: Newer formats rank higher. Only a difference in rank means anything.
 RECORD_FORMAT_RANK = {RECORD_FORMAT_LEGACY: 0, RECORD_FORMAT_MIXED: 1, RECORD_FORMAT_ORDINAL: 2}
 
@@ -62,8 +67,16 @@ RECORD_FORMAT_RANK = {RECORD_FORMAT_LEGACY: 0, RECORD_FORMAT_MIXED: 1, RECORD_FO
 INVALID_CODES = frozenset({
     "LINE_TOO_LARGE", "NUL_BYTE", "UNSUPPORTED_BOM", "INVALID_RECORD", "RECORD_NOT_OBJECT",
     "MISSING_INITIAL_SESSION_META", "MISSING_SESSION_ID", "CONFLICTING_SESSION_META", "READ_ERROR",
-    "READ_CHANGED", "INVALID_TAIL",
+    "READ_CHANGED", "INVALID_TAIL", "UNSUPPORTED_CONTAINER",
 })
+#: A chat file in a container this version cannot open (`.jsonl.zst`, CS-394).
+#: Its history cannot be compared, so the chat is blocked on both sides; its
+#: id is taken from the file name (`ID_FROM_FILE_NAME`) so the block reaches
+#: the mirror's copy of the same chat instead of letting it land beside it.
+UNSUPPORTED_CONTAINER = "UNSUPPORTED_CONTAINER"
+ID_FROM_FILE_NAME = "ID_FROM_FILE_NAME"
+#: The thread id in a Codex chat file name: the first UUID after the time.
+_NAME_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 #: The code that makes a branch `AMBIGUOUS`: one session id in two files.
 DUPLICATE_SESSION_ID = "DUPLICATE_SESSION_ID"
 #: A file that continues a chat begun in another file (CS-356). Codex 0.160
@@ -225,8 +238,10 @@ def _walk_jsonl(directory: Path, state_root: Path) -> Iterator[Path]:
         dirs[:] = safe_dirs
         for name in files:
             # A branch is recognised by its logical name, not by its container:
-            # the cloud mirror may store the same history compressed.
-            if not is_branch_file(name):
+            # the cloud mirror may store the same history compressed, and Codex
+            # may store it in a container this version cannot open, which is
+            # still that chat's history (CS-394).
+            if not is_branch_file(name) and unsupported_container(name) is None:
                 continue
             path = current_path / name
             if path.is_symlink() or _is_reparse(path):
@@ -243,6 +258,8 @@ def _scan_jsonl(
     volatile: bool,
     source_machine: str | None,
 ) -> SessionDescriptor:
+    if unsupported_container(path.name) is not None:
+        return _unsupported_container(path, root, lifecycle, source_machine)
     try:
         before = path.stat()
     except OSError:
@@ -376,6 +393,46 @@ def _scan_jsonl(
     )
 
 
+def _unsupported_container(
+    path: Path, root: Path, lifecycle: SessionState, source_machine: str | None
+) -> SessionDescriptor:
+    """A chat file this version cannot open, described without opening it as JSONL.
+
+    The hash is of the stored bytes, so a change to the file still changes
+    every plan that mentions it. The id comes from the file name: the file is
+    then that chat's unreadable copy, which blocks the chat, rather than an
+    unattributed file a copy might be planned next to.
+    """
+    relative = path.relative_to(root).as_posix()
+    codes = [UNSUPPORTED_CONTAINER]
+    digest = hashlib.sha256()
+    byte_count = 0
+    stat = None
+    try:
+        stat = path.stat()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                byte_count += len(chunk)
+    except OSError:
+        codes.append("READ_ERROR")
+    match = _NAME_ID.search(Path(logical_name(path.name)).stem)
+    if match:
+        codes.append(ID_FROM_FILE_NAME)
+    return SessionDescriptor(
+        session_id=match.group(0).lower() if match else None,
+        state=SessionState.INVALID,
+        relative_path=relative,
+        sha256=digest.hexdigest(),
+        byte_count=byte_count,
+        line_count=0,
+        source_machine=source_machine,
+        codes=tuple(codes),
+        mtime_ns=stat.st_mtime_ns if stat is not None else None,
+        file_id=_file_id(stat) if stat is not None else None,
+    )
+
+
 def _history_page(payload: dict, session_id: str | None) -> tuple[str | None, str | None]:
     """Where a page of a paginated chat carries on, and the code saying so.
 
@@ -448,6 +505,9 @@ def peek_record_formats(state_root: Path, *, max_line_bytes: int = DEFAULT_MAX_J
         if not directory.is_dir():
             continue
         for path in _walk_jsonl(directory, root):
+            if unsupported_container(path.name) is not None:
+                formats[logical_relative_path(path.relative_to(root).as_posix())] = RECORD_FORMAT_UNSUPPORTED
+                continue
             try:
                 with open_jsonl(path) as handle:
                     first = handle.readline(max_line_bytes + 1)

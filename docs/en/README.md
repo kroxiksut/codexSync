@@ -72,6 +72,100 @@ cd codexSync
 pip install -e ".[gui]"
 ```
 
+### On Linux
+
+Every way below works and none is preferred; choose what suits the machine.
+With root and `apt` or `dnf`, a package; without root, the AppImage or the
+`tar.gz`; with Python 3.11 or later, `pipx` or a virtual environment. The
+packages, the AppImage and the `tar.gz` are on the
+[release page](https://github.com/kroxiksut/codexSync/releases) from the next
+release on, for x64 (glibc 2.35 or later: Ubuntu 22.04, Debian 12, Fedora 36
+and newer) and ARM64 (glibc 2.39 or later: Ubuntu 24.04, Debian 13 and newer).
+Each holds both programs, `codexsync` and `codexsync-gui`.
+
+**A .deb package** (Ubuntu, Debian and their relatives) installs into
+`/opt/codexsync` with both commands on `PATH` and a menu entry:
+
+```sh
+sudo apt install ./codexsync-<version>-linux-amd64.deb   # install; the same with a newer file updates
+sudo apt remove codexsync                                # remove
+```
+
+**An .rpm package** (Fedora and its relatives), the same way:
+
+```sh
+sudo dnf install ./codexsync-<version>-linux-amd64.rpm   # install; the same with a newer file updates
+sudo dnf remove codexsync                                # remove
+```
+
+**The AppImage** is one file to keep wherever you like; it is the window and,
+given a command, the command line:
+
+```sh
+chmod +x codexsync-<version>-linux-amd64.AppImage
+./codexsync-<version>-linux-amd64.AppImage                          # the window
+./codexsync-<version>-linux-amd64.AppImage -c config.toml doctor    # the command line
+```
+
+To update, put the new file at the same path under the same name (scheduled
+tasks name that file); to remove it, delete it. It needs no `libfuse2`; where
+FUSE is not available at all, add `--appimage-extract-and-run`.
+
+**The tar.gz** is the same folder for any place you can write to; unpack it
+into a folder of its own, so that an update keeps the path scheduled tasks
+name:
+
+```sh
+mkdir -p ~/.local/opt/codexsync
+tar -xzf codexsync-<version>-linux-amd64.tar.gz -C ~/.local/opt/codexsync --strip-components=1   # install
+rm -rf ~/.local/opt/codexsync/* && tar -xzf <newer file> -C ~/.local/opt/codexsync --strip-components=1   # update
+rm -rf ~/.local/opt/codexsync                                                                     # remove
+```
+
+The programs are `~/.local/opt/codexsync/codexsync` and `codexsync-gui`. To
+call them by name, link both into `~/.local/bin`
+(`ln -s ~/.local/opt/codexsync/codexsync ~/.local/opt/codexsync/codexsync-gui ~/.local/bin/`).
+
+**pipx** makes and manages the virtual environment itself (`sudo apt install
+pipx` or `sudo dnf install pipx`, then `pipx ensurepath`):
+
+```sh
+pipx install --pip-args=--pre "codexsync[gui]"   # the window and the command line; without [gui], the command line only
+pipx upgrade --pip-args=--pre codexsync          # update
+pipx uninstall codexsync                         # remove
+```
+
+**A virtual environment by hand** — the system Python refuses a plain
+`pip install` (PEP 668); on Ubuntu and Debian `sudo apt install python3-venv`
+first:
+
+```sh
+python3 -m venv ~/.venvs/codexsync
+~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"            # install
+~/.venvs/codexsync/bin/pip install --upgrade --pre "codexsync[gui]"  # update
+rm -rf ~/.venvs/codexsync                                            # remove
+```
+
+Put `~/.venvs/codexsync/bin` on `PATH`, or call the commands by that path.
+`--pre` is needed while 0.2 is a pre-release.
+
+**The applications menu.** A `.deb` or `.rpm` puts CodexSync in it; pipx, a
+virtual environment, the AppImage and the `tar.gz` do not. For those,
+`codexsync shortcut install` (or *About → Applications menu* in the window)
+writes a menu entry and an icon into `~/.local/share` that start the very
+program you ran it with — the AppImage file, the unpacked folder, the virtual
+environment. Run it again after moving that program; `codexsync shortcut
+status` says what the entry starts, and `codexsync shortcut remove` takes away
+the two files it wrote and nothing else. With a package installed it writes
+nothing.
+
+**Before removing codexSync**, take its scheduled tasks away —
+`codexsync -c config.toml automation remove` (or *Automation* in the window),
+and its menu entry if you made one (`codexsync shortcut remove`):
+removing a program never touches your tasks, your config, the workspace or
+`.codex`, so a task left behind would keep trying to start a program that is
+gone. Your config and workspace stay where they are for a later install.
+
 ## First run
 
 **The window:**
@@ -155,7 +249,9 @@ in the cloud folder: those are the user's responsibility.
   for macOS is written and tested against recorded `ps` output, but until it
   has been run against a live Codex on a Mac, the platform reports itself as
   unsupported: the process state reads as undetermined and every command that
-  writes refuses.
+  writes refuses. `codexsync codex processes` shows what the check sees there
+  — matches by process id and rule, no path — and what it would read if it
+  were trusted; that report is what proves it ([Have a Mac?](../../README.md#have-a-mac)).
 - **Linux** is experimental, as Codex's own desktop app for Linux is a preview
   (since August 2026). codexSync installs from PyPI and its code and CI run
   there. The process detector has been watched against a live Codex on Ubuntu
@@ -165,7 +261,10 @@ in the cloud folder: those are the user's responsibility.
   reads as running.
 - **Minimum versions:** Windows 10 (1809) or later, Python 3.11 or later with
   pip; the window on macOS needs macOS 13 or later (what the current PySide6
-  supports).
+  supports). Python 3.14 or later reads the chats Codex keeps compressed
+  (`.jsonl.zst`); older versions leave them blocked
+  ([sessions](SESSIONS.md#when-codex-compresses-its-chats)). The release
+  programs are built with 3.14.
 - CI runs the test suite on `windows-latest` and `macos-latest` with Python
   3.11, 3.12, 3.13 and 3.14, and on `ubuntu-latest` as an experimental job
   whose failure does not fail the run.

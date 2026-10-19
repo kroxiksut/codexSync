@@ -501,7 +501,7 @@ class ConfigFormScreen(Screen):
                 if then_apply:
                     host.screen(page_id).after_save_apply()
 
-        self.run(lambda: controller.save_config(text, expected_sha256=base.sha256), apply)
+        self.run(lambda: controller.save_config(text, expected_sha256=base.sha256), apply, kind="config_save")
 
     def after_save_apply(self) -> None:
         """What `check(save=True, then_apply=True)` continues with once saved."""

@@ -24,6 +24,7 @@ from codexsync.app import apply_session_transfer, scan_session_transfer
 from codexsync.exceptions import ConfigError, FailSafeError
 from codexsync.jsonl_codec import (
     JsonlCodec,
+    WRITABLE_CODECS,
     codec_of,
     compress_file,
     logical_relative_path,
@@ -70,10 +71,10 @@ class CodecNamingTests(unittest.TestCase):
         self.assertIsNone(codec_of("a.sqlite"), "not a branch at all")
 
     def test_every_container_has_its_own_mirror_layout_id(self) -> None:
-        ids = {mirror_layout_id(codec) for codec in JsonlCodec}
-        self.assertEqual(len(ids), len(JsonlCodec), "a codec must be visible in the layout id")
+        ids = {mirror_layout_id(codec) for codec in WRITABLE_CODECS}
+        self.assertEqual(len(ids), len(WRITABLE_CODECS), "a codec must be visible in the layout id")
         self.assertEqual(mirror_layout_id(JsonlCodec.NONE), MIRROR_LAYOUT_ID)
-        for codec in JsonlCodec:
+        for codec in WRITABLE_CODECS:
             self.assertIs(mirror_codec_for(mirror_layout_id(codec)), codec)
 
     def test_an_unknown_mirror_layout_is_refused_rather_than_guessed(self) -> None:
@@ -96,7 +97,7 @@ class CodecStreamTests(unittest.TestCase):
     def test_a_round_trip_is_byte_for_byte(self) -> None:
         source = self.root / "branch.jsonl"
         source.write_bytes(self._payload())
-        for codec in JsonlCodec:
+        for codec in WRITABLE_CODECS:
             with self.subTest(codec=codec.value):
                 destination = self.root / f"stored-{codec.value}{codec.file_suffix}"
                 compress_file(source, destination, codec)

@@ -15,6 +15,14 @@ its project folders hold, and the next machine compares that with its own:
   in this machine's local cache folder), and a file with the same bytes is the
   same file whatever its time, so a copy made later says nothing.
 
+  A file that looks like a secret (`SecretRule`: `.env`, keys, certificates,
+  the credential names codexSync never copies) is published as the person
+  chose in `[project_files] secret_files` (D-038): `no_hash` (the default)
+  gives its size and time, `presence` only its name, `hash` treats it like any
+  other file. Under the first two it is never opened, so its hash is neither
+  published nor kept in the cache: a short secret in a known format can be
+  found from its hash by guessing, and the workspace sits in a cloud folder.
+
 With each project goes the last time one of its chats changed on that machine
 (``threads.cwd``/``updated_at``, read-only). The receiving machine says first
 which projects saw chats continue elsewhere -- that is where files most likely
@@ -41,9 +49,12 @@ import stat
 import subprocess
 from typing import Any, Callable
 
+from .filters import PathFilter
 from .fs_links import is_link
 from .peer_board import read_bodies, write_body
 from .fs_replace import replace_with_retry
+from .models import SECRET_FILE_MODES
+from .runtime import SECRET_NAMES
 
 FILES_FORMAT = "codexsync-project-files-v1"
 
@@ -57,6 +68,40 @@ EXCLUDED_DIRS = frozenset({
 WALK_LIMIT = 50_000
 #: Files above this are compared by size and change time, not read.
 HASH_LIMIT = 100 * 1024 * 1024
+
+#: How a secret-looking file is published (D-038).
+SECRET_HASH = "hash"
+SECRET_NO_HASH = "no_hash"
+SECRET_PRESENCE = "presence"
+assert set(SECRET_FILE_MODES) == {SECRET_HASH, SECRET_NO_HASH, SECRET_PRESENCE}
+DEFAULT_SECRET_FILES = SECRET_NO_HASH
+
+#: Files that usually hold a secret, matched against the name in any folder
+#: and without regard to case. `SECRET_NAMES` is added on top, at any depth.
+BUILTIN_SECRET_PATTERNS = (
+    ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SecretRule:
+    """Which files of a plain folder are secrets, and how they are published.
+
+    ``patterns`` are the person's own, added to `BUILTIN_SECRET_PATTERNS`; a
+    pattern without ``/`` names a file anywhere, one with ``/`` a path from the
+    project folder (``**`` for any folders), both ignoring case.
+    """
+
+    mode: str = DEFAULT_SECRET_FILES
+    patterns: tuple[str, ...] = ()
+
+    def matches(self, relative: str) -> bool:
+        if any(part in SECRET_NAMES for part in relative.split("/")):
+            return True
+        names = [item.strip().casefold() for item in (*BUILTIN_SECRET_PATTERNS, *self.patterns) if item.strip()]
+        return PathFilter(names).is_excluded(relative.casefold())
+
 
 #: (returncode, stdout) of ``git -C <root> <args>``; returncode -1 when git
 #: could not be started at all.
@@ -93,8 +138,9 @@ class FilesKind(str, Enum):
     MISSING = "missing"
 
 
-#: One file of a plain folder: size, SHA-256 (``None`` above `HASH_LIMIT`),
-#: and the time it last changed.
+#: One file of a plain folder: size, SHA-256 (``None`` above `HASH_LIMIT` or
+#: for a secret), and the time it last changed. A secret published by
+#: presence alone carries ``(0, None, 0)`` and is named in `FilesState.secret`.
 FileEntry = tuple[int, "str | None", int]
 
 
@@ -114,6 +160,11 @@ class FilesState:
     #: no longer has -> when that was first seen (unix seconds). Without it
     #: "added here" and "deleted there" read the same.
     removed: dict[str, int] = field(default_factory=dict)
+    #: Plain folders: secret files published without their hash -> the way
+    #: they were published (`SECRET_NO_HASH` or `SECRET_PRESENCE`). A reader
+    #: that predates it ignores the key, and the zeros of a presence-only
+    #: entry never read as "newer there" to it.
+    secret: dict[str, str] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -121,6 +172,7 @@ class FilesState:
             "worktree": self.worktree, "truncated": self.truncated,
             "entries": {key: list(value) for key, value in sorted(self.entries.items())},
             "removed": dict(sorted(self.removed.items())),
+            "secret": dict(sorted(self.secret.items())),
         }
 
     @classmethod
@@ -140,6 +192,10 @@ class FilesState:
             entries,
             bool(raw.get("truncated")),
             {str(key): int(value) for key, value in dict(raw.get("removed") or {}).items()},
+            {
+                str(key): str(value) for key, value in dict(raw.get("secret") or {}).items()
+                if value in (SECRET_NO_HASH, SECRET_PRESENCE)
+            },
         )
 
 
@@ -233,8 +289,9 @@ def _hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _plain_state(root: Path, limit: int, cache: HashCache) -> FilesState:
+def _plain_state(root: Path, limit: int, cache: HashCache, secrets: SecretRule) -> FilesState:
     entries: dict[str, FileEntry] = {}
+    secret: dict[str, str] = {}
     truncated = False
     for directory, subdirs, names in os.walk(root):
         current = Path(directory)
@@ -257,37 +314,49 @@ def _plain_state(root: Path, limit: int, cache: HashCache) -> FilesState:
             if not stat.S_ISREG(info.st_mode) or is_link(path, info):
                 continue
             relative = path.relative_to(root).as_posix()
-            digest = None
-            if info.st_size <= HASH_LIMIT:
-                digest = cache.lookup(relative, info.st_size, info.st_mtime_ns)
-                if digest is None:
-                    try:
-                        digest = _hash(path)
-                    except OSError:
-                        digest = None
-                if digest is not None:
-                    cache.remember(relative, info.st_size, info.st_mtime_ns, digest)
-            entries[relative] = (info.st_size, digest, info.st_mtime_ns)
+            if secrets.mode != SECRET_HASH and secrets.matches(relative):
+                # Never opened and never cached: what is not read cannot leak.
+                secret[relative] = secrets.mode
+                entries[relative] = (
+                    (0, None, 0) if secrets.mode == SECRET_PRESENCE else (info.st_size, None, info.st_mtime_ns)
+                )
+            else:
+                digest = None
+                if info.st_size <= HASH_LIMIT:
+                    digest = cache.lookup(relative, info.st_size, info.st_mtime_ns)
+                    if digest is None:
+                        try:
+                            digest = _hash(path)
+                        except OSError:
+                            digest = None
+                    if digest is not None:
+                        cache.remember(relative, info.st_size, info.st_mtime_ns, digest)
+                entries[relative] = (info.st_size, digest, info.st_mtime_ns)
             if len(entries) >= limit:
                 truncated = True
                 break
         if truncated:
             break
     cache.save()
-    return FilesState(FilesKind.PLAIN, entries=entries, truncated=truncated)
+    return FilesState(FilesKind.PLAIN, entries=entries, truncated=truncated, secret=secret)
 
 
 def read_files_state(
     root: Path, *, git: GitRunner = run_git, limit: int = WALK_LIMIT, cache_root: Path | None = None,
+    secrets: SecretRule = SecretRule(),
 ) -> FilesState:
-    """What one project folder holds now. Reads only (the hash cache aside)."""
+    """What one project folder holds now. Reads only (the hash cache aside).
+
+    ``secrets`` concerns plain folders only: what a git folder publishes names
+    no file's contents.
+    """
     if not root.is_dir():
         return FilesState(FilesKind.MISSING)
     state = _git_state(root, git)
     if state is not None:
         return state
     cache = HashCache(cache_file_for(cache_root, root) if cache_root is not None else None)
-    return _plain_state(root, limit, cache)
+    return _plain_state(root, limit, cache, secrets)
 
 
 class Verdict(str, Enum):
@@ -342,11 +411,17 @@ def _same_file(here: FileEntry, there: FileEntry) -> bool:
 def _compare_plain(here: FilesState, there: FilesState) -> Comparison:
     if here.truncated or there.truncated:
         return Comparison(Verdict.NOT_COMPARED)
+
+    def differs(path: str, entry: FileEntry) -> bool:
+        # Published by presence on either side: being there is all there is.
+        if SECRET_PRESENCE in (here.secret.get(path), there.secret.get(path)):
+            return False
+        return not _same_file(here.entries[path], entry)
+
     missing = tuple(sorted(path for path in there.entries if path not in here.entries))
     newer = tuple(sorted(
         path for path, entry in there.entries.items()
-        if path in here.entries and not _same_file(here.entries[path], entry)
-        and entry[2] > here.entries[path][2]
+        if path in here.entries and differs(path, entry) and entry[2] > here.entries[path][2]
     ))
     # Deleted there, and not changed here since: this copy is what is stale.
     removed = tuple(sorted(
@@ -357,7 +432,7 @@ def _compare_plain(here: FilesState, there: FilesState) -> Comparison:
     if missing or newer or removed:
         return Comparison(Verdict.FILES_CHANGED_THERE, newer, missing, removed)
     differs_here = here.entries.keys() != there.entries.keys() or any(
-        not _same_file(here.entries[path], entry) for path, entry in there.entries.items()
+        differs(path, entry) for path, entry in there.entries.items()
     )
     return Comparison(Verdict.AHEAD_HERE if differs_here else Verdict.IN_STEP)
 
@@ -464,7 +539,7 @@ def with_removed(current: FilesState, previous: FilesState | None, now: int) -> 
             removed.setdefault(path, now)
     return FilesState(
         current.kind, current.head, current.branch, current.dirty, current.worktree,
-        current.entries, current.truncated, removed,
+        current.entries, current.truncated, removed, current.secret,
     )
 
 

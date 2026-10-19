@@ -16,13 +16,19 @@ arrival beyond what it always did.
 """
 from __future__ import annotations
 
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QComboBox, QSplitter
 
 from ...codex_health import CATALOGUE_MISSES_CHATS, Severity
+from .. import theme
 from ..controller import Outcome
 from ..widgets import Banner, Cell, button, card, fill_table, label, row, selected_data, set_tone, table
 from .base import Model, Screen
 from .guardian import _when
+
+
+#: The journal list is never squeezed below a few rows.
+JOURNAL_LIST_MIN_HEIGHT = 220
 
 
 class RecoveryModel(Model):
@@ -49,6 +55,12 @@ class RecoveryModel(Model):
 
 class RecoveryScreen(Screen):
     page = "recovery"
+    #: Codex's state, the journals and what can be done with one do not fit a
+    #: laptop screen together; squeezed, the actions card drew its sentences
+    #: over each other (CS-340). The page scrolls, and the journal list takes
+    #: whatever height is left.
+    scrollable = True
+    scroll_tail_stretch = False
 
     def build(self) -> None:
         self.banner = Banner()
@@ -89,8 +101,8 @@ class RecoveryScreen(Screen):
             self.t("recovery.column.id"),
         ], selectable=True)
         self.table.itemSelectionChanged.connect(self._selection_changed)
+        self.table.setMinimumHeight(JOURNAL_LIST_MIN_HEIGHT)
         inner.addWidget(self.table, stretch=1)
-        self.body.addWidget(frame, stretch=1)
 
         actions, actions_inner = card(self.t("recovery.actions.title"))
         self.evidence = label("", wrap=True)
@@ -119,7 +131,17 @@ class RecoveryScreen(Screen):
         actions_inner.addWidget(label(self.t("recovery.rollback.caption"), "muted", wrap=True))
         self.status = label("", wrap=True)
         actions_inner.addWidget(self.status)
-        self.body.addWidget(actions)
+
+        # The list above, the selected journal's evidence and actions below,
+        # and a handle between them to give either more room (CS-340).
+        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(theme.GRID_GAP)
+        self.splitter.addWidget(frame)
+        self.splitter.addWidget(actions)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.body.addWidget(self.splitter, stretch=1)
 
     def activated(self) -> None:
         if not self.model.busy:
@@ -150,7 +172,7 @@ class RecoveryScreen(Screen):
             model.codex_busy = False
             model.health = outcome
 
-        self.read(self.host.controller.codex_check, apply)
+        self.read(self.host.controller.codex_check, apply, kind="codex_check")
 
     def repair_codex(self) -> None:
         model = self.model
@@ -172,7 +194,7 @@ class RecoveryScreen(Screen):
             done = controller.codex_repair(confirm_plan=plan_id)
             return Outcome(value=(done, controller.codex_check() if done.ok else None))
 
-        self.run(go, self._codex_written)
+        self.run(go, self._codex_written, kind="codex_repair")
 
     def prepare_rebuild(self) -> None:
         model = self.model
@@ -186,7 +208,7 @@ class RecoveryScreen(Screen):
             model.codex_busy = False
             model.rebuild_preview = outcome
 
-        self.read(lambda: controller.catalogue_rebuild(confirm_plan=None), apply)
+        self.read(lambda: controller.catalogue_rebuild(confirm_plan=None), apply, kind="catalogue_preview")
 
     def request_rebuild(self) -> None:
         model = self.model
@@ -209,7 +231,7 @@ class RecoveryScreen(Screen):
             done = controller.catalogue_rebuild(confirm_plan=plan_id)
             return Outcome(value=(done, controller.codex_check() if done.ok else None))
 
-        self.run(go, self._codex_written)
+        self.run(go, self._codex_written, kind="catalogue_rebuild")
 
     @staticmethod
     def _codex_written(model: RecoveryModel, outcome: Outcome) -> None:
@@ -246,7 +268,7 @@ class RecoveryScreen(Screen):
             model.busy = False
             model.listing = outcome
 
-        self.read(self.host.controller.journals, apply)
+        self.read(self.host.controller.journals, apply, kind="journals")
 
     def _selected(self):
         items = selected_data(self.table)
@@ -309,7 +331,7 @@ class RecoveryScreen(Screen):
                 model.listing = listing
                 model.checked = None
 
-        self.run(go, apply)
+        self.run(go, apply, kind="recovery_action", dry_run=dry_run)
 
     def render(self) -> None:
         model = self.model
@@ -321,7 +343,7 @@ class RecoveryScreen(Screen):
         elif outcome is None:
             self.banner.show_message("neutral", "", "", palette)
         elif not outcome.ok:
-            self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
         else:
             open_ = [j for j in outcome.value if not j.terminal]
             blocking = [j for j in open_ if not j.closes_itself]

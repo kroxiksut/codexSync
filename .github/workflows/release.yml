@@ -127,7 +127,7 @@ jobs:
           ref: ${{ inputs.ref || inputs.release_tag }}
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           architecture: ${{ matrix.python_arch }}
       - name: Install
         shell: pwsh
@@ -170,11 +170,103 @@ jobs:
           name: windows-${{ matrix.arch }}
           path: release/*
 
+  # The Linux build (D-037, CS-421): one folder with both programs, packed as
+  # tar.gz, AppImage, .deb and .rpm. Built on the oldest system the PySide6 the
+  # Windows builds use can run on: glibc 2.35 (Ubuntu 22.04) for x64, 2.39
+  # (Ubuntu 24.04) for ARM64, whose PySide6 wheels need nothing older. The
+  # suite runs first with the interpreter the build is made from.
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || inputs.release_tag }}
+      # Even offscreen, Qt loads EGL, xkbcommon, fontconfig and D-Bus.
+      - name: Qt libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[gui]" pytest pyinstaller
+      - name: Test suite
+        run: python -m pytest -q
+      - name: Build
+        run: python -m PyInstaller --clean --noconfirm codexsync-linux.spec
+      - name: Check the builds
+        run: |
+          expected="codexsync ${{ needs.meta.outputs.version }}"
+          for program in dist/codexsync/codexsync dist/codexsync/codexsync-gui; do
+            actual="$("$program" --version)"
+            test "$actual" = "$expected" || { echo "$program reports '$actual', expected '$expected'"; exit 1; }
+          done
+      - name: Pack
+        run: python scripts/linux_packages.py --tag "$RELEASE_TAG" --dist dist/codexsync --out release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: release/*
+
+  # Each file installed on a clean system of the family it is for, as a person
+  # would: version, every library resolved (`ldd`), the window starts, and a
+  # .deb/.rpm removes cleanly without having touched any home directory.
+  linux-check:
+    name: Linux ${{ matrix.arch }} on clean systems
+    needs: [meta, linux]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            # The oldest system the build is made for (see the `linux` job).
+            oldest: ubuntu:22.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            oldest: ubuntu:24.04
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || inputs.release_tag }}
+          sparse-checkout: scripts/linux_package_check.sh
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: release
+      - name: .deb on Ubuntu 24.04
+        run: docker run --rm -v "$PWD:/w" ubuntu:24.04 sh /w/scripts/linux_package_check.sh deb /w/release/codexsync-$RELEASE_TAG-linux-${{ matrix.arch }}.deb "$VERSION"
+      - name: .rpm on Fedora 43
+        run: docker run --rm -v "$PWD:/w" fedora:43 sh /w/scripts/linux_package_check.sh rpm /w/release/codexsync-$RELEASE_TAG-linux-${{ matrix.arch }}.rpm "$VERSION"
+      - name: AppImage on Ubuntu 24.04
+        run: docker run --rm -v "$PWD:/w" ubuntu:24.04 sh /w/scripts/linux_package_check.sh appimage /w/release/codexsync-$RELEASE_TAG-linux-${{ matrix.arch }}.AppImage "$VERSION"
+      - name: tar.gz on the oldest system it is built for
+        run: docker run --rm -v "$PWD:/w" ${{ matrix.oldest }} sh /w/scripts/linux_package_check.sh tarball /w/release/codexsync-$RELEASE_TAG-linux-${{ matrix.arch }}.tar.gz "$VERSION"
+
   # Only after every build above succeeded, so PyPI never holds a version whose
-  # Windows builds failed. Trusted publishing: no token is stored anywhere.
+  # Windows or Linux builds failed. Trusted publishing: no token is stored anywhere.
   pypi:
     name: Publish to PyPI
-    needs: [meta, dist, exe]
+    needs: [meta, dist, exe, linux, linux-check]
     if: ${{ inputs.publish_pypi && inputs.ref == '' }}
     runs-on: ubuntu-latest
     environment:
@@ -191,7 +283,7 @@ jobs:
 
   github-release:
     name: GitHub release
-    needs: [meta, dist, exe]
+    needs: [meta, dist, exe, linux, linux-check]
     if: ${{ inputs.github_release && inputs.ref == '' }}
     runs-on: ubuntu-latest
     permissions:
@@ -217,4 +309,4 @@ jobs:
             --title "codexSync $RELEASE_TAG" \
             --notes-file assets/release-notes/release-notes.md \
             "${flags[@]}" \
-            assets/windows-*/* assets/python-dist/*
+            assets/windows-*/* assets/linux-*/* assets/python-dist/*

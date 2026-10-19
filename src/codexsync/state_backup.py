@@ -307,15 +307,15 @@ def _wait_until_closed(
         if decision.allowed:
             return monotonic() - started
         if decision.process_state is not ProcessState.RUNNING:
-            raise FailSafeError(f"Cannot safely verify that Codex is closed; no copy was taken. {decision.reason}")
+            raise FailSafeError(f"Cannot safely verify that Codex is closed; no copy was taken. {decision.reason}", code="CODEX_STATE_UNKNOWN")
         if not wait:
             raise SafetyPreconditionError(
-                f"Codex is running; a copy of its state is taken only while it is closed. {decision.reason}"
+                f"Codex is running; a copy of its state is taken only while it is closed. {decision.reason}", code="CODEX_RUNNING"
             )
         waited = monotonic() - started
         if waited >= max_wait_seconds:
             raise SafetyPreconditionError(
-                f"Codex stayed open for {int(waited)} s; no copy was taken this time. {decision.reason}"
+                f"Codex stayed open for {int(waited)} s; no copy was taken this time. {decision.reason}", code="CODEX_RUNNING"
             )
         if not announced:
             LOG.info("Codex is open; the copy waits until it closes (%s)", decision.reason)
@@ -341,7 +341,7 @@ def _copy_into(archive: zipfile.ZipFile, relative: str, source: Path) -> tuple[s
             size += len(chunk)
     after = source.stat()
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or size != after.st_size:
-        raise FailSafeError(f"{relative} changed while it was being copied; no copy was kept")
+        raise FailSafeError(f"{relative} changed while it was being copied; no copy was kept", code="STATE_CHANGED_RETRY")
     return digest.hexdigest(), size
 
 
@@ -410,12 +410,12 @@ def create_state_backup(
         _sweep_partials(root, machine)
         files = select_state_files(state_dir)
         if not files:
-            raise FailSafeError(f"Nothing to copy: {state_dir} holds none of the files a copy takes")
+            raise FailSafeError(f"Nothing to copy: {state_dir} holds none of the files a copy takes", code="NOTHING_TO_COPY")
         created = now()
         name = f"codex-{machine}-{_stamp(created)}.zip"
         final = root / name
         if final.exists():
-            raise FailSafeError(f"A copy named {name} already exists; nothing was replaced")
+            raise FailSafeError(f"A copy named {name} already exists; nothing was replaced", code="COPY_EXISTS", params={"name": name})
         partial = root / (name + PARTIAL_SUFFIX)
         entries: list[dict] = []
         total = 0

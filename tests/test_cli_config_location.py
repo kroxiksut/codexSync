@@ -23,6 +23,7 @@ from codexsync.config_locations import (
     CONFIG_NAME,
     choose_config_path,
     read_config_pointer,
+    standard_config_path,
     write_config_pointer,
 )
 from codexsync.exceptions import ConfigError
@@ -114,6 +115,64 @@ class ResolveConfigPathTests(unittest.TestCase):
         with mock.patch.object(logger, "info") as info:
             _announce_config_choice(choice)
         info.assert_not_called()
+
+
+class StandardPlaceTests(unittest.TestCase):
+    """CS-410: a standard place, searched last and only ever offered."""
+
+    def setUp(self) -> None:
+        self.root = SANDBOX / f"cli-standard-place-{uuid.uuid4().hex}"
+        (self.root / "here").mkdir(parents=True)
+        (self.root / "std").mkdir()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.standard = self.root / "std" / CONFIG_NAME
+
+    def test_it_sits_beside_the_pointer_on_each_system(self) -> None:
+        cases = (
+            ("win32", {"LOCALAPPDATA": "C:/Users/u/AppData/Local"}, Path("C:/Users/u/AppData/Local/CodexSync")),
+            ("linux", {"XDG_CONFIG_HOME": "/home/u/.config"}, Path("/home/u/.config/codexsync")),
+        )
+        for platform_name, env, folder in cases:
+            with self.subTest(platform_name), mock.patch("codexsync.config_locations.sys.platform", platform_name),                     mock.patch.dict("os.environ", env):
+                self.assertEqual(standard_config_path(), folder / CONFIG_NAME)
+        with mock.patch("codexsync.config_locations.sys.platform", "darwin"):
+            self.assertEqual(
+                standard_config_path(), Path.home() / "Library" / "Application Support" / "CodexSync" / CONFIG_NAME,
+            )
+
+    def test_it_is_searched_last(self) -> None:
+        self.standard.write_text("", encoding="utf-8")
+        choice = choose_config_path(None, None, cwd=self.root / "here", standard=self.standard)
+        self.assertEqual((choice.path, choice.source), (self.standard, "standard"))
+        here = self.root / "here" / CONFIG_NAME
+        here.write_text("", encoding="utf-8")
+        choice = choose_config_path(None, None, cwd=self.root / "here", standard=self.standard)
+        self.assertEqual(choice.source, "cwd", "every earlier place wins")
+
+    def test_an_empty_standard_place_is_no_config(self) -> None:
+        choice = choose_config_path(None, None, cwd=self.root / "here", standard=self.standard)
+        self.assertIsNone(choice.path)
+        self.assertFalse(self.standard.exists(), "nothing creates it")
+
+    def test_the_command_line_looks_there(self) -> None:
+        self.standard.write_text("", encoding="utf-8")
+        with mock.patch("codexsync.cli.read_config_pointer", return_value=None),                 mock.patch("codexsync.cli.standard_config_path", return_value=self.standard),                 mock.patch("codexsync.config_locations.Path.cwd", return_value=self.root / "here"):
+            self.assertEqual(_resolve_config_path(None).path, self.standard)
+
+    def test_init_config_names_the_standard_place_and_does_not_use_it(self) -> None:
+        import contextlib
+        import io
+
+        output = self.root / "here" / "config.toml"
+        out = io.StringIO()
+        with mock.patch("codexsync.cli.standard_config_path", return_value=self.standard),                 contextlib.redirect_stdout(out):
+            self.assertEqual(main(["init-config", "--output", str(output)]), 0)
+        self.assertIn(str(self.standard), out.getvalue())
+        self.assertFalse(self.standard.exists())
+        out = io.StringIO()
+        with mock.patch("codexsync.cli.standard_config_path", return_value=self.standard),                 contextlib.redirect_stdout(out):
+            self.assertEqual(main(["init-config", "--output", str(self.standard)]), 0)
+        self.assertNotIn("standard place", out.getvalue(), "nothing to say when it is already there")
 
 
 class PointerTests(unittest.TestCase):

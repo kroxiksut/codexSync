@@ -68,6 +68,86 @@ cd codexSync
 pip install -e ".[gui]"
 ```
 
+### 在 Linux 上
+
+下面每种方式都可行，没有「首选」——按机器情况选择。有 root 和 `apt` 或 `dnf`，用软件包；
+没有 root，用 AppImage 或 `tar.gz`；有 Python 3.11 或更新版本，用 `pipx` 或虚拟环境。
+软件包、AppImage 和 `tar.gz` 从下一个版本起发布在[版本页面](https://github.com/kroxiksut/codexSync/releases)，
+支持 x64（glibc 2.35 或更新：Ubuntu 22.04、Debian 12、Fedora 36 及更新版本）和
+ARM64（glibc 2.39 或更新：Ubuntu 24.04、Debian 13 及更新版本）。每种都包含
+`codexsync` 和 `codexsync-gui` 两个程序。
+
+**.deb 软件包**（Ubuntu、Debian 及其衍生版）安装到 `/opt/codexsync`，两个命令都在
+`PATH` 上，并添加菜单项：
+
+```sh
+sudo apt install ./codexsync-<版本>-linux-amd64.deb   # 安装；用更新的文件执行同一命令即为更新
+sudo apt remove codexsync                             # 删除
+```
+
+**.rpm 软件包**（Fedora 及其衍生版），方式相同：
+
+```sh
+sudo dnf install ./codexsync-<版本>-linux-amd64.rpm   # 安装；用更新的文件执行同一命令即为更新
+sudo dnf remove codexsync                             # 删除
+```
+
+**AppImage** 是一个可以放在任何地方的文件；不带命令时是窗口，带命令时是命令行：
+
+```sh
+chmod +x codexsync-<版本>-linux-amd64.AppImage
+./codexsync-<版本>-linux-amd64.AppImage                          # 窗口
+./codexsync-<版本>-linux-amd64.AppImage -c config.toml doctor    # 命令行
+```
+
+更新时，把新文件以相同的名称放到相同的路径（计划任务指向的就是这个文件）；删除时，删掉它即可。
+它不需要 `libfuse2`；完全没有 FUSE 时，加上 `--appimage-extract-and-run`。
+
+**tar.gz** 是同一个文件夹，可放在任何你能写入的位置。请解压到一个单独的文件夹，这样更新后
+计划任务所指向的路径保持不变：
+
+```sh
+mkdir -p ~/.local/opt/codexsync
+tar -xzf codexsync-<版本>-linux-amd64.tar.gz -C ~/.local/opt/codexsync --strip-components=1   # 安装
+rm -rf ~/.local/opt/codexsync/* && tar -xzf <更新的文件> -C ~/.local/opt/codexsync --strip-components=1   # 更新
+rm -rf ~/.local/opt/codexsync                                                                  # 删除
+```
+
+程序是 `~/.local/opt/codexsync/codexsync` 和 `codexsync-gui`。要按名称调用，请在
+`~/.local/bin` 中建立链接
+（`ln -s ~/.local/opt/codexsync/codexsync ~/.local/opt/codexsync/codexsync-gui ~/.local/bin/`）。
+
+**pipx** 会自己创建并管理虚拟环境（`sudo apt install pipx` 或 `sudo dnf install pipx`，然后
+`pipx ensurepath`）：
+
+```sh
+pipx install --pip-args=--pre "codexsync[gui]"   # 窗口和命令行；不带 [gui] 则只有命令行
+pipx upgrade --pip-args=--pre codexsync          # 更新
+pipx uninstall codexsync                         # 卸载
+```
+
+**手动创建虚拟环境**——系统自带的 Python 不允许直接 `pip install`（PEP 668）；在 Ubuntu 和
+Debian 上请先 `sudo apt install python3-venv`：
+
+```sh
+python3 -m venv ~/.venvs/codexsync
+~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"            # 安装
+~/.venvs/codexsync/bin/pip install --upgrade --pre "codexsync[gui]"  # 更新
+rm -rf ~/.venvs/codexsync                                            # 卸载
+```
+
+把 `~/.venvs/codexsync/bin` 加入 `PATH`，或按这个路径调用命令。0.2 仍是预发布版时需要 `--pre`。
+
+**应用程序菜单。** `.deb` 或 `.rpm` 软件包会把 CodexSync 加入菜单；pipx、虚拟环境、AppImage
+和 `tar.gz` 不会。对于这些方式，`codexsync shortcut install`（或窗口中的「关于 → 应用程序菜单」）
+会在 `~/.local/share` 中写入一个菜单项和图标，启动的正是你运行该命令的那个程序——AppImage 文件、
+解压后的文件夹或虚拟环境。移动该程序后请再运行一次；`codexsync shortcut status` 显示菜单项启动
+的是什么，`codexsync shortcut remove` 只删除它写入的两个文件。已安装软件包时，它不写入任何内容。
+
+**卸载 codexSync 之前**，先移除它的计划任务——`codexsync -c config.toml automation remove`
+（或窗口中的「自动化」），如果创建过菜单项，也一并移除（`codexsync shortcut remove`）：卸载程序不会动你的任务、配置、工作文件夹或 `.codex`，留下的任务会
+一直尝试启动已经不存在的程序。配置和工作文件夹会留在原处，供以后再次安装使用。
+
 ## 首次运行
 
 **窗口：**
@@ -136,14 +216,18 @@ codexSync 假定机器之间有严格的先后顺序：
 - **macOS**（Apple Silicon）在代码和 CI 中受支持。macOS 的进程检测器已经
   写好，并针对记录下来的 `ps` 输出做过测试，但在还没有在 Mac 上对着真实运行的 Codex 跑过之前，
   该平台会把自己报告为不受支持：进程状态读作「无法判定」，因而每条会写入的命令都会
-  拒绝执行。
+  拒绝执行。`codexsync codex processes` 会显示检查在那里看到了什么——按进程号和规则列出的
+  匹配项，不含路径——以及如果信任它会读到什么；正是这样的报告能验证它
+  （[如果你有 Mac](../../README.zh.md#如果你有-mac)）。
 - **Linux** 处于实验阶段，正如 Codex 自己的 Linux 桌面应用（自 2026 年 8 月起）仍是预览版。
   codexSync 可以从 PyPI 安装，代码和 CI 都能在 Linux 上运行。进程检测器已经在 Ubuntu 26.04
   上对着真实运行的 Codex 观察过（桌面应用 26.1002，2026-10-09），所以会写入的命令已开放；
   Linux 与另一台机器之间的完整交接还没有试过。Codex 在对话中启动的命令可能比应用本身活得更久，
   在它结束之前，Codex 都被视为正在运行。
 - **最低版本：** Windows 10（1809）或更新版本；通过 pip 安装需要 Python 3.11 或更新版本；
-  在 macOS 上使用窗口需要 macOS 13 或更新版本（当前 PySide6 支持的范围）。
+  在 macOS 上使用窗口需要 macOS 13 或更新版本（当前 PySide6 支持的范围）。Python 3.14 及更新版本
+  能读取 Codex 压缩保存的聊天（`.jsonl.zst`）；更旧的版本会让它们保持阻止状态
+  （[会话](SESSIONS.md#当-codex-压缩自己的聊天)）。发布的程序用 3.14 构建。
 - CI 在 `windows-latest` 和 `macos-latest` 上用 Python 3.11、3.12、3.13 和 3.14 跑测试，
   并在 `ubuntu-latest` 上作为实验性任务运行：它失败不会让整个运行失败。
 

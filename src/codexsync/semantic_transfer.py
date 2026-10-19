@@ -60,7 +60,14 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from .exceptions import FailSafeError
-from .jsonl_codec import JsonlCodec, codec_of, logical_name, logical_relative_path, with_codec
+from .jsonl_codec import (
+    JsonlCodec,
+    codec_of,
+    held_in_any_container,
+    logical_name,
+    logical_relative_path,
+    with_codec,
+)
 from .path_mapping import PathMappingError, PathMappingRule, apply_path_mapping, path_flavor
 from .semantic_merge import (
     CANONICAL_DIGEST_VERSION,
@@ -1643,9 +1650,11 @@ def _destination_check(
         logical = logical_relative_path(target)
         if logical in known[side]:
             return True
-        return any(
-            os.path.lexists(roots[side] / _os_path(with_codec(logical, codec))) for codec in JsonlCodec
-        )
+        if any(os.path.lexists(roots[side] / _os_path(with_codec(logical, codec))) for codec in JsonlCodec):
+            return True
+        # A container this version cannot read counts too: Codex keeps a chat
+        # as `x.jsonl.zst` while its catalogue names `x.jsonl` (CS-394).
+        return held_in_any_container(roots[side] / _os_path(logical))
 
     return occupied
 

@@ -66,6 +66,7 @@ owner that removes files from it on its own schedule. A path written with the
 | `[scheduler]` | The scheduled safe job | [below](#automation) |
 | `[state_backup]` | Copies of `.codex` after sign-in and/or every N hours | [below](#copies-of-codex) |
 | `[handoff]` | Handing work between machines, and the watcher task | [Synchronisation](SYNC.md#handing-work-over) |
+| `[project_files]` | What a project folder without git publishes about its secret files (default: no hash) | [Projects](PROJECTS.md#project-folders) |
 | `[logging]` | Level, format, rotation, retention | [below](#logging) |
 | `[safety]` | Fixed: Codex must be stopped, uncertainty aborts | not editable |
 | `[state]` | Where the sync manifest lives | — |

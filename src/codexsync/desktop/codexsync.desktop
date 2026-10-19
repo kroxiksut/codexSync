@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=CodexSync
+GenericName=Codex sync
+GenericName[ru]=Синхронизация Codex
+GenericName[zh_CN]=Codex 同步
+Comment=Carry Codex chats, projects and settings between machines, with backups
+Comment[ru]=Переносит чаты, проекты и настройки Codex между машинами, с резервными копиями
+Comment[zh_CN]=在多台机器之间同步 Codex 的对话、项目和设置，并保留备份
+Exec=codexsync-gui
+Icon=codexsync
+Terminal=false
+Categories=Utility;Development;
+Keywords=codex;sync;backup;

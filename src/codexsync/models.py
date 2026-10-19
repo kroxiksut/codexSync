@@ -199,6 +199,24 @@ class StateBackupConfig:
 MAX_HANDOFF_DELIVERY_WAIT_MINUTES = 24 * 60
 
 
+#: How a project folder's secret-looking files are published (D-038):
+#: name, size and time / name only / like any other file, with its SHA-256.
+SECRET_FILE_MODES = ("no_hash", "presence", "hash")
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectFilesConfig:
+    """The `[project_files]` section (D-038): what a plain project folder publishes.
+
+    Applies to files that look like secrets; every other file keeps its hash.
+    Values are kept as read and checked by `_validate_config`.
+    """
+
+    secret_files: str = "no_hash"
+    #: The person's own patterns, added to the built-in ones.
+    secret_patterns: list[str] = field(default_factory=list)
+
+
 @dataclass(slots=True, frozen=True)
 class HandoffConfig:
     """The `[handoff]` section (CS-328, `D-018`): passing work between machines.
@@ -238,6 +256,7 @@ class AppConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     state_backup: StateBackupConfig = field(default_factory=StateBackupConfig)
     handoff: HandoffConfig = field(default_factory=HandoffConfig)
+    project_files: ProjectFilesConfig = field(default_factory=ProjectFilesConfig)
 
 
 @dataclass(slots=True, frozen=True)

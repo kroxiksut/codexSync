@@ -56,6 +56,38 @@ class SyncEngineTests(unittest.TestCase):
         finally:
             shutil.rmtree(case_dir, ignore_errors=True)
 
+    def test_a_run_counts_the_files_it_writes_and_a_broken_counter_changes_nothing(self) -> None:
+        # CS-339: the window says "file 2 of 2" while a sync writes.
+        case_dir = Path.cwd() / "test-sandbox" / f"sync-engine-progress-{uuid.uuid4().hex}"
+        case_dir.mkdir(parents=True)
+        try:
+            for name in ("a", "b"):
+                (case_dir / f"{name}.src").write_text(name, encoding="utf-8")
+            plan = SyncPlan(to_local=[
+                CopyAction(src=case_dir / f"{name}.src", dst=case_dir / f"{name}.txt", relative_path=f"{name}.txt")
+                for name in ("a", "b")
+            ], to_cloud=[])
+            seen: list[tuple[int, int]] = []
+
+            def engine(progress):
+                return SyncEngine(
+                    backup_manager=BackupManager(case_dir / "backups", "machine-a", 7, 0),
+                    temp_dir=case_dir / ".tmp", progress=progress,
+                )
+
+            engine(lambda done, total: seen.append((done, total))).execute(plan, dry_run=False)
+            self.assertEqual(seen, [(0, 2), (1, 2), (2, 2)])
+
+            def broken(done, total):
+                raise RuntimeError("a progress bar that throws")
+
+            for name in ("a", "b"):
+                (case_dir / f"{name}.src").write_text(name * 2, encoding="utf-8")
+            engine(broken).execute(plan, dry_run=False)
+            self.assertEqual((case_dir / "b.txt").read_text(encoding="utf-8"), "bb")
+        finally:
+            shutil.rmtree(case_dir, ignore_errors=True)
+
     def test_backup_before_overwrite_with_zip_compression(self) -> None:
         tmp_root = Path.cwd() / "test-sandbox"
         tmp_root.mkdir(parents=True, exist_ok=True)

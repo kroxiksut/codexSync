@@ -1,5 +1,26 @@
+from collections.abc import Mapping
+
+
 class CodexSyncError(Exception):
-    """Base error for codexsync."""
+    """Base error for codexsync.
+
+    The message is English and is what the command line prints. ``code``
+    names the kind of refusal and ``params`` carries its values (a path, a
+    count), so a window can say the same thing in its own language (CS-332);
+    each code has a ``failure.code.<CODE>`` sentence in every language file,
+    and its placeholders are names from ``params``. A refusal without a code
+    is shown in English.
+    """
+
+    code: str | None = None
+
+    def __init__(
+        self, *args: object, code: str | None = None, params: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        if code is not None:
+            self.code = code
+        self.params: dict[str, object] = dict(params or {})
 
 
 class ConfigError(CodexSyncError):
@@ -79,9 +100,13 @@ class GuardianIntegrityError(FailSafeError):
 class GuardianBusyError(FailSafeError):
     """Another Guardian writer already holds the per-machine lock."""
 
+    code = "GUARDIAN_BUSY"
+
 
 class OperationBusyError(FailSafeError):
     """Another mutation operation owns the same local Codex state root."""
+
+    code = "OPERATION_BUSY"
 
 
 class RecoveryPendingError(FailSafeError):

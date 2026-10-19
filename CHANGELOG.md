@@ -2,6 +2,129 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+- A standard place for the config, per machine and never roaming
+  (`%LOCALAPPDATA%\CodexSync\config.toml`, `~/Library/Application
+  Support/CodexSync/config.toml`, `$XDG_CONFIG_HOME/codexsync/config.toml`).
+  Commands without `-c` look there last, the first-run page offers it with a
+  *Standard place* button that only fills the field, and `init-config` names
+  it. Nothing creates a config there by itself.
+- `codexsync codex processes` (`--json`): which Codex processes the process
+  check sees on this machine — each match by process id, parent id, short name
+  and the rule that matched — and what the safety gate reads; on an unproven
+  platform (macOS) also what it would read if trusted. It needs no config,
+  writes nothing, not even a log file, and prints no path or command line, so
+  its output can go into an issue as it is. README and the macOS issue template
+  ask Mac owners for it.
+- `codexsync doctor --report`: the same reading as JSON for an issue —
+  versions (codexSync, Python, OS, Codex), formats, gates, each check's status
+  and counts, with no name, path, title or chat id. The bug report form asks
+  for it.
+- The window's status bar has **Tasks…**: what runs, from which page, since
+  when and how far, with *Stop waiting* for each read, and the jobs that ended
+  lately with their result.
+- A full sync says how many files of each stage it has written ("Syncing
+  settings 3 of 10", then the chats), in the window's status bar and on the
+  page that started it.
+- After a decision on *Sessions*, **Synchronise with these decisions** runs the
+  full sync that applies it — with the rule chosen there, if it was a rule.
+- Linux builds: `.deb`, `.rpm`, AppImage and `tar.gz`, for x64 (glibc 2.35:
+  Ubuntu 22.04, Debian 12, Fedora 36 and newer) and ARM64 (glibc 2.39), each
+  holding both programs. A package installs into `/opt/codexsync` with both
+  commands on `PATH` and a menu entry, and has no install or remove script:
+  it never touches a home directory, a config, the workspace or `.codex`. The
+  AppImage needs no `libfuse2`. Each file is installed and checked on a clean
+  system before a release is published. The packages name their maintainer
+  with an address, as Debian's rules ask.
+- `codexsync shortcut install` / `remove` / `status` (Linux): puts the window
+  in this user's applications menu for an install no package made — pipx, a
+  virtual environment, the AppImage, the `tar.gz` — starting the very program
+  it was run with, and takes it away again. It writes only its own two files
+  into `~/.local/share`, never replaces or removes an entry it did not write,
+  and writes nothing when a package installed one. Also in the window: *About
+  → Applications menu*.
+
+### Changed
+- A project folder without git no longer publishes the SHA-256 of files that
+  look like secrets (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, SSH
+  private keys, the credential files codexSync never copies) into the shared
+  workspace: by default they are listed by name, size and change time, and
+  never opened (`D-038`). `[project_files] secret_files` chooses `no_hash`,
+  `presence` (name only) or `hash` (as before); `secret_patterns` adds your own
+  patterns. Also in the window: Settings → Synchronisation. A list published by
+  0.2.0a1 is replaced at the next check, and the cached hashes go with it.
+
+- The window's *Dry run* (Overview and Synchronisation) shows what
+  *Synchronise* would do — files, chats to the cloud copy and into Codex, chats
+  that need a decision, projects to add — instead of the settings files alone,
+  and works while Codex is open, saying then that it is a picture of a state
+  Codex is still writing. `codexsync plan` prints the same at
+  `[sync] scope = "full"`; `sync --dry-run` still wants Codex closed.
+- Work offered on two pages is one job: a dry run on Overview and
+  Synchronisation, *Synchronise* on Synchronisation and Automation, the chat
+  list on Projects and Sessions. It is busy on both pages and its result is
+  shown on both, instead of a second click running it again.
+- *Overview → Environment checks* says each line in the window's language
+  (`doctor` still prints English, shown on hover), sorts by any column — the
+  status by severity — and copies rows with Ctrl+C or the context menu.
+- *Sessions* speaks of chats and versions instead of branches, and the two
+  choices name the machines.
+- *Recovery*: the journal list takes the page's height, with a handle between
+  it and the actions; on a laptop screen the actions card no longer drew its
+  sentences over each other.
+- The window says the common refusals in its own language instead of quoting
+  the English text: Codex open or undetermined, another operation or Guardian
+  already at work, a missing or unusable folder, something changed since the
+  preview, files changed on both machines, chats waiting for a decision, the
+  config changed on disk, and the backup and copy refusals. The command line
+  prints the English text as before.
+
+### Removed
+- The commercial licence and the contributor licence agreement: codexSync is
+  `GPL-3.0-or-later` only, and a contribution is accepted under the same
+  licence with nothing extra to sign.
+
+### Fixed
+- A sync, chat transfer or restore that had written everything no longer
+  reports a failure when removing old backups afterwards fails (a folder a
+  cloud client briefly held, for one): the clean-up logs a warning and the next
+  run does it again.
+- `doctor` no longer reports chats Codex keeps compressed (`x.jsonl.zst`, while
+  its chat list names `x.jsonl`) as chats Codex does not show: on a real
+  machine it counted 323 of 340 and advised a chat-list rebuild nobody needed.
+  `doctor --report` counted the same way.
+- A file in Codex's own folder (`.codex`, `CODEX_HOME` or
+  `paths.local_state_dir`) is never opened as the CodexSync config: Codex keeps
+  a `config.toml` of its own there. `-c` naming one stops with exit code 4
+  before the file is read and says whose file it is; a start without `-c`
+  never picks it, and the window refuses to switch to it with a note.
+  Creating and saving there were refused already.
+- `doctor` on a fresh machine: the cloud copy, backup and temporary folders
+  not created yet are a warning ("the first sync creates it"), not a failure,
+  and the checks of `.codex` still run. `doctor` still creates nothing.
+- The first-run page drops its last message as soon as a field is edited: a
+  refusal about the old values no longer hangs over a path that may now be
+  right.
+- Chats Codex keeps compressed (`rollout-….jsonl.zst`, Codex 0.163 does this
+  for every chat not touched for a while) are no longer invisible. 0.2.0a1 did
+  not know that container, took such a chat for absent, and a sync would have
+  put the mirror's older copy into `.codex` beside it. On Python 3.14 or later
+  such a chat is read and compared like any other, and what grew here goes to
+  the mirror (never stored as zstd); a continuation from the other machine
+  waits in the mirror (`IN_PLACE_CONTAINER`) until it is known what Codex reads
+  beside a compressed file. On Python 3.11–3.13 the chat is blocked on both
+  sides (`UNSUPPORTED_CONTAINER`); the other chats sync as before. The Windows
+  programs are now built with Python 3.14 for this.
+- A format of Codex's this version does not know now blocks the write it would
+  feed, everywhere: a chat list (`state_<n>.sqlite`) missing a column codexSync
+  reads, or two of them, is no longer treated as absent (no chat is written
+  into `.codex`); `codex repair` leaves an unknown rebuild status alone
+  (`CATALOGUE_STATUS_UNKNOWN`); `recover rollback` does not write an old global
+  state over projects in an unknown shape. `doctor` gives Codex's version and
+  one answer, `codex_compat`: every format known, or which writes are off.
+
 ## [0.2.0a1] - 2026-10-11
 
 **The first alpha of 0.2.** codexSync now hands your Codex work between

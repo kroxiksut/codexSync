@@ -1,11 +1,14 @@
 """Synchronisation: the plan in both directions, a dry run, and the real sync.
 
-Three buttons, three different promises. *Check plan* builds the plan the way
-`codexsync plan` does -- it runs while Codex is open, writes nothing, and its
-result is marked volatile. *Dry run* goes through the gate and the engine and
-writes nothing. *Synchronise* never reuses what is on screen: `app.py` builds
-the plan again behind the gate at the moment of the write, so a stale table
-cannot be what gets applied. The confirmation says so.
+Three buttons, three different promises. *Check plan* lists the settings
+files the plan would copy -- it runs while Codex is open, writes nothing, and
+its result is marked volatile. *Dry run* is what *Synchronise* would do: at
+`[sync] scope = "full"` every plan a full sync builds (settings, chats,
+projects), read while Codex may be open like `codexsync plan` (CS-411); at
+`"settings"` the files dry run through the gate. *Synchronise* never reuses
+what is on screen: `app.py` builds the plan again behind the gate at the moment
+of the write, so a stale table cannot be what gets applied. The confirmation
+says so.
 
 The search and the two filters narrow *what is shown* and nothing else. `sync`
 has no partial apply -- the plan is taken whole -- so a filtered table is a
@@ -80,6 +83,16 @@ class SyncModel(Model):
         self.preview = None
         self.result = None
         self.history = None
+
+    def receive(self, kind: str, outcome: Outcome) -> None:
+        """A dry run from Overview, a full sync from Automation (CS-336)."""
+        if kind == "dry_run":
+            self.result, self.run_kind = outcome, "dry"
+        elif kind == "full_sync":
+            self.result, self.run_kind = outcome, "apply"
+            self.history = None
+            if outcome.ok:
+                self.preview = None
 
 
 class SyncScreen(Screen):
@@ -192,7 +205,7 @@ class SyncScreen(Screen):
             model.history_busy = False
             model.history = outcome
 
-        self.read(lambda: self.host.controller.sync_history(limit=HISTORY_LIMIT), apply)
+        self.read(lambda: self.host.controller.sync_history(limit=HISTORY_LIMIT), apply, kind="sync_history")
 
     def _build_filters(self):
         """Search, direction, top-level folder, and how much is hidden."""
@@ -282,10 +295,10 @@ class SyncScreen(Screen):
             return
         self.model.preview_busy = True
         self.render()
-        self.read(self.host.controller.preview_sync, _apply_preview)
+        self.read(self.host.controller.preview_sync, _apply_preview, kind="sync_preview")
 
     def start_run(self, *, dry_run: bool) -> None:
-        if self.model.run_busy:
+        if self.model.run_busy or self.shared_busy(*SHARED_RUNS):
             return
         if not dry_run and not self.host.confirm(
             self.t("sync.confirm.title"),
@@ -311,7 +324,11 @@ class SyncScreen(Screen):
 
         direction = self.model.run_direction or None
         if dry_run:
-            self.run(lambda: controller.sync(dry_run=True, direction=direction), apply)
+            # Reads only, so it may be stopped and is dropped by a config save.
+            self.read(
+                lambda progress=None: controller.dry_run(direction=direction, progress=progress),
+                apply, progress=True, kind="dry_run",
+            )
             return
         # The real thing is the full sync the handoff runs (CS-334): settings,
         # then chats, then projects, one confirmation for all of it -- a button
@@ -319,7 +336,7 @@ class SyncScreen(Screen):
         # is how a laptop ended up with its own sidebar after a sync.
         self.host.run(
             self.page, lambda progress=None: controller.handoff_now(progress=progress, direction=direction),
-            apply, progress=True,
+            apply, progress=True, kind="full_sync",
         )
 
     def decide(self, policy: str) -> None:
@@ -330,7 +347,7 @@ class SyncScreen(Screen):
         keeping save the Settings page uses -- so the next run, from any shell,
         decides the same way; a save that fails stops before the sync.
         """
-        if self.model.run_busy:
+        if self.model.run_busy or self.shared_busy(*SHARED_RUNS):
             return
         remember = self.remember.isChecked()
         if not self.host.confirm(
@@ -362,7 +379,7 @@ class SyncScreen(Screen):
             if outcome.ok:
                 model.preview = None
 
-        self.host.run(self.page, go, apply, progress=True)
+        self.host.run(self.page, go, apply, progress=True, kind="full_sync")
 
     def open_decisions(self) -> None:
         """Go to the chats the stopped sync named, for the pair it was syncing."""
@@ -375,7 +392,9 @@ class SyncScreen(Screen):
     def render(self) -> None:
         model = self.model
         palette = self.palette_
-        busy = model.preview_busy or model.run_busy
+        # A dry run from Overview or a sync from Automation is this page's too (CS-336).
+        running = model.run_busy or self.shared_busy(*SHARED_RUNS)
+        busy = model.preview_busy or running
         self.check_button.setEnabled(not busy)
         self.dry_button.setEnabled(not busy)
         self.apply_button.setEnabled(not busy)
@@ -393,7 +412,7 @@ class SyncScreen(Screen):
             self.summary.setText("")
             self.empty.setText(self.t("sync.not_checked"))
         elif not outcome.ok:
-            self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
             self.table.setRowCount(0)
             self.summary.setText("")
             self.empty.setText("")
@@ -438,11 +457,17 @@ class SyncScreen(Screen):
 
         run = model.result
         self.links.show(None)
-        if model.run_busy:
-            self.result.setText(self.progress_text() or self.t("sync.running"))
+        if running:
+            self.result.setText(
+                self.progress_text() or self.progress_text("full_sync") or self.progress_text("dry_run")
+                or self.t("sync.running")
+            )
             set_tone(self.result, None, palette)
         elif run is None:
             self.result.setText("")
+        elif run.ok and hasattr(run.value, "chats_to_codex"):
+            self.result.setText(full_preview_text(self, run.value))
+            set_tone(self.result, "attention" if run.value.volatile or run.value.chats_to_decide else "ok", palette)
         elif run.ok and hasattr(run.value, "sync_actions"):
             self.result.setText(full_sync_result(self, run.value))
             self.links.show(run.value)
@@ -471,7 +496,7 @@ class SyncScreen(Screen):
         # A stop on something both machines changed -- chats or settings files
         # -- is answered right here; only chats also have a page to go to.
         stopped = (
-            not model.run_busy and run is not None and not run.ok
+            not running and run is not None and not run.ok
             and run.failure is Failure.NEEDS_A_DECISION
         )
         self._show_decisions(stopped)
@@ -479,7 +504,7 @@ class SyncScreen(Screen):
         self._render_history()
         if (
             model.view == "history" and model.history is None
-            and not (model.history_busy or model.run_busy) and self.isVisible()
+            and not (model.history_busy or running) and self.isVisible()
         ):
             # Dropped by a run while the tab was open: read it again.
             self.load_history()
@@ -559,6 +584,8 @@ class SyncScreen(Screen):
 
 #: A full sync stopped on chats a person has to decide (`ChatDecisionsNeeded`).
 DECISIONS_CODE = "CHAT_DECISIONS_NEEDED"
+#: The work this page shares with Overview (dry run) and Automation (sync now).
+SHARED_RUNS = ("dry_run", "full_sync")
 #: Directions a run may be given instead of `[sync] direction` (the setting's own values).
 RUN_DIRECTIONS = ("bidirectional", "to_cloud", "to_local")
 
@@ -733,6 +760,24 @@ def local_time(iso: str | None) -> str:
     if moment.tzinfo is None:
         return iso
     return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def full_preview_text(screen: Screen, summary) -> str:
+    """A full sync dry run, counted as `codexsync plan` counts it (CS-411)."""
+    parts = [
+        screen.p("dry_run.full.files", summary.files),
+        screen.p("sync.count.conflicts", summary.file_conflicts) if summary.file_conflicts else "",
+        screen.p("dry_run.full.chats_to_cloud", summary.chats_to_cloud),
+        screen.p("dry_run.full.chats_to_codex", summary.chats_to_codex),
+        screen.p("dry_run.full.chats_to_decide", summary.chats_to_decide) if summary.chats_to_decide else "",
+        screen.t("dry_run.full.projects_not_carried") if summary.projects_to_add is None
+        else screen.p("dry_run.full.projects_to_add", summary.projects_to_add),
+        screen.t("dry_run.full.waiting", machines=", ".join(summary.waiting_for)) if summary.waiting_for else "",
+    ]
+    text = f"{screen.t('dry_run.full.done')} {screen.join(parts)}"
+    if summary.volatile:
+        text += " " + screen.t("dry_run.full.volatile")
+    return text
 
 
 def _result_tone(run) -> str | None:

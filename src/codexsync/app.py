@@ -107,6 +107,7 @@ from .project_files import (
     WARNINGS as FILES_WARNINGS,
     FilesPublication,
     GitRunner,
+    SecretRule,
     Verdict as FilesVerdict,
     compare,
     now_utc as files_now_utc,
@@ -132,6 +133,9 @@ from .guardian_schema import (
 from .guardian_models import ValidationStatus
 from .planner import build_sync_plan
 from .process_knowledge import default_background_process_names, default_process_names
+from .process_report import ProcessReport, build_process_report, os_key as process_os_key
+from .issue_report import build_issue_report
+from .program_file import frozen_program
 from .preflight import (
     PreflightCheckResult,
     PreflightReport,
@@ -290,6 +294,7 @@ from .handoff import (
 )
 from .notifications import Notifier
 from .codex_closer import CloseOutcome, ask_codex_to_quit
+from .desktop_shortcut import ShortcutStatus, install_shortcut, remove_shortcut, shortcut_status
 from .version import PRODUCER_VERSION, __version__
 
 LOG = logging.getLogger(__name__)
@@ -302,6 +307,8 @@ __all__ = [
     "with_run_choices",
     "FullSyncPreview",
     "preview_full_sync",
+    "summarize_full_sync",
+    "FullSyncSummary",
     "ConfigChange",
     "change_config_value",
     "change_path_mappings",
@@ -319,6 +326,13 @@ __all__ = [
     "refresh_thread_catalogue",
     "CatalogueRefreshResult",
     "check_codex",
+    "codex_process_report",
+    "ShortcutStatus",
+    "install_shortcut",
+    "remove_shortcut",
+    "shortcut_status",
+    "build_issue_report",
+    "frozen_program",
     "repair_codex",
     "CodexHealth",
     "CodexRepairResult",
@@ -558,7 +572,7 @@ def build_context(
     local_dir, cloud_dir = locate_state_dirs(cfg)
     if not cfg.targets.include_roots:
         # Never "everything": that is where the credentials live (CS-289).
-        raise ConfigError("targets.include_roots is not set: there is nothing to synchronise")
+        raise ConfigError("targets.include_roots is not set: there is nothing to synchronise", code="NOTHING_TO_SYNC")
 
     local_idx, cloud_idx = _build_indexes(cfg, local_dir, cloud_dir)
     manifest = load_manifest(
@@ -660,11 +674,11 @@ def apply_repair_projects(
         # an internal fault: it must map to exit code 4, not 1.
         raise ConfigError(f"Cannot read repair plan {plan_path}: {exc}") from exc
     if plan.plan_id != confirm_plan:
-        raise ConfigError("--confirm-plan must exactly match the saved repair plan id")
+        raise ConfigError("--confirm-plan must exactly match the saved repair plan id", code="PLAN_CHANGED")
     if plan.volatile or plan.codes:
         raise FailSafeError("Volatile or unresolved repair plan cannot be applied")
     if plan.mapping_digest != mapping_digest(path_rules(cfg)):
-        raise FailSafeError("Path mapping rules changed after the repair scan")
+        raise FailSafeError("Path mapping rules changed after the repair scan", code="PLAN_CHANGED")
     unsupported = {RepairActionKind.AMBIGUOUS_PROJECT, RepairActionKind.UNSUPPORTED_BACKEND}
     if any(action.kind in unsupported for action in plan.actions):
         raise ConflictError("Repair plan contains unresolved or unsupported actions")
@@ -676,7 +690,7 @@ def apply_repair_projects(
     source = local_dir / ".codex-global-state.json"
     original = _read_live_state(source, config_path)
     if hashlib.sha256(original).hexdigest() != plan.global_state_sha256:
-        raise FailSafeError("Global state changed after the repair scan")
+        raise FailSafeError("Global state changed after the repair scan", code="PLAN_CHANGED")
     try:
         state = json.loads(original.decode("utf-8-sig"))
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -1019,7 +1033,7 @@ def move_chats(
     if plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm must match the plan id from the preview; the state has changed "
-            "since then, so preview the move again and read what it now says"
+            "since then, so preview the move again and read what it now says", code="PLAN_CHANGED"
         )
     if plan.codes:
         raise ConflictError("Chat move plan is unresolved: " + ", ".join(plan.codes))
@@ -1227,7 +1241,7 @@ def sync_projects(
     if not planned_here and plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from the preview; the state has changed "
-            "since then, so preview again and read what it now says"
+            "since then, so preview again and read what it now says", code="PLAN_CHANGED"
         )
     for item in plan.ambiguous:
         LOG.warning(
@@ -1569,7 +1583,7 @@ def refresh_thread_catalogue(
     if not planned_here and plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from the preview; Codex's catalogue or the chat files "
-            "changed since then, so preview again"
+            "changed since then, so preview again", code="PLAN_CHANGED"
         )
     if not plan.writes:
         LOG.info("thread catalogue: %s, nothing asked of Codex", plan.status.value)
@@ -1653,6 +1667,25 @@ def _settle_plan(cfg: AppConfig, config_path: Path, local_dir: Path) -> SettlePl
     return build_settle_plan(local_dir, reading, own_backup=own)
 
 
+def codex_process_report(config_path: Path | None) -> ProcessReport:
+    """What the process check sees here, safe to paste into an issue (CS-418). Reads only.
+
+    With a config its `[process_detection]` names are used; without one, the
+    names this version knows (the shipped template carries the same). Nothing
+    is created: no config, no log file.
+    """
+    if config_path is not None:
+        cfg = load_config(config_path)
+        names = list(cfg.process_detection.process_names)
+        markers = list(cfg.process_detection.background_process_names.get(process_os_key(), []))
+        source = "config"
+    else:
+        names = default_process_names()
+        markers = default_background_process_names().get(process_os_key(), [])
+        source = "built-in"
+    return build_process_report(names, markers, names_from=source)
+
+
 def check_codex(config_path: Path, *, gate: SafetyGate | None = None) -> CodexHealth:
     """Why Codex may not start or show its work, and what can be repaired (D-032).
 
@@ -1721,7 +1754,7 @@ def repair_codex(
     if plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from `codex repair`; Codex's catalogue changed since "
-            "then, so check again"
+            "then, so check again", code="PLAN_CHANGED"
         )
     if not plan.writes:
         LOG.info("codex repair: nothing to repair")
@@ -1809,7 +1842,7 @@ def sync_chat_names(
     if not planned_here and plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from the preview; chat names changed since then, "
-            "so preview again"
+            "so preview again", code="PLAN_CHANGED"
         )
     if dry_run:
         LOG.info("chat names dry-run: %d name(s) would be set", len(plan.changes))
@@ -1884,7 +1917,7 @@ def follow_chat_archive(
     if not planned_here and plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from the preview; the catalogue or the chat files "
-            "changed since then, so preview again"
+            "changed since then, so preview again", code="PLAN_CHANGED"
         )
     if dry_run or not plan.writes:
         if dry_run:
@@ -2009,11 +2042,12 @@ def check_project_files(
     from concurrent.futures import ThreadPoolExecutor
 
     cache_root = _project_hash_cache_root()
+    secrets = SecretRule(cfg.project_files.secret_files, tuple(cfg.project_files.secret_patterns))
     with ThreadPoolExecutor(max_workers=PROJECT_FILES_WORKERS) as pool:
         states = dict(zip(
             projects,
             pool.map(
-                lambda item: read_files_state(Path(item[0]), git=git, cache_root=cache_root),
+                lambda item: read_files_state(Path(item[0]), git=git, cache_root=cache_root, secrets=secrets),
                 projects.values(),
             ),
         ))
@@ -2153,7 +2187,7 @@ def _write_codex_catalogue(
             journal = journals.transition(journal, JournalState.BACKED_UP)
             gate.require(OperationKind.SESSION_APPLY, final=True)
             if not still_planned():
-                raise FailSafeError("Codex's catalogue changed after it was read; nothing was written. Run again.")
+                raise FailSafeError("Codex's catalogue changed after it was read; nothing was written. Run again.", code="STATE_CHANGED_RETRY")
             journal = journals.transition(journal, JournalState.COMMITTING)
         except Exception as exc:
             _close_journal_after_failure(journals, journal, exc)
@@ -2497,6 +2531,7 @@ def apply_session_transfer(
     resolutions_path: Path | None = None,
     dry_run: bool = False,
     origin: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> int:
     """Apply one exact session transfer plan with Codex closed.
 
@@ -2522,9 +2557,9 @@ def apply_session_transfer(
     except ValueError as exc:
         raise ConfigError(f"Cannot read transfer plan {plan_path}: {exc}") from exc
     if plan.plan_id != confirm_plan:
-        raise ConfigError("--confirm-plan must exactly match the saved transfer plan id")
+        raise ConfigError("--confirm-plan must exactly match the saved transfer plan id", code="PLAN_CHANGED")
     if plan.volatile:
-        raise FailSafeError("A volatile transfer plan cannot be applied; rescan with Codex closed")
+        raise FailSafeError("A volatile transfer plan cannot be applied; rescan with Codex closed", code="PLAN_VOLATILE")
 
     gate = _make_safety_gate(cfg)
     gate.require(OperationKind.SESSION_APPLY)
@@ -2537,14 +2572,14 @@ def apply_session_transfer(
     )
     if fresh.plan_id != plan.plan_id:
         raise FailSafeError(
-            "Session state changed after the scan; rebuild the plan and confirm the new id"
+            "Session state changed after the scan; rebuild the plan and confirm the new id", code="PLAN_CHANGED"
         )
 
     unresolved = [item for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS]
     if unresolved:
         raise ConflictError(
             f"{len(unresolved)} plan item(s) are blocked on a decision only you can make: "
-            + ", ".join(sorted({item.action.value for item in unresolved}))
+            + ", ".join(sorted({item.action.value for item in unresolved})), code="TRANSFER_DECISIONS_NEEDED", params={"count": len(unresolved)}
         )
     deferred = [item for item in plan.blocked_items if item.action not in _UNRESOLVED_TRANSFER_BLOCKS]
     if deferred:
@@ -2617,6 +2652,7 @@ def apply_session_transfer(
             pre_commit_check=pre_commit,
             before_replace_check=lambda: gate.require(OperationKind.SESSION_APPLY, final=True),
             after_backup=after_backup,
+            progress=progress,
         )
         try:
             engine.execute(copies, dry_run=False)
@@ -2731,7 +2767,7 @@ def _transfer_copy_actions(
             root, bucket = cloud_dir, to_cloud
             codec = codec_of(item.target_relative_path) or JsonlCodec.NONE
         if source is None:
-            raise FailSafeError("A planned branch is no longer present on its source side")
+            raise FailSafeError("A planned branch is no longer present on its source side", code="PLAN_CHANGED")
         destination = root / Path(*item.target_relative_path.split("/"))
         _require_within(destination, root, "session transfer destination")
         source_root = cloud_dir if towards_local else local_dir
@@ -2746,7 +2782,7 @@ def _transfer_copy_actions(
         if MOVES_BRANCH in item.codes:
             old = (local_by_hash if towards_local else remote_by_hash).get(item.session_hash)
             if old is None:
-                raise FailSafeError("A planned move no longer finds the file it moves")
+                raise FailSafeError("A planned move no longer finds the file it moves", code="PLAN_CHANGED")
             if old.relative_path == item.target_relative_path:
                 raise FailSafeError("A planned move names the file it moves as its destination")
             old_path = root / Path(*old.relative_path.split("/"))
@@ -2945,7 +2981,10 @@ def sync_plan_counts(plan: SyncPlan) -> dict[str, int]:
     }
 
 
-def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> None:
+def run_sync(
+    ctx: AppContext, dry_run: bool, *, origin: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> None:
     """Apply (or dry-run) the plan in `ctx`.
 
     `origin` -- ``window``, ``cli`` or ``unattended`` -- is written into the
@@ -2959,7 +2998,7 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
         details = ", ".join(ctx.plan.conflicts)
         if not ctx.config.conflict.report_conflicts:
             details = "hidden by configuration"
-        raise ConflictError(f"Conflict detected for files: {details}. Resolve manually and rerun.")
+        raise ConflictError(f"Conflict detected for files: {details}. Resolve manually and rerun.", code="FILE_CONFLICTS", params={"count": len(ctx.plan.conflicts)})
 
     mgr = BackupManager(
         backup_root=ctx.config.paths.backup_dir,
@@ -3013,6 +3052,7 @@ def run_sync(ctx: AppContext, dry_run: bool, *, origin: str | None = None) -> No
             before_replace_check=lambda: ctx.safety_gate.require(OperationKind.SYNC, final=True),
             after_backup=after_backup,
             before_stage_check=lambda: ctx.safety_gate.require(OperationKind.SYNC),
+            progress=progress,
         )
         try:
             engine.execute(ctx.plan, dry_run=False)
@@ -3379,7 +3419,7 @@ def run_handoff(
     plans = _plans_dir(cfg)
     pair = session_pair_name(source, machine)
     if plan.volatile:
-        raise SafetyPreconditionError("Codex started while the chats were being read; nothing was written")
+        raise SafetyPreconditionError("Codex started while the chats were being read; nothing was written", code="CODEX_STARTED_DURING_READ")
     # Exactly what the Sessions page lists under "needs a decision", and what
     # the apply below would refuse: an archive move is applied (D-023), so it
     # stops nothing (CS-349).
@@ -3405,11 +3445,15 @@ def run_handoff(
 
     report_progress(progress, "sync_settings", 0, 0)
     ctx = build_context(config_path, enforce_safety=True, conflict_policy=conflict_policy, direction=direction)
-    run_sync(ctx, dry_run=False, origin=origin)
+    # "File 3 of 10" while each half writes (CS-339).
+    run_sync(
+        ctx, dry_run=False, origin=origin,
+        progress=lambda done, total: report_progress(progress, "sync_settings", done, total),
+    )
     report_progress(progress, "sync_chats", 0, 0)
     session_actions = apply_session_transfer(
         config_path, plan_path=plan_path, confirm_plan=plan.plan_id, resolutions_path=resolutions_path,
-        origin=origin,
+        origin=origin, progress=lambda done, total: report_progress(progress, "sync_chats", done, total),
     )
     # Projects, names and the catalogue come after both halves and are each
     # applied by the plan they build. Each is re-done by the next sync, so one
@@ -3573,6 +3617,52 @@ class FullSyncPreview:
     #: waits for them first.
     waiting_for: tuple[str, ...] = ()
 
+    @property
+    def volatile(self) -> bool:
+        """Read while Codex may be running: a picture, never a plan a write may use."""
+        return bool(
+            self.files.volatile or self.chats.volatile
+            or (self.projects is not None and self.projects.volatile)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FullSyncSummary:
+    """A full sync preview counted the one way the console and the window both show it."""
+
+    machine: str
+    source: str
+    files: int
+    file_conflicts: int
+    chats_to_cloud: int
+    chats_to_codex: int
+    #: Chats the run would stop on before writing anything (a conflict the
+    #: rule leaves open, a target collision).
+    chats_to_decide: int
+    #: ``None`` when this state's project list cannot be carried.
+    projects_to_add: int | None
+    project_changes: int | None
+    waiting_for: tuple[str, ...]
+    volatile: bool
+
+
+def summarize_full_sync(preview: FullSyncPreview) -> FullSyncSummary:
+    plan = preview.chats
+    projects = preview.projects
+    return FullSyncSummary(
+        machine=preview.machine,
+        source=preview.source,
+        files=preview.files.plan.action_count,
+        file_conflicts=len(preview.files.plan.conflicts),
+        chats_to_cloud=sum(1 for item in plan.items if transfer_direction(item) == "mirror"),
+        chats_to_codex=sum(1 for item in plan.items if transfer_direction(item) == "local"),
+        chats_to_decide=sum(1 for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS),
+        projects_to_add=len(projects.plan.added) if projects is not None else None,
+        project_changes=projects.plan.action_count if projects is not None else None,
+        waiting_for=preview.waiting_for,
+        volatile=preview.volatile,
+    )
+
 
 def preview_full_sync(
     config_path: Path,
@@ -3580,18 +3670,25 @@ def preview_full_sync(
     conflict_policy: str | None = None,
     direction: str | None = None,
     progress: ProgressCallback | None = None,
+    enforce_safety: bool = True,
 ) -> FullSyncPreview:
     """Everything `run_handoff` would plan, and nothing written.
 
-    Codex must be closed, as for the run itself: a preview taken while it
-    writes would describe a state the run will not find.
+    By default Codex must be closed, as for the run itself (`sync --dry-run`):
+    the preview then describes the state the run will find. With
+    ``enforce_safety`` off it is built while Codex runs (`plan`, the window's
+    *Dry run*, CS-411) and is `volatile`: a picture of a state Codex is still
+    writing, which no write may use -- every apply builds its own plans behind
+    the gate.
     """
     cfg = load_config(config_path)
     _require_mutation_compatible_config(cfg)
     machine = _handoff_machine(cfg)
     board = read_board(_handoff_root(cfg))
     pending = board.pending(machine)
-    files = build_context(config_path, enforce_safety=True, conflict_policy=conflict_policy, direction=direction)
+    files = build_context(
+        config_path, enforce_safety=enforce_safety, conflict_policy=conflict_policy, direction=direction,
+    )
     source, chats, _ = _full_sync_chat_plan(
         config_path, cfg, board, machine, pending, progress=progress, conflict_policy=conflict_policy,
         direction=direction,
@@ -3637,13 +3734,13 @@ def close_codex_for_sync(
     outcome = ask()
     LOG.warning("Codex is open and [sync] close_codex is on; asked it to quit: %s", outcome.detail)
     if not outcome.accepted:
-        raise SafetyPreconditionError(f"Codex is open and was not closed: {outcome.detail}. Nothing was written.")
+        raise SafetyPreconditionError(f"Codex is open and was not closed: {outcome.detail}. Nothing was written.", code="CODEX_NOT_CLOSED")
     deadline = monotonic() + wait_seconds
     while gate.check(OperationKind.SYNC).process_state is not ProcessState.STOPPED:
         if monotonic() >= deadline:
             raise SafetyPreconditionError(
                 f"Codex was asked to quit but is still running after {int(wait_seconds)} s; "
-                "close it from the tray. Nothing was written."
+                "close it from the tray. Nothing was written.", code="CODEX_STILL_RUNNING", params={"seconds": int(wait_seconds)}
             )
         sleep(1.0)
     LOG.warning("Codex quit when asked; the sync goes on")
@@ -3876,7 +3973,7 @@ def _observe_global_state(cfg: AppConfig, config_path: Path, local_dir: Path):
             f"{source} is larger than guardian.max_state_bytes ({cfg.guardian.max_state_bytes}) in {config_path}"
         ) from exc
     except SourceUnstableError as exc:
-        raise FailSafeError(f"{source} kept changing while it was read; close Codex or try again") from exc
+        raise FailSafeError(f"{source} kept changing while it was read; close Codex or try again", code="STATE_CHANGED_RETRY") from exc
 
 
 def _read_live_state(source: Path, config_path: Path) -> bytes:
@@ -4000,7 +4097,7 @@ def scan_project_move(config_path: Path, *, project_id: str, new_root: Path) -> 
     source = local_dir / ".codex-global-state.json"
     state = _read_state_for_preview(cfg, source)
     if state is None:
-        raise ConfigError(f"There is no {source.name}; open Codex once so it creates its projects")
+        raise ConfigError(f"There is no {source.name}; open Codex once so it creates its projects", code="NO_GLOBAL_STATE")
     return _build_project_move(
         cfg, local_dir, project_id=_resolve_project_reference(state, project_id),
         new_root=Path(new_root), volatile=volatile, state=state,

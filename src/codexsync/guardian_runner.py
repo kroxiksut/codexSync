@@ -180,7 +180,7 @@ class GuardianRunner:
         except SourceTooLargeError:
             return self._accept_plan(None, latest, resolved=resolved, rejected=("SOURCE_TOO_LARGE",))
         except SourceUnstableError as exc:
-            raise FailSafeError(f"The state file is being written; try again ({exc})") from exc
+            raise FailSafeError(f"The state file is being written; try again ({exc})", code="STATE_CHANGED_RETRY") from exc
         return self._accept_plan(observation, latest, resolved=resolved)
 
     def accept(self, *, confirm_plan: str) -> tuple[GuardianAcceptPlan, GuardianSnapshot]:
@@ -204,12 +204,12 @@ class GuardianRunner:
             except SourceTooLargeError as exc:
                 raise ConflictError("The state file exceeds guardian.max_state_bytes; it cannot be accepted") from exc
             except SourceUnstableError as exc:
-                raise FailSafeError(f"The state file kept changing while it was read; try again ({exc})") from exc
+                raise FailSafeError(f"The state file kept changing while it was read; try again ({exc})", code="STATE_CHANGED_RETRY") from exc
             latest = resolve_or_restore_latest_good(self.store.root_dir, self.store.machine_id)
             plan = self._accept_plan(observation, latest, resolved=True)
             if plan.plan_id != confirm_plan:
                 raise FailSafeError(
-                    "What would be accepted is no longer what the preview showed; build a new preview"
+                    "What would be accepted is no longer what the preview showed; build a new preview", code="PLAN_CHANGED"
                 )
             if plan.codes or observation is None:
                 raise ConflictError(f"Nothing can be accepted: {', '.join(plan.codes)}")

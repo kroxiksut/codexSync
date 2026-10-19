@@ -60,18 +60,15 @@ On a Mac (Apple Silicon, `AI_RULES` 4) with Codex installed:
 5. With the list corrected, run the detector directly against the live machine:
 
    ```sh
-   python - <<'PY'
-   from codexsync.config import load_config
-   from codexsync.runtime import collect_process_snapshot
-   from pathlib import Path
-   cfg = load_config(Path("config.toml"))
-   snapshot = collect_process_snapshot(cfg)
-   print("main:", [p.name for p in snapshot.main_processes])
-   print("background:", [p.name for p in snapshot.background_processes])
-   PY
+   codexsync codex processes          # the built-in names, no config needed
+   codexsync -c config.toml codex processes --json   # the names a config holds
    ```
 
-   With Codex open this must be non-empty; with Codex closed it must be empty.
+   It lists every match by pid, parent pid, short name and the rule that
+   matched (`name` or `path_marker`), prints no path or command line, and
+   writes nothing. On an unproven platform the gate reads `UNKNOWN`;
+   `would_read` is what it would read if trusted. With Codex open that must be
+   `RUNNING`; with Codex closed it must be `STOPPED`.
    Repeat the closed case twice: a helper that lingers for a few seconds after
    quitting is a real finding and belongs in the notes.
 

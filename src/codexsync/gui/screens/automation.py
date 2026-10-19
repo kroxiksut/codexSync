@@ -106,6 +106,13 @@ class AutomationModel(ConfigFormModel):
         self.copies = None
         self.handoff = None
 
+    def receive(self, kind: str, outcome: Outcome) -> None:
+        if kind == "full_sync":
+            # The Synchronisation page's sync is this page's handoff (CS-336);
+            # the board it read before describes the machines as they were.
+            self.handoff_result = outcome
+            self.handoff = None
+
 
 class AutomationScreen(ConfigFormScreen):
     page = "automation"
@@ -245,7 +252,7 @@ class AutomationScreen(ConfigFormScreen):
             if model.task_generation == generation:
                 model.automation = outcome
 
-        self.read(self.host.controller.automation, apply)
+        self.read(self.host.controller.automation, apply, kind="automation_status")
 
     def refresh_copies(self) -> None:
         if self.model.copies_busy or not self.host.controller.config_exists():
@@ -257,7 +264,7 @@ class AutomationScreen(ConfigFormScreen):
             model.copies_busy = False
             model.copies = outcome
 
-        self.read(self.host.controller.codex_backups, apply)
+        self.read(self.host.controller.codex_backups, apply, kind="state_backups_list")
 
     def refresh_handoff(self) -> None:
         """Read the handoff folder. A config without one is a line, not an error."""
@@ -271,12 +278,12 @@ class AutomationScreen(ConfigFormScreen):
             model.handoff_busy = False
             model.handoff = outcome
 
-        self.read(self.host.controller.handoff, apply)
+        self.read(self.host.controller.handoff, apply, kind="handoff_board")
 
     def run_handoff_now(self) -> None:
         """Load and hand off now. A write: asked first, never cancellable."""
         model = self.model
-        if model.handoff_run_busy:
+        if model.handoff_run_busy or self.shared_busy("full_sync"):
             return
         if not self.host.confirm(
             self.t("automation.handoff.confirm.title"),
@@ -289,18 +296,18 @@ class AutomationScreen(ConfigFormScreen):
         self.render()
         controller = self.host.controller
 
-        def go(progress=None) -> Outcome:
-            done = controller.handoff_now(progress=progress)
-            return Outcome(value=(done, controller.handoff()))
-
         def apply(model: AutomationModel, outcome: Outcome) -> None:
             model.handoff_run_busy = False
-            if not outcome.ok:
-                model.handoff_result = outcome
-                return
-            model.handoff_result, model.handoff = outcome.value
+            model.handoff_result = outcome
+            # Read again by `render`: the run moved this machine's record.
+            model.handoff = None
 
-        self.host.run(self.page, go, apply, progress=True)
+        # The outcome is the full sync's own, so the Synchronisation page can
+        # show the very same result (CS-336).
+        self.host.run(
+            self.page, lambda progress=None: controller.handoff_now(progress=progress),
+            apply, progress=True, kind="full_sync",
+        )
 
     def create_copy(self) -> None:
         """One copy now; the page lists the folder again when it is done."""
@@ -384,7 +391,7 @@ class AutomationScreen(ConfigFormScreen):
                 return
             model.task_result, model.automation = outcome.value
 
-        self.run(go, apply)
+        self.run(go, apply, kind="automation_apply")
 
     # --- drawing -----------------------------------------------------------------
 
@@ -438,7 +445,7 @@ class AutomationScreen(ConfigFormScreen):
         self.task_remove.setEnabled(exists and not busy and installed)
 
         if outcome is not None and not outcome.ok:
-            self.task_banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.task_banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
             self.task_details.setText("")
             self.task_command.setVisible(False)
         elif view is None:
@@ -633,8 +640,13 @@ class AutomationScreen(ConfigFormScreen):
         board = model.handoff
         # The folder is the one beside the sync manifest (CS-335); nobody
         # chooses it, so the button needs only a config.
-        self.handoff_now.setEnabled(exists and not model.handoff_run_busy)
-        self.handoff_refresh.setEnabled(exists and not model.handoff_busy and not model.handoff_run_busy)
+        running = model.handoff_run_busy or self.shared_busy("full_sync")
+        self.handoff_now.setEnabled(exists and not running)
+        self.handoff_refresh.setEnabled(exists and not model.handoff_busy and not running)
+        if exists and board is None and not model.handoff_busy and not running and self.isVisible():
+            # Dropped by a sync that just ended, here or on Synchronisation.
+            self.refresh_handoff()
+            board = model.handoff
 
         rows = []
         lines: list[str] = []
@@ -687,8 +699,8 @@ class AutomationScreen(ConfigFormScreen):
 
         text, tone = "", None
         self.handoff_links.show(None)
-        if model.handoff_run_busy:
-            text = self.progress_text() or self.t("automation.handoff.working")
+        if running:
+            text = self.progress_text("full_sync") or self.t("automation.handoff.working")
         elif model.handoff_result is not None:
             result = model.handoff_result
             if not result.ok:
@@ -699,11 +711,12 @@ class AutomationScreen(ConfigFormScreen):
                 parts = [self.t(
                     "automation.handoff.done", files=done.sync_actions, chats=done.session_actions,
                 )]
-                if done.taken:
-                    parts.append(self.t("automation.handoff.done.loaded", machine=", ".join(done.taken)))
-                if done.handed_off:
+                taken = getattr(done, "taken", ())
+                if taken:
+                    parts.append(self.t("automation.handoff.done.loaded", machine=", ".join(taken)))
+                if getattr(done, "handed_off", False):
                     parts.append(self.t("automation.handoff.done.handed_off"))
-                if done.new_chats_written:
+                if getattr(done, "new_chats_written", 0):
                     parts.append(self.p("automation.handoff.done.new", done.new_chats_written))
                 # The same notes and buttons as the Sync page's full sync.
                 parts.extend(full_sync_notes(self, done))
@@ -811,6 +824,6 @@ def start_copy(host) -> None:
         # The window redraws the Automation page; Backups shows the same.
         host.screen("backups").render()
 
-    host.run("automation", go, apply, progress=True)
+    host.run("automation", go, apply, progress=True, kind="state_backup")
     host.screen("automation").render()
     host.screen("backups").render()

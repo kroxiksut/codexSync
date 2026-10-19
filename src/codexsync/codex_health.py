@@ -46,6 +46,8 @@ from .thread_catalogue import (
 
 #: The status Codex writes while a process holds the rebuild.
 BACKFILL_RUNNING = "running"
+#: The status Codex's migration creates: rebuild on the next start.
+BACKFILL_PENDING = "pending"
 
 
 class Severity(str, Enum):
@@ -72,6 +74,9 @@ CATALOGUE_REBUILD_UNDETERMINED = "CATALOGUE_REBUILD_UNDETERMINED"
 CATALOGUE_UNREADABLE = "CATALOGUE_UNREADABLE"
 #: Chat files Codex's list does not lead to; `sessions catalogue` asks for a rebuild.
 CATALOGUE_MISSES_CHATS = "CATALOGUE_MISSES_CHATS"
+#: The rebuild status is a value this version does not know (CS-394). What
+#: Codex means by it is not guessed, so nothing offers to repair it.
+CATALOGUE_STATUS_UNKNOWN = "CATALOGUE_STATUS_UNKNOWN"
 # The global state (projects, pins, which chat is in which project).
 #: ``.codex-global-state.json`` is missing: the app's projects are gone unless
 #: Guardian holds a snapshot (the console Codex never writes this file).
@@ -95,6 +100,7 @@ FINDING_CODES = (
     CATALOGUE_REBUILD_UNDETERMINED,
     CATALOGUE_UNREADABLE,
     CATALOGUE_MISSES_CHATS,
+    CATALOGUE_STATUS_UNKNOWN,
     GLOBAL_STATE_MISSING,
     GLOBAL_STATE_INVALID,
     GLOBAL_STATE_UNRECOGNISED,
@@ -162,6 +168,8 @@ def diagnose_catalogue(
         return [Finding(CATALOGUE_UNREADABLE, Severity.WARNING)]
     sizes = {"chats": files.count, "megabytes": files.size // (1024 * 1024)}
     status = reading.backfill
+    if status is not None and status not in {BACKFILL_COMPLETE, BACKFILL_RUNNING, BACKFILL_PENDING}:
+        return [Finding(CATALOGUE_STATUS_UNKNOWN, Severity.WARNING)]
     if status == BACKFILL_COMPLETE:
         if unnamed:
             return [Finding(CATALOGUE_MISSES_CHATS, Severity.NOTE, {"chats": unnamed}, command="sessions catalogue")]
@@ -172,7 +180,7 @@ def diagnose_catalogue(
         return [Finding(CATALOGUE_REBUILD_UNDETERMINED, Severity.WARNING, sizes)]
     if status == BACKFILL_RUNNING:
         return [Finding(CATALOGUE_REBUILD_STUCK, Severity.BROKEN, sizes, fix=FIX_CATALOGUE_REBUILD)]
-    # `pending`, or a status this version does not know: Codex rebuilds on start.
+    # `pending`: Codex rebuilds on start.
     return [Finding(CATALOGUE_REBUILD_PENDING, Severity.WARNING, sizes, fix=FIX_CATALOGUE_REBUILD)]
 
 
@@ -232,7 +240,9 @@ def build_settle_plan(
     current: BackfillRow | None = reading.row if reading.status is PlacementStatus.AVAILABLE else None
     target: BackfillRow | None = None
     source = snapshot = None
-    if current is not None and current[0] is not None and current[0] != BACKFILL_COMPLETE:
+    # Only a status whose meaning was observed is settled; an unknown one is
+    # Codex's own, and writing `complete` over it would be a guess (CS-394).
+    if current is not None and current[0] in {BACKFILL_RUNNING, BACKFILL_PENDING}:
         if own_backup is not None and own_backup[1][0] == BACKFILL_COMPLETE:
             snapshot, target, source = own_backup[0], tuple(own_backup[1]), SOURCE_OWN_BACKUP  # type: ignore[assignment]
         else:

@@ -19,7 +19,7 @@ import time
 from typing import Any, Callable, Iterable, Sequence
 
 from PySide6.QtCore import QEvent, QObject, QRunnable, Qt, QThreadPool, Signal, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QTabBar,
     QTableWidget,
@@ -49,6 +50,8 @@ from .controller import Failure, Outcome
 
 #: A long read reports once per file; the window is redrawn far less often.
 PROGRESS_INTERVAL_MS = 100
+#: Where a cell keeps what it sorts by (`Cell.sort`).
+SORT_ROLE = Qt.UserRole + 1
 
 
 # --- the mouse wheel --------------------------------------------------------
@@ -365,6 +368,22 @@ class Cell:
     tooltip: str | None = None
     muted: bool = False
     data: Any = None
+    #: What a sortable table orders this cell by, instead of its text: a
+    #: status sorts by how bad it is, not alphabetically (CS-338).
+    sort: Any = None
+
+
+class _SortItem(QTableWidgetItem):
+    """A cell that sorts by `Cell.sort` when it has one."""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:  # noqa: D105 - Qt protocol
+        mine, theirs = self.data(SORT_ROLE), other.data(SORT_ROLE)
+        if mine is not None and theirs is not None:
+            try:
+                return mine < theirs
+            except TypeError:
+                pass
+        return self.text().casefold() < other.text().casefold()
 
 
 def table(headers: Sequence[str], *, stretch: int | None = None, selectable: bool = False, multi: bool = False) -> QTableWidget:
@@ -395,12 +414,25 @@ def table(headers: Sequence[str], *, stretch: int | None = None, selectable: boo
 
 def fill_table(widget: QTableWidget, rows: Iterable[Sequence[Cell | str]], palette: theme.Palette) -> None:
     rows = list(rows)
+    # A sorting table moves a row the moment its first cell is set, so the
+    # rest of that row's cells would land in another row. Sort once, after.
+    sorting = widget.isSortingEnabled()
+    widget.setSortingEnabled(False)
+    try:
+        _fill(widget, rows, palette)
+    finally:
+        widget.setSortingEnabled(sorting)
+
+
+def _fill(widget: QTableWidget, rows: list, palette: theme.Palette) -> None:
     widget.setRowCount(len(rows))
     for r, cells in enumerate(rows):
         for c, cell in enumerate(cells):
             if isinstance(cell, str):
                 cell = Cell(cell)
-            item = QTableWidgetItem(cell.text)
+            item = _SortItem(cell.text)
+            if cell.sort is not None:
+                item.setData(SORT_ROLE, cell.sort)
             if cell.tooltip or cell.text:
                 item.setToolTip(cell.tooltip or cell.text)
             if cell.tone is not None:
@@ -421,6 +453,51 @@ def selected_data(widget: QTableWidget, column: int = 0) -> list[Any]:
         if item is not None:
             values.append(item.data(Qt.UserRole))
     return values
+
+
+def table_text(widget: QTableWidget, rows: Iterable[int] | None = None) -> str:
+    """Rows as tab-separated lines, in the order shown, with the header first."""
+    columns = range(widget.columnCount())
+    header = [widget.horizontalHeaderItem(c).text() if widget.horizontalHeaderItem(c) else "" for c in columns]
+    chosen = range(widget.rowCount()) if rows is None else sorted(set(rows))
+    lines = ["\t".join(header)] if rows is None else []
+    for r in chosen:
+        lines.append("\t".join(widget.item(r, c).text() if widget.item(r, c) else "" for c in columns))
+    return "\n".join(lines)
+
+
+def make_copyable(widget: QTableWidget, *, copy_row: str, copy_all: str) -> None:
+    """Ctrl+C copies the selected rows; the context menu copies one row or all (CS-338).
+
+    What is copied is what is shown, so a person pasting it into an issue
+    sends the same words they read. The labels are passed in: a widget
+    module that knew a sentence would be a second place strings live.
+    """
+    widget.setSelectionBehavior(QAbstractItemView.SelectRows)
+    widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    widget.setFocusPolicy(Qt.StrongFocus)
+    widget.setContextMenuPolicy(Qt.CustomContextMenu)
+
+    def selected_rows() -> list[int]:
+        return sorted({index.row() for index in widget.selectionModel().selectedRows()})
+
+    def copy(text: str) -> None:
+        QApplication.clipboard().setText(text)
+
+    shortcut = QShortcut(QKeySequence.Copy, widget)
+    shortcut.setContext(Qt.WidgetShortcut)
+    shortcut.activated.connect(lambda: copy(table_text(widget, selected_rows())) if selected_rows() else None)
+
+    def menu(point) -> None:  # pragma: no cover - opens a native menu
+        row = widget.rowAt(point.y())
+        popup = QMenu(widget)
+        if row >= 0:
+            rows = selected_rows() if row in selected_rows() else [row]
+            popup.addAction(copy_row, lambda: copy(table_text(widget, rows)))
+        popup.addAction(copy_all, lambda: copy(table_text(widget)))
+        popup.exec(widget.viewport().mapToGlobal(point))
+
+    widget.customContextMenuRequested.connect(menu)
 
 
 # --- inputs ------------------------------------------------------------------------

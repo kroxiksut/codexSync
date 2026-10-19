@@ -139,7 +139,7 @@ def build_guardian_restore_plan(
         live_unrecognised = (
             schema_now is None
             and UNKNOWN_SCHEMA in now_report.codes
-            and _carries_project_state(current_state)
+            and carries_project_state(current_state)
         )
 
     root = root_dir.resolve()
@@ -213,7 +213,7 @@ def verify_restore_still_valid(
     """
     if confirm_plan != plan.plan_id:
         raise ConfigError(
-            f"--confirm-plan {confirm_plan!r} does not match the restore plan id {plan.plan_id}"
+            f"--confirm-plan {confirm_plan!r} does not match the restore plan id {plan.plan_id}", code="PLAN_CHANGED"
         )
     rebuilt, payload = build_guardian_restore_plan(
         root_dir=root_dir,
@@ -223,7 +223,7 @@ def verify_restore_still_valid(
     )
     if rebuilt.plan_id != plan.plan_id:
         raise FailSafeError(
-            "The state or the snapshot changed since the preview; build a new restore plan"
+            "The state or the snapshot changed since the preview; build a new restore plan", code="PLAN_CHANGED"
         )
     if rebuilt.codes:
         raise ConflictError(f"Guardian restore is blocked: {', '.join(rebuilt.codes)}")
@@ -316,7 +316,7 @@ def _plan_id(machine: str, snapshot_id: str, snapshot_sha256: str, current_sha25
 _PROJECT_STATE_KEYS = ("local-projects", "project-order", "thread-project-assignments")
 
 
-def _carries_project_state(payload: bytes) -> bool:
+def carries_project_state(payload: bytes) -> bool:
     """Whether a JSON object names any project-state key. Keys only; no values."""
     try:
         state = json.loads(payload.decode("utf-8-sig"))

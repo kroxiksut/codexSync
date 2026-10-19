@@ -32,6 +32,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import sqlite3
+import time
 import unittest
 import uuid
 
@@ -41,6 +42,32 @@ from codexsync.sqlite_audit import (
     audit_sqlite,
     read_thread_placements,
 )
+
+
+#: SQLite's own sidecars of the test database, as it names them.
+_SIDECARS = frozenset(f"state_1.sqlite{suffix}" for suffix in ("-wal", "-shm", "-journal"))
+
+
+def _foreign_sidecar_copy(name: str) -> bool:
+    """`STATE_1.SQLITE-SHM.tmp`: a sidecar's name in another case, plus `.tmp`."""
+    if not name.endswith(".tmp"):
+        return False
+    stem = name[: -len(".tmp")]
+    return stem not in _SIDECARS and stem.lower() in _SIDECARS
+
+
+class ForeignCopyRuleTests(unittest.TestCase):
+    """The rule above sets aside exactly one shape and nothing SQLite makes."""
+
+    def test_only_another_program_s_copy_is_set_aside(self) -> None:
+        self.assertTrue(_foreign_sidecar_copy("STATE_1.SQLITE-SHM.tmp"))
+        self.assertTrue(_foreign_sidecar_copy("STATE_1.SQLITE-WAL.tmp"))
+        for name in (
+            "state_1.sqlite-shm", "state_1.sqlite-wal", "state_1.sqlite-journal",
+            "STATE_1.SQLITE-SHM", "state_1.sqlite-shm.tmp", ".state_1.sqlite.ab12.codexsync.tmp", "planted",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(_foreign_sidecar_copy(name))
 
 
 class SidecarCreationTests(unittest.TestCase):
@@ -58,12 +85,52 @@ class SidecarCreationTests(unittest.TestCase):
         connection.execute("INSERT INTO threads VALUES ('t1', ?, 0)", (str(self.rollout),))
         connection.commit()
         connection.close()
+        # The premise of every test here is a cleanly closed database. SQLite
+        # removes its `-wal`/`-shm` on the last close, but under a loaded suite
+        # on Windows they can linger a moment; a listing taken then would count
+        # their disappearance or reappearance as the reader's doing.
+        for _ in range(40):
+            if not any((self.root / f"state_1.sqlite{suffix}").exists() for suffix in ("-wal", "-shm")):
+                break
+            time.sleep(0.05)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
+    def _wal_without_shared_index(self) -> None:
+        """A log with frames and no `-shm`, whatever the closing in `setUp` left.
+
+        SQLite removes `-shm` when the last connection closes, but under load on
+        Windows the file can still be there a moment later; the case under test
+        is its absence, so it is made absent rather than assumed.
+        """
+        shm = self.root / "state_1.sqlite-shm"
+        for _ in range(50):
+            try:
+                shm.unlink(missing_ok=True)
+                break
+            except PermissionError:
+                time.sleep(0.05)
+        (self.root / "state_1.sqlite-wal").write_bytes(b"x" * 64)
+
     def _listing(self) -> set[str]:
-        return {path.name for path in self.root.iterdir()}
+        """What is in the state root, less another program's copy of a sidecar.
+
+        A file client or a virus scanner on this machine copies the `-shm` that
+        `setUp` briefly creates, as `STATE_1.SQLITE-SHM.tmp`, and the copy can
+        land between the two listings (CS-427: three runs in a fortnight, a
+        different test each time). SQLite never makes such a name -- its
+        sidecars are exactly `-wal`, `-shm` and `-journal`, in the case they
+        were opened with, and never end in `.tmp` -- and codexSync's own
+        staging names start with a dot. Only that shape is set aside, and it is
+        named in the output so a run that saw it says so; every real sidecar
+        still counts.
+        """
+        names = {path.name for path in self.root.iterdir()}
+        foreign = {name for name in names if _foreign_sidecar_copy(name)}
+        if foreign:
+            print(f"set aside another program's sidecar copy: {sorted(foreign)}")
+        return names - foreign
 
     def test_a_cleanly_closed_database_has_no_sidecars_to_begin_with(self) -> None:
         """The premise: this is what the state root looks like with Codex shut."""
@@ -105,7 +172,7 @@ class SidecarCreationTests(unittest.TestCase):
             writer.close()
 
     def test_a_wal_without_a_shared_index_is_refused_rather_than_written(self) -> None:
-        (self.root / "state_1.sqlite-wal").write_bytes(b"x" * 64)
+        self._wal_without_shared_index()
         before = self._listing()
 
         result = read_thread_placements(self.root)
@@ -116,11 +183,11 @@ class SidecarCreationTests(unittest.TestCase):
 
     def test_that_refusal_is_never_reported_as_an_absent_catalogue(self) -> None:
         """ABSENT constrains nothing; INDETERMINATE blocks. Collapsing them writes."""
-        (self.root / "state_1.sqlite-wal").write_bytes(b"x" * 64)
+        self._wal_without_shared_index()
         self.assertIsNot(read_thread_placements(self.root).status, PlacementStatus.ABSENT)
 
     def test_the_audit_reports_the_same_refusal(self) -> None:
-        (self.root / "state_1.sqlite-wal").write_bytes(b"x" * 64)
+        self._wal_without_shared_index()
         before = self._listing()
 
         reports = audit_sqlite(self.root)
@@ -165,7 +232,7 @@ class SidecarCreationTests(unittest.TestCase):
 
     def test_a_wal_with_frames_and_no_shared_index_is_still_refused(self) -> None:
         """Empty is the exemption; a log with content is not."""
-        (self.root / "state_1.sqlite-wal").write_bytes(b"x" * 64)
+        self._wal_without_shared_index()
         before = self._listing()
 
         result = read_thread_placements(self.root)

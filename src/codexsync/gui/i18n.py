@@ -117,6 +117,10 @@ class Catalog:
     def has(self, key: str) -> bool:
         return key in self.strings or key in self.fallback
 
+    def is_plural(self, key: str) -> bool:
+        """Is ``key`` a set of plural forms, to be read with `plural`?"""
+        return isinstance(self._lookup(key), Mapping)
+
     def _lookup(self, key: str) -> object:
         # A form object the language has is used whole; mixing its categories
         # with English ones would pick an English form for a Russian count.

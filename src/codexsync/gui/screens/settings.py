@@ -91,6 +91,9 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("sync", "dry_run_default", "bool", True),
         Field("targets", "include_roots", "lines", []),
         Field("filters", "exclude_globs", "lines", []),
+        # What a project folder without git tells the other machines (D-038).
+        Field("project_files", "secret_files", "choice", "no_hash", ("no_hash", "presence", "hash")),
+        Field("project_files", "secret_patterns", "lines", []),
         Field("sync", "direction", "choice", "bidirectional", ("bidirectional", "to_cloud", "to_local")),
         Field("sync", "scope", "choice", "full", ("full", "settings")),
         Field("sync", "delete_policy", "choice", "never", ("never", "propagate")),
@@ -600,7 +603,7 @@ class SettingsScreen(ConfigFormScreen):
             model.migration_busy = False
             model.migration = outcome
 
-        self.read(lambda: self.host.controller.config_migration(skip=skip), apply)
+        self.read(lambda: self.host.controller.config_migration(skip=skip), apply, kind="config_check")
 
     def toggle_migration_details(self) -> None:
         self.model.migration_details = not self._migration_details_open()
@@ -662,7 +665,7 @@ class SettingsScreen(ConfigFormScreen):
         def go() -> Outcome:
             return controller.apply_config_migration(confirm_plan=plan_id, skip=skip)
 
-        self.run(lambda: go(), apply)
+        self.run(lambda: go(), apply, kind="config_upgrade")
 
     def _migration_plan(self):
         outcome = self.model.migration
@@ -807,7 +810,7 @@ class SettingsScreen(ConfigFormScreen):
 
         self.read(
             lambda progress=None: self.host.controller.mapping_hints(progress=progress),
-            apply, progress=True,
+            apply, progress=True, kind="mapping_hints",
         )
 
     def read_alongside(self, controller) -> Any:
@@ -857,7 +860,7 @@ class SettingsScreen(ConfigFormScreen):
         elif opened is None:
             self.banner.show_message("neutral", "", "", palette)
         elif not opened.ok:
-            self.banner.show_message("danger", self.headline(opened.failure), opened.message, palette)
+            self.banner.show_message("danger", self.headline(opened.failure), self.refusal_text(opened), palette)
         else:
             self.banner.show_message(
                 "neutral", self.t("settings.file", path=opened.value.document.path.resolve()),

@@ -145,7 +145,7 @@ class BackupsScreen(Screen):
             if copies is not None and not automation.copy_busy:
                 automation.copies = copies
 
-        self.read(go, apply)
+        self.read(go, apply, kind="state_backups_list")
 
     def refresh(self) -> None:
         if self.model.busy:
@@ -157,7 +157,7 @@ class BackupsScreen(Screen):
             model.busy = False
             model.listing = outcome
 
-        self.read(self.host.controller.backups, apply)
+        self.read(self.host.controller.backups, apply, kind="backups_list")
 
     def _target_changed(self) -> None:
         self.model.target = self.target.currentData()
@@ -195,7 +195,10 @@ class BackupsScreen(Screen):
                 model.checked = None
                 model.listing = None
 
-        self.run(lambda: controller.restore(snapshot_name=name, target=target, dry_run=dry_run), apply)
+        self.run(
+            lambda: controller.restore(snapshot_name=name, target=target, dry_run=dry_run), apply,
+            kind="restore", dry_run=dry_run,
+        )
 
     def render(self) -> None:
         self._render_copies()
@@ -206,7 +209,7 @@ class BackupsScreen(Screen):
         if model.busy:
             self.banner.show_message("neutral", self.t("backups.loading"), "", palette)
         elif outcome is not None and not outcome.ok:
-            self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
         else:
             info = self.host.config_info()
             self.banner.show_message(

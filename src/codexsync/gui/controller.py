@@ -37,6 +37,10 @@ import tomllib
 from typing import Any, Callable, TypeVar
 
 from ..app import (
+    frozen_program,
+    install_shortcut,
+    remove_shortcut,
+    shortcut_status,
     close_codex_for_sync,
     place_project,
     project_places,
@@ -80,7 +84,9 @@ from ..app import (
     list_history,
     list_journals,
     load_config,
+    preview_full_sync,
     preview_path,
+    summarize_full_sync,
     PATH_SUBSTITUTIONS,
     read_guardian_inventory,
     move_chats,
@@ -176,6 +182,9 @@ class CheckRow:
     name: str
     status: str
     details: str
+    #: The details as sentence codes and values (`PreflightCheckResult.parts`),
+    #: which the window says in its own language (CS-338).
+    parts: tuple = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +209,14 @@ class SyncResult:
     conflicts: int
 
 
+def _refusal(failure: Failure, exc: Exception) -> Outcome:
+    """A refusal with its kind and values, for the window to say in its own words (CS-332)."""
+    details = getattr(exc, "details", None)
+    if details is None:
+        details = dict(getattr(exc, "params", None) or {}) or None
+    return Outcome(failure=failure, message=str(exc), code=getattr(exc, "code", None), details=details)
+
+
 def run(call: Callable[[], T]) -> Outcome:
     """Call into the core and translate the refusal, if there is one.
 
@@ -211,19 +228,13 @@ def run(call: Callable[[], T]) -> Outcome:
     try:
         return Outcome(value=call())
     except ConfigError as exc:
-        return Outcome(failure=Failure.CONFIGURATION, message=str(exc), code=getattr(exc, "code", None))
+        return _refusal(Failure.CONFIGURATION, exc)
     except SafetyPreconditionError as exc:
-        return Outcome(failure=Failure.CODEX_NOT_STOPPED, message=str(exc))
+        return _refusal(Failure.CODEX_NOT_STOPPED, exc)
     except ConflictError as exc:
-        return Outcome(
-            failure=Failure.NEEDS_A_DECISION, message=str(exc),
-            code=getattr(exc, "code", None), details=getattr(exc, "details", None),
-        )
+        return _refusal(Failure.NEEDS_A_DECISION, exc)
     except FailSafeError as exc:
-        return Outcome(
-            failure=Failure.STOPPED_SAFELY, message=str(exc),
-            code=getattr(exc, "code", None), details=getattr(exc, "details", None),
-        )
+        return _refusal(Failure.STOPPED_SAFELY, exc)
     except Exception as exc:  # noqa: BLE001 - reported as a bug, never swallowed
         return Outcome(failure=Failure.UNEXPECTED, message=f"{type(exc).__name__}: {exc}")
 
@@ -398,17 +409,31 @@ class Controller:
         Python and its own copy of the package, so "which version" cannot be
         answered from the interpreter the user happens to have.
         """
-        frozen = bool(getattr(sys, "frozen", False))
+        program = frozen_program()
         return BuildInfo(
             version=__version__,
-            frozen=frozen,
-            executable=sys.executable if frozen else str(Path(sys.argv[0]).resolve()),
+            frozen=program is not None,
+            executable=str(program) if program is not None else str(Path(sys.argv[0]).resolve()),
             python=platform.python_version(),
             system=f"{platform.system()} {platform.release()}".strip(),
             architecture=platform.machine() or "unknown",
             config_path="" if self._config_path is None else str(self._config_path),
             config_exists=self.config_exists(),
         )
+
+    # --- the applications menu on Linux (CS-399) ----------------------------
+
+    def menu_entry(self) -> Outcome:
+        """Where this user's menu entry is and what it starts; reads two files."""
+        return run(shortcut_status)
+
+    def add_menu_entry(self) -> Outcome:
+        """Write the menu entry for this program, or bring codexSync's own up to date."""
+        return run(install_shortcut)
+
+    def remove_menu_entry(self) -> Outcome:
+        """Remove the menu entry codexSync wrote; anything else is left alone."""
+        return run(remove_shortcut)
 
     # --- read-only -------------------------------------------------------
 
@@ -418,7 +443,7 @@ class Controller:
         def build() -> StateView:
             report = run_preflight(self._config_path)
             checks = tuple(
-                CheckRow(item.name, item.status, item.details) for item in report.checks
+                CheckRow(item.name, item.status, item.details, item.parts) for item in report.checks
             )
             process = next((item for item in checks if item.name == "codex_process"), None)
             return StateView(
@@ -636,6 +661,27 @@ class Controller:
                 conflicts=tuple(context.plan.conflicts),
                 volatile=context.volatile,
             )
+
+        return run(go)
+
+    def dry_run(self, *, direction: str | None = None, progress: ProgressCallback | None = None) -> Outcome:
+        """The window's *Dry run*: what *Synchronise* would do, and nothing written (CS-411).
+
+        At `[sync] scope = "full"` it is every plan a full sync builds --
+        settings, chats, projects -- read while Codex may be open, exactly as
+        `codexsync plan` prints it, and marked volatile when Codex is: a
+        picture, which *Synchronise* never reuses. At `"settings"` it is the
+        files-only dry run through the gate, as before.
+        """
+
+        def go() -> Any:
+            if load_config(self._config_path).sync.scope == "full":
+                return summarize_full_sync(preview_full_sync(
+                    self._config_path, direction=direction, progress=progress, enforce_safety=False,
+                ))
+            context = build_context(self._config_path, enforce_safety=True, direction=direction)
+            run_sync(context, dry_run=True, origin="window")
+            return SyncResult(applied=False, actions=context.plan.action_count, conflicts=len(context.plan.conflicts))
 
         return run(go)
 

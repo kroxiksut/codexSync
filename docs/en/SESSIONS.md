@@ -143,6 +143,31 @@ compressed, under `superseded/` in `semantic.root_dir` — the only place the
 dropped records still exist. Unlike a conflict bundle, the copy that wins is not
 stored a second time.
 
+### When Codex compresses its chats
+
+Since October 2026 (seen on Codex 0.163) Codex keeps a chat it has not touched
+for a while as `rollout-….jsonl.zst`, compressed with zstd, while its chat list
+still names the plain `.jsonl`. codexSync reads it where Python reads zstd —
+Python 3.14 or later, which the release programs are built with — and compares
+it like any other chat: what grew here goes to the mirror (stored there as
+usual, never as zstd). A chat that grew on the other machine waits in the
+mirror (`IN_PLACE_CONTAINER`): what Codex reads when a plain `x.jsonl` sits
+beside `x.jsonl.zst` is not known yet, so nothing is written over it.
+
+Installed with pip on Python 3.11–3.13, codexSync cannot read that container.
+Such a file is still that chat's history, so it is never skipped: the chat is
+`BLOCKED_INVALID_BRANCH` (`UNSUPPORTED_CONTAINER`) on both sides — nothing is
+written into `.codex` for it, its copy in the mirror is left as it was — and
+no copy lands beside it. `doctor` gives the count under `codex_compat`. The
+other chats sync as usual.
+
+The same rule holds for every format of Codex's that codexSync writes into: a
+chat list (`state_<n>.sqlite`) whose `threads` table lacks a column codexSync
+reads is an unknown shape (`CATALOG_SHAPE_UNKNOWN`), not a missing catalogue,
+so no chat is written into `.codex`; an unknown rebuild status is never
+repaired; projects in an unknown shape are not carried, and `recover rollback`
+does not write the old global state over them.
+
 ## Applying a plan
 
 Applying needs Codex closed and the exact plan id. The plan is rebuilt from the

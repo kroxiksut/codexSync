@@ -102,6 +102,34 @@ class LocateStateDirTests(unittest.TestCase):
         self.assertEqual(check.status, "FAIL")
         self.assertIn("paths.backup_dir", check.details)
 
+    def test_a_fresh_machine_without_the_workspace_folders_is_a_warning(self) -> None:
+        # CS-413: the first sync creates codexSync's own folders; until then
+        # `doctor` says so, creates nothing, and still checks `.codex`.
+        path = self._config()
+        cfg = load_config(path)
+        cfg.paths.cloud_root_dir.rmdir()
+        with mock.patch("codexsync.runtime.collect_process_snapshot"):
+            report = run_preflight(path)
+        checks = {item.name: item for item in report.checks}
+        self.assertEqual(checks["state_dirs"].status, "WARN")
+        self.assertIn("the first sync creates it", checks["state_dirs"].details)
+        for name in ("backup_dir", "temp_dir"):
+            self.assertEqual(checks[name].status, "WARN", name)
+        self.assertIn("codex_compat", checks, "the checks of .codex still run")
+        self.assertIn("local_state", checks)
+        self.assertFalse(cfg.paths.cloud_root_dir.exists(), "doctor creates nothing")
+        self.assertFalse(cfg.paths.backup_dir.exists())
+
+    def test_a_cloud_path_that_is_a_file_still_fails(self) -> None:
+        path = self._config()
+        cfg = load_config(path)
+        cfg.paths.cloud_root_dir.rmdir()
+        cfg.paths.cloud_root_dir.write_text("not a folder", encoding="utf-8")
+        with mock.patch("codexsync.runtime.collect_process_snapshot"):
+            report = run_preflight(path)
+        check = next(item for item in report.checks if item.name == "state_dirs")
+        self.assertEqual(check.status, "FAIL")
+
 
 if __name__ == "__main__":
     unittest.main()

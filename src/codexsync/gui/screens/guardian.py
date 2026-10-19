@@ -145,7 +145,7 @@ class GuardianScreen(Screen):
             model.busy = False
             model.inventory = outcome
 
-        self.read(self.host.controller.guardian_inventory, apply)
+        self.read(self.host.controller.guardian_inventory, apply, kind="guardian_inventory")
 
     def take_snapshot(self) -> None:
         if self.model.snapshot_busy:
@@ -171,7 +171,7 @@ class GuardianScreen(Screen):
             else:
                 model.snapshot = outcome
 
-        self.run(go, apply)
+        self.run(go, apply, kind="guardian_snapshot")
 
     # --- restoring ---------------------------------------------------------------
 
@@ -202,7 +202,7 @@ class GuardianScreen(Screen):
             if model.selected == snapshot_id:
                 model.preview = outcome
 
-        self.read(lambda: controller.preview_guardian_restore(snapshot_id), apply)
+        self.read(lambda: controller.preview_guardian_restore(snapshot_id), apply, kind="guardian_restore_preview")
 
     def restore(self, *, dry_run: bool) -> None:
         model = self.model
@@ -254,7 +254,7 @@ class GuardianScreen(Screen):
                 if listing is not None:
                     model.inventory = listing
 
-        self.run(go, apply)
+        self.run(go, apply, kind="guardian_restore", dry_run=dry_run)
 
     # --- accepting a new baseline ------------------------------------------------
 
@@ -271,7 +271,7 @@ class GuardianScreen(Screen):
             model.accept_busy = False
             model.accept_preview = outcome
 
-        self.read(controller.preview_guardian_accept, apply)
+        self.read(controller.preview_guardian_accept, apply, kind="guardian_accept_preview")
 
     def accept(self) -> None:
         model = self.model
@@ -313,7 +313,7 @@ class GuardianScreen(Screen):
                 if listing is not None:
                     model.inventory = listing
 
-        self.run(go, apply)
+        self.run(go, apply, kind="guardian_accept")
 
     def _render_accept(self) -> None:
         model = self.model
@@ -432,7 +432,7 @@ class GuardianScreen(Screen):
         elif outcome is None:
             self.banner.show_message("neutral", "", "", palette)
         elif not outcome.ok:
-            self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
         else:
             inventory = outcome.value
             latest = next((s for s in inventory.snapshots if s.latest_good), None)

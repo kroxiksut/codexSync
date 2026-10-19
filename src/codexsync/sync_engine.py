@@ -58,6 +58,7 @@ class SyncEngine:
         after_success: Callable[[], None] | None = None,
         now: Callable[[], float] = time.time,
         before_stage_check: Callable[[], None] | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> None:
         self._backup_manager = backup_manager
         self._temp_dir = temp_dir
@@ -72,6 +73,10 @@ class SyncEngine:
         #: a sibling beside each destination -- inside `.codex` for a copy to
         #: the local side -- and the plan may be minutes old after hashing.
         self._before_stage_check = before_stage_check
+        #: ``(done, total)`` over the files this run copies and deletes, so a
+        #: window can say "file 3 of 10" while it writes (CS-339). It only
+        #: reports: whatever it raises is dropped, and it decides nothing.
+        self._progress = progress
 
     def execute(self, plan: SyncPlan, dry_run: bool = True) -> None:
         actions = [*plan.to_local, *plan.to_cloud]
@@ -107,6 +112,8 @@ class SyncEngine:
             # destination itself — nothing is overwritten until the whole set is
             # staged and proven. `app.commit_global_state` and `project_move`
             # already stage this way.
+            total = len(actions) + len(deletions)
+            self._report(0, total)
             for action in actions:
                 self._ensure_parent(action.dst)
                 self._sweep_stale_stage_files(action.dst.parent, swept)
@@ -114,6 +121,8 @@ class SyncEngine:
                 stage_paths.append(staged_path)
                 self._stage_verified(action.src, staged_path, action.codec)
                 staged.append((action, staged_path))
+                # Staging is where the time goes: reading, packing, hashing.
+                self._report(len(staged), total)
 
             # A complete backup set exists before any destination mutation.
             # Each entry names its side, so a rollback puts it back into the
@@ -150,16 +159,25 @@ class SyncEngine:
                 if self._before_replace_check is not None:
                     self._before_replace_check()
                 self._replace_staged(action, staged_path)
-            for deletion in deletions:
+            for index, deletion in enumerate(deletions, start=1):
                 if self._before_replace_check is not None:
                     self._before_replace_check()
                 self._remove_backed_up(deletion)
+                self._report(len(actions) + index, total)
             if self._after_success is not None:
                 self._after_success()
         finally:
             for staged_path in stage_paths:
                 # Already gone for every action that was replaced into place.
                 staged_path.unlink(missing_ok=True)
+
+    def _report(self, done: int, total: int) -> None:
+        if self._progress is None:
+            return
+        try:
+            self._progress(done, total)
+        except Exception:  # noqa: BLE001 - a broken indicator must not break a write
+            LOG.debug("progress callback failed", exc_info=True)
 
     def _remove_backed_up(self, deletion: DeleteAction) -> None:
         """Remove one file whose backup is already committed and verified.

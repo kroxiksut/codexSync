@@ -41,9 +41,11 @@ from ..config_locations import (
     CONFIG_NAME,
     ConfigChoice,
     choose_config_path,
+    codex_folder_holding,
     frozen_executable_dir,
     is_under_temp,
     read_config_pointer,
+    standard_config_path,
     write_config_pointer,
 )
 
@@ -52,10 +54,12 @@ __all__ = [
     "ConfigChoice",
     "WorkspaceCandidate",
     "choose_config_path",
+    "codex_folder_holding",
     "find_workspaces",
     "is_under_temp",
     "machines_in_workspace",
     "read_config_pointer",
+    "standard_config_path",
     "write_config_pointer",
 ]
 

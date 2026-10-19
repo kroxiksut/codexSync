@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .exceptions import ConfigError
 from .guardian_models import GuardianConfig, require_guardian_machine_id
@@ -22,6 +23,8 @@ from .models import (
     ConflictConfig,
     FiltersConfig,
     HandoffConfig,
+    ProjectFilesConfig,
+    SECRET_FILE_MODES,
     IdentityConfig,
     LoggingConfig,
     PathsConfig,
@@ -116,16 +119,76 @@ def _expand_workspace_var(raw_value: str, workspace_root: Path | None, field_nam
 
 
 def load_config(path: Path) -> AppConfig:
+    # Before anything is read: Codex keeps a `config.toml` of its own, and a
+    # parse error about its keys would hide what is wrong (CS-412).
+    require_config_outside_codex(path)
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
     try:
         data = path.read_bytes()
     except OSError as exc:
         raise ConfigError(f"Cannot read config file: {path}. {exc}") from exc
-    return parse_config_text(
+    cfg = parse_config_text(
         decode_config_bytes(data, source=str(path)),
         base_dir=path.parent.resolve(),
         source=str(path),
+    )
+    require_config_outside_codex(path, cfg.paths.local_state_dir, homes=False)
+    return cfg
+
+
+def codex_state_homes() -> tuple[Path, ...]:
+    """Where Codex keeps its state when nobody says otherwise: CODEX_HOME, then ~/.codex."""
+    homes: list[Path] = []
+    codex_home = os.getenv("CODEX_HOME")
+    if codex_home:
+        homes.append(Path(codex_home).expanduser())
+    homes.append(Path.home() / ".codex")
+    return tuple(homes)
+
+
+def codex_folder_holding(
+    path: Path, configured: Path | None = None, *, homes: bool = True
+) -> Path | None:
+    """The Codex state folder ``path`` lies in, or ``None``.
+
+    Checks ``configured`` (a config's `paths.local_state_dir`) and, unless
+    ``homes`` is false, CODEX_HOME and ~/.codex. Nothing is created or opened.
+    """
+    candidates: list[Path] = [configured] if configured is not None else []
+    if homes:
+        candidates.extend(codex_state_homes())
+    try:
+        target = Path(path).expanduser().resolve()
+    except OSError:
+        return None
+    for folder in candidates:
+        try:
+            target.relative_to(folder.expanduser().resolve())
+        except (OSError, ValueError):
+            continue
+        return folder
+    return None
+
+
+def require_config_outside_codex(
+    path: Path, configured: Path | None = None, *, homes: bool = True
+) -> None:
+    """Refuse a CodexSync config that lies in Codex's own state folder (CS-412).
+
+    Codex keeps a `config.toml` of its own there, so a file found or named
+    there is Codex's configuration, and reading it as CodexSync's would end in
+    a parse error about keys that mean something else -- or, worse, in a save
+    that rewrites Codex's file. Creating and saving were refused already;
+    this covers opening, from the command line and from the window alike.
+    """
+    folder = codex_folder_holding(path, configured, homes=homes)
+    if folder is None:
+        return
+    where = "paths.local_state_dir" if configured is not None and folder == configured else "Codex's own folder"
+    raise ConfigError(
+        f"The config file must be outside {where} ({folder}): {path} is Codex's configuration, "
+        "not CodexSync's. Keep the CodexSync config in another folder and name it with -c."
     )
 
 
@@ -170,6 +233,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
     scheduler_raw = _section(raw, "scheduler")
     state_backup_raw = _section(raw, "state_backup")
     handoff_raw = _section(raw, "handoff")
+    project_files_raw = _section(raw, "project_files")
     path_mappings_raw = raw.get("path_mappings", [])
 
     identity = IdentityConfig(machine_id=identity_raw.get("machine_id"))
@@ -361,6 +425,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
             handoff_raw, base_dir=base_dir, workspace_root=workspace_root_dir,
             default_root=state.manifest_file.parent / "handoff" if state.manifest_file else None,
         ),
+        project_files=_parse_project_files(project_files_raw),
     )
     _validate_config(cfg)
     if "guardian" in raw or cfg.handoff.enabled is True:
@@ -549,6 +614,20 @@ def _parse_handoff(
         delivery_wait_minutes=raw.get("delivery_wait_minutes", defaults.delivery_wait_minutes),
         notify=raw.get("notify", defaults.notify),
     )
+
+
+def _parse_project_files(raw: Any) -> ProjectFilesConfig:
+    """Read `[project_files]` (D-038); an absent section publishes no secret's hash."""
+    if not isinstance(raw, dict):
+        raise ConfigError("project_files must be a table")
+    defaults = ProjectFilesConfig()
+    mode = raw.get("secret_files", defaults.secret_files)
+    if mode not in SECRET_FILE_MODES:
+        raise ConfigError(f"project_files.secret_files must be one of: {', '.join(SECRET_FILE_MODES)}")
+    patterns = raw.get("secret_patterns", [])
+    if not isinstance(patterns, list) or not all(isinstance(item, str) and item.strip() for item in patterns):
+        raise ConfigError("project_files.secret_patterns must be a list of non-empty strings")
+    return ProjectFilesConfig(secret_files=mode, secret_patterns=[item.strip() for item in patterns])
 
 
 def _validate_handoff(cfg: AppConfig) -> None:

@@ -16,7 +16,12 @@ from .app import (
     project_places,
     PlacesReport,
     refresh_thread_catalogue,
+    build_issue_report,
     check_codex,
+    codex_process_report,
+    install_shortcut,
+    remove_shortcut,
+    shortcut_status,
     repair_codex,
     sync_chat_names,
     follow_chat_archive,
@@ -70,6 +75,7 @@ from .app import (
     change_config_value,
     change_path_mappings,
     preview_full_sync,
+    summarize_full_sync,
     close_codex_for_sync,
     SYNC_DIRECTIONS,
     list_backup_snapshots,
@@ -85,11 +91,13 @@ from .app import (
 from .chat_directory import Association, ChatDirectory, ChatEntry, search_chats
 from .chat_move import ChatMovePlan
 from .config import SYNC_SCOPES, load_config
+from .program_file import frozen_program
 from .config_locations import (
     ConfigChoice,
     choose_config_path,
     frozen_executable_dir,
     read_config_pointer,
+    standard_config_path,
 )
 from .exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
 from .exit_codes import ExitCode
@@ -101,7 +109,7 @@ from .app import _UNRESOLVED_TRANSFER_BLOCKS
 from .repair_plan import save_repair_plan
 from .safety_gate import OperationKind
 from .scheduler import render_scheduler_templates, write_scheduler_templates
-from .semantic_transfer import CWD_ABSENT_HERE, FORMAT_MIGRATION, OLDER_FORMAT_HAS_LATER_RECORDS, transfer_direction
+from .semantic_transfer import CWD_ABSENT_HERE, FORMAT_MIGRATION, OLDER_FORMAT_HAS_LATER_RECORDS
 from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK
 from .version import __version__
 
@@ -552,7 +560,16 @@ def build_parser() -> argparse.ArgumentParser:
             default="guardian" if diagnostic_name == "doctor" else "sync",
             help="Operation profile to assess; no write probes are performed",
         )
-    sub.add_parser("plan", help="Build and print sync plan")
+        diagnostic.add_argument(
+            "--report", action="store_true",
+            help="Print an anonymised JSON report for an issue: versions, formats, gates, check statuses and "
+            "counts; no name, path, title or chat id",
+        )
+    sub.add_parser(
+        "plan",
+        help="Build and print the sync plan while Codex may be open; writes nothing "
+        "(at [sync] scope = \"full\": settings, chats and projects)",
+    )
 
     config_cmd = sub.add_parser(
         "config",
@@ -1072,6 +1089,12 @@ def build_parser() -> argparse.ArgumentParser:
     codex_sub = codex.add_subparsers(dest="codex_command", required=True)
     codex_check = codex_sub.add_parser("check", help="List what is wrong with Codex's state; reads only")
     codex_check.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+    codex_processes = codex_sub.add_parser(
+        "processes",
+        help="Which Codex processes the process check sees here, by pid and rule; reads only, needs no "
+        "config, prints no path or command line (safe to paste into an issue)",
+    )
+    codex_processes.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
     codex_repair = codex_sub.add_parser(
         "repair",
         help="Preview, or with --confirm-plan apply, the repair `codex check` offers; Codex must be closed",
@@ -1079,6 +1102,20 @@ def build_parser() -> argparse.ArgumentParser:
     codex_repair.add_argument("--confirm-plan", default=None, help="Plan id from the preview")
     codex_repair.add_argument("--dry-run", action="store_true", help="Run every check without writing")
     codex_repair.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+
+    shortcut = sub.add_parser(
+        "shortcut",
+        help="Linux: put the window in this user's applications menu (for pip, pipx, the tar.gz or the "
+        "AppImage; a .deb/.rpm has its own); needs no config",
+    )
+    shortcut_sub = shortcut.add_subparsers(dest="shortcut_command", required=True)
+    for name, text in (
+        ("status", "Where the menu entry is and which program it starts; reads only"),
+        ("install", "Write the menu entry and icon for this program, or update the one written before"),
+        ("remove", "Remove the menu entry and icon codexSync wrote; anything else is left alone"),
+    ):
+        command = shortcut_sub.add_parser(name, help=text)
+        command.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
 
     recover = sub.add_parser("recover", help="Inspect and clear interrupted mutation evidence")
     recover_sub = recover.add_subparsers(dest="recover_command", required=True)
@@ -1207,32 +1244,39 @@ def _run_full_sync(args: argparse.Namespace, config_path: Path) -> int:
         return int(ExitCode.OK)
     preview = preview_full_sync(config_path, conflict_policy=args.conflict_policy, direction=args.direction)
     run_sync(preview.files, dry_run=True, origin=origin)
-    plan = preview.chats
-    to_cloud = sum(1 for item in plan.items if transfer_direction(item) == "mirror")
-    to_codex = sum(1 for item in plan.items if transfer_direction(item) == "local")
-    decide = [item for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS]
-    print(f"Full sync dry run on {preview.machine} (chats paired with {preview.source}); nothing was written.")
-    print(f"  files: {preview.files.plan.action_count} action(s)")
-    print(f"  chats: {to_cloud} to the cloud copy, {to_codex} into .codex")
-    if decide:
+    _print_full_preview(summarize_full_sync(preview), config_path, title="Full sync dry run")
+    return int(ExitCode.OK)
+
+
+def _print_full_preview(summary, config_path: Path, *, title: str) -> None:
+    """What a full sync would do: `sync` without `--apply`, and `plan` (CS-411)."""
+    print(f"{title} on {summary.machine} (chats paired with {summary.source}); nothing was written.")
+    if summary.volatile:
         print(
-            f"  chats that need a decision first: {len(decide)} "
+            "  Codex is running: this is a picture of a state it is still writing; "
+            "`sync --apply` builds its own plans with Codex closed."
+        )
+    conflicts = f", {summary.file_conflicts} conflict(s)" if summary.file_conflicts else ""
+    print(f"  files: {summary.files} action(s){conflicts}")
+    print(f"  chats: {summary.chats_to_cloud} to the cloud copy, {summary.chats_to_codex} into .codex")
+    if summary.chats_to_decide:
+        print(
+            f"  chats that need a decision first: {summary.chats_to_decide} "
             "(the run would stop before writing; `sessions scan` lists them)"
         )
-    if preview.projects is None:
+    if summary.projects_to_add is None:
         print("  projects: not carried from this state (see the log)")
     else:
         print(
-            f"  projects: {len(preview.projects.plan.added)} to add, "
-            f"{preview.projects.plan.action_count} change(s) to the project list"
+            f"  projects: {summary.projects_to_add} to add, "
+            f"{summary.project_changes} change(s) to the project list"
         )
-    if preview.waiting_for:
+    if summary.waiting_for:
         print(
-            "  waiting for the cloud to deliver: " + ", ".join(preview.waiting_for)
+            "  waiting for the cloud to deliver: " + ", ".join(summary.waiting_for)
             + " (a real run waits up to [handoff] delivery_wait_minutes)"
         )
     print("Apply with: codexsync -c " + str(config_path) + " sync --apply")
-    return int(ExitCode.OK)
 
 
 def _print_handoff_result(result) -> None:
@@ -1609,7 +1653,8 @@ def _resolve_config_path(explicit: str | None) -> ConfigChoice:
     """Which config this run works on, and where it was found.
 
     Without `-c` the search is the window's: the config the window last opened
-    (its pointer file), this directory, then the folder of a frozen executable.
+    (its pointer file), this directory, the folder of a frozen executable, then
+    the standard place (CS-410).
     Before that the default was the literal `config.toml`, so a machine set up
     through the window answered every command run from another directory with
     "Config file not found", while the window on the same machine opened it
@@ -1620,7 +1665,8 @@ def _resolve_config_path(explicit: str | None) -> ConfigChoice:
     nobody reads.
     """
     return choose_config_path(
-        explicit, read_config_pointer(), executable_dir=frozen_executable_dir()
+        explicit, read_config_pointer(), executable_dir=frozen_executable_dir(),
+        standard=standard_config_path(),
     )
 
 
@@ -1709,6 +1755,10 @@ _FINDING_TEXT = {
     "CATALOGUE_MISSES_CHATS": (
         "Codex does not list {chats} chat file(s) that are in place. `sessions catalogue` asks it to "
         "rebuild its chat list."
+    ),
+    "CATALOGUE_STATUS_UNKNOWN": (
+        "Codex's chat list reports a rebuild status this version does not know, so nothing about it was "
+        "judged and `codex repair` leaves it alone. A newer codexSync may know it."
     ),
     "GLOBAL_STATE_MISSING": (
         "Codex's global state (projects, pins, which chat is in which project) is missing. "
@@ -1995,6 +2045,27 @@ def main(argv: list[str] | None = None) -> int:
             )
         # Logging is configured with defaults first, then with file settings from config when context is built.
         configure_logging(LoggingConfig(level="INFO", file=None), verbose=args.verbose)
+        if args.command == "codex" and args.codex_command == "processes":
+            # Needs no config (CS-418): a Mac owner checking the detector may
+            # not have one, and it must create nothing -- not even a log file.
+            # Before the "Using config <path>" notice: the output is meant to be
+            # pasted into an issue, and a path can carry the user's name.
+            report = codex_process_report(config_path if config_choice.exists or args.config else None)
+            if args.as_json:
+                print(json.dumps(report.as_dict(), sort_keys=True, indent=2))
+            else:
+                _print_process_report(report)
+            return int(ExitCode.OK)
+        if args.command == "shortcut":
+            # Needs no config (CS-399): it writes a menu entry for this user,
+            # nothing of Codex's or of the workspace.
+            action = {"status": shortcut_status, "install": install_shortcut, "remove": remove_shortcut}
+            result = action[args.shortcut_command]()
+            if args.as_json:
+                print(json.dumps(result.as_dict(), sort_keys=True, indent=2))
+            else:
+                _print_shortcut(result, args.shortcut_command)
+            return int(ExitCode.OK)
         _announce_config_choice(config_choice)
         if args.command != "init-config":
             config_path = _require_config_path(config_choice)
@@ -2036,9 +2107,10 @@ def main(argv: list[str] | None = None) -> int:
             if _init_config_has_values(args):
                 created = init_config_with_values(output_path, args)
                 print(f"Config written: {created}")
-                return int(ExitCode.OK)
-            created = init_config_template(output_path=output_path, force=args.force)
-            print(f"Config template written: {created}")
+            else:
+                created = init_config_template(output_path=output_path, force=args.force)
+                print(f"Config template written: {created}")
+            _print_standard_place_hint(created)
             return int(ExitCode.OK)
 
         if args.command == "automation":
@@ -2069,6 +2141,9 @@ def main(argv: list[str] | None = None) -> int:
                 "restore": OperationKind.RESTORE,
                 "repair": OperationKind.REPAIR_APPLY,
             }[args.diagnostic_for]
+            if args.report:
+                print(json.dumps(build_issue_report(config_path, operation=operation), indent=2, sort_keys=True))
+                return int(ExitCode.OK)
             report = run_preflight(config_path, operation=operation)
             print_preflight_report(report)
             if report.is_ok:
@@ -2078,6 +2153,14 @@ def main(argv: list[str] | None = None) -> int:
             return int(ExitCode.FAIL_SAFE)
 
         if args.command == "plan":
+            if load_config(config_path).sync.scope == "full":
+                # What the window's *Dry run* shows (CS-411): every plan a full
+                # sync builds, read while Codex may be open.
+                preview = preview_full_sync(config_path, enforce_safety=False)
+                print_plan(preview.files.plan, volatile=preview.files.volatile,
+                           direction=preview.files.config.sync.direction)
+                _print_full_preview(summarize_full_sync(preview), config_path, title="Full sync plan")
+                return int(ExitCode.OK)
             ctx = build_context(
                 config_path,
                 manual_terminate_confirmation_override=args.manual_terminate_confirmation_override,
@@ -2243,7 +2326,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             templates = render_scheduler_templates(
                 args.platform,
-                executable=Path(sys.executable).resolve(),
+                executable=frozen_program() or Path(sys.executable).resolve(),
                 config_path=config_path.resolve(),
                 log_dir=Path(args.log_dir).expanduser().resolve(),
                 interval_seconds=args.interval,
@@ -2871,6 +2954,20 @@ def main(argv: list[str] | None = None) -> int:
         return int(ExitCode.INTERNAL_ERROR)
 
 
+def _print_standard_place_hint(created: Path) -> None:
+    """Where a config is found without `-c` from any folder (CS-410). Only said."""
+    standard = standard_config_path()
+    try:
+        if Path(created).resolve() == standard.resolve():
+            return
+    except OSError:
+        pass
+    print(
+        f"Commands find it without -c when run from its folder. Kept at the standard place, "
+        f"{standard}, it is found from any folder; the window remembers whichever you open."
+    )
+
+
 def init_config_template(output_path: Path, force: bool) -> Path:
     if output_path.exists() and not force:
         raise ConfigError(
@@ -2924,6 +3021,65 @@ def init_config_with_values(output_path: Path, args: argparse.Namespace) -> Path
         cloud_root_dir=args.cloud_root,
     )
     return Path(saved.path)
+
+
+def _print_shortcut(status, command: str) -> None:
+    if not status.supported:
+        safe_print("A menu entry is made on Linux only; nothing to do here.")
+        return
+    if command == "install":
+        safe_print(f"Menu entry written: {status.entry}")
+    elif command == "remove":
+        safe_print("Menu entry removed." if not status.present else f"Menu entry still there: {status.entry}")
+    if status.present and status.ours:
+        state = "" if status.program_exists else " -- that program is gone; `codexsync shortcut install` again"
+        safe_print(f"Entry: {status.entry} (written by codexSync)")
+        safe_print(f"Starts: {status.program}{state}")
+    elif status.present:
+        safe_print(f"Entry: {status.entry} (not written by codexSync; left alone)")
+    elif command == "status":
+        safe_print(f"No menu entry at {status.entry}")
+    if status.system_entry is not None:
+        safe_print(f"A package installed one: {status.system_entry}")
+    elif command == "status":
+        would = status.would_start or "no codexsync-gui found (install codexsync[gui])"
+        safe_print(f"An install would start: {would}")
+
+
+def _print_process_report(report) -> None:
+    """`codex processes` report: no path and no command line, so it can be pasted as it is."""
+    print("Codex process check (reads only; nothing is written)")
+    print(f"  platform: {report.platform} ({report.os_key}), detector contract {report.contract_version}")
+    trusted = "trusted" if report.supported else "not proven here"
+    print(f"  detector: {trusted} - {report.detail}")
+    print(f"  the safety gate reads: {report.gate_state}")
+    if not report.supported:
+        print(f"  if the detector were trusted, it would read: {report.would_read}")
+    print(f"  names ({report.names_from}): {', '.join(report.process_names) or 'none'}")
+    print(f"  background markers ({report.os_key}): {', '.join(report.background_names) or 'none'}")
+    if report.error:
+        print(f"  processes could not be listed: {report.error}")
+        return
+    shown = [item for item in report.matches if item.role != "child"]
+    children = [item for item in report.matches if item.role == "child"]
+    if not report.matches:
+        print("  matches: none")
+    else:
+        print("  matches:")
+        for item in shown:
+            parent = item.parent_pid if item.parent_pid is not None else "-"
+            how = "path marker" if item.matched_by == "path_marker" else "name"
+            print(f"    {item.role:<10} pid {item.pid:<7} ppid {parent!s:<7} {item.name}  (rule {item.rule!r}, by {how})")
+        if children:
+            counts: dict[str, int] = {}
+            for item in children:
+                counts[item.name] = counts.get(item.name, 0) + 1
+            summary = ", ".join(
+                f"{name} x{count}" if count > 1 else name
+                for name, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+            )
+            print(f"    children of those: {len(children)} ({summary}); --json lists each")
+    print("  No full path or command line is shown; this output can be pasted into an issue as it is.")
 
 
 def _emit_verbose_process_snapshot(verbose: bool, cfg: AppConfig) -> None:

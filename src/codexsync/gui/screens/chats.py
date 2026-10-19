@@ -183,7 +183,7 @@ class ChatsScreen(Screen):
             lambda progress=None: controller.chats(
                 source_machine=source, target_machine=target, progress=progress,
             ),
-            apply, progress=True,
+            apply, progress=True, kind="chats_scan",
         )
 
     def clear_project(self) -> None:
@@ -252,7 +252,7 @@ class ChatsScreen(Screen):
         self.read(lambda: controller.move_chats(
             chat_refs=list(ids), to_project=project, include_sub_threads=sub_threads,
             source_machine=source, target_machine=target,
-        ), apply)
+        ), apply, kind="chat_move_preview")
 
     def move(self, *, dry_run: bool) -> None:
         model = self.model
@@ -286,7 +286,7 @@ class ChatsScreen(Screen):
         self.run(lambda: controller.move_chats(
             chat_refs=list(ids), to_project=project, confirm_plan=plan.plan_id, dry_run=dry_run,
             include_sub_threads=sub_threads, source_machine=source, target_machine=target,
-        ), apply)
+        ), apply, kind="chat_move", dry_run=dry_run)
 
     # --- drawing -----------------------------------------------------------------------
 
@@ -303,7 +303,7 @@ class ChatsScreen(Screen):
         elif outcome is None:
             self.banner.show_message("neutral", "", "", palette)
         elif not outcome.ok:
-            self.banner.show_message("danger", self.headline(outcome.failure), outcome.message, palette)
+            self.banner.show_message("danger", self.headline(outcome.failure), self.refusal_text(outcome), palette)
         else:
             directory = outcome.value
             stranded = sum(1 for chat in directory.chats if chat.association.value == "DERIVED_VIA_MAPPING")

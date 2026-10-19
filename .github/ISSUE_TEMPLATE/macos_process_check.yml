@@ -5,15 +5,22 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thank you. This needs one Terminal command and nothing else — codexSync does not
-        have to be installed, and the command only reads the list of running programs:
+        Thank you. This needs one Terminal command that only reads the list of running
+        programs. With codexSync 0.2.0a2 or later (no config needed, nothing is written,
+        no path or command line is printed):
+
+        ```sh
+        codexsync codex processes
+        ```
+
+        Without installing anything, the raw list instead (paths may contain your user
+        name; replace it if you like):
 
         ```sh
         ps -A -o pid=,ppid=,comm= | grep -i -E 'codex|chatgpt'
         ```
 
-        Paste its output for each state below. Paths may contain your user name; replace
-        it if you like. Please do not attach anything from `~/.codex`.
+        Paste its output for each state below. Please do not attach anything from `~/.codex`.
   - type: input
     id: macos
     attributes:

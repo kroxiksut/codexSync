@@ -185,6 +185,19 @@ machine that has not synced yet still tells the others what it holds. A file
 deleted on a machine is remembered in its publication for 90 days, so the next
 machine can tell "deleted there" from "added here".
 
+Files that look like secrets — `.env` and `.env.*`, `*.pem`, `*.key`, `*.p12`,
+`*.pfx`, SSH private keys and the credential files codexSync never copies — are
+listed **without their SHA-256** by default: name, size and change time, and the
+file is never opened (`D-038`). A short secret can be found from its hash by
+guessing, and `project-files` sits in your cloud folder.
+[`[project_files] secret_files`](CONFIGURATION.md#sections) chooses: `no_hash`
+(the default), `presence` (the name alone — "changed later there" is then not
+said for that file) or `hash` (like every other file); `secret_patterns` adds
+your own patterns. Two machines with different choices compare by what both
+published. A git folder publishes no file's contents and is not affected. In the
+window: **Settings → Synchronisation**. A list published before this setting
+existed is replaced at the next check, and the cached hashes go with it.
+
 Nothing is copied, pulled or blocked, and work that exists only here says
 nothing. Git is used when it is installed, and only to read: it never touches
 the index. In the window, **Projects → Project folders** lists each project

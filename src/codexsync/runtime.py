@@ -67,9 +67,14 @@ def _ensure_dir(path: Path, field_name: str) -> None:
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise ConfigError(f"Cannot create directory for {field_name}: {path}. {exc}") from exc
+        raise ConfigError(
+            f"Cannot create directory for {field_name}: {path}. {exc}",
+            code="CANNOT_CREATE_FOLDER", params={"setting": field_name, "path": str(path)},
+        ) from exc
     if not path.is_dir():
-        raise ConfigError(f"Path for {field_name} is not a directory: {path}")
+        raise ConfigError(
+            f"Path for {field_name} is not a directory: {path}", code="NOT_A_FOLDER", params={"path": str(path)},
+        )
 
 def _bootstrap_cloud_targets(cfg: AppConfig) -> None:
     root = cfg.paths.cloud_root_dir.resolve()

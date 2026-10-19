@@ -60,6 +60,7 @@ temp_dir = "${workspace_root}/.tmp"
 | `[scheduler]` | 计划执行的安全作业 | [见下](#自动化) |
 | `[state_backup]` | 登录后和/或每 N 小时制作 `.codex` 副本 | [见下](#codex-副本) |
 | `[handoff]` | 在电脑之间交接工作，以及监视器任务 | [同步](SYNC.md#在电脑之间交接工作) |
+| `[project_files]` | 没有 git 的项目文件夹对其机密文件发布什么（默认：不含哈希） | [项目](PROJECTS.md#项目文件夹) |
 | `[logging]` | 级别、格式、轮转、保留 | [见下](#日志) |
 | `[safety]` | 固定不变：Codex 必须已停止，不确定就中止 | 不可编辑 |
 | `[state]` | 同步清单放在哪里 | — |

@@ -203,6 +203,15 @@ class BackupPruneTests(_Sandbox):
         self.manager().prune()
         self.assertTrue(own.exists())
 
+    def test_a_folder_that_cannot_be_listed_is_a_warning_not_a_failure(self) -> None:
+        """Every caller prunes after COMMITTED: an error there reported a delivered sync as failed."""
+        self._snapshot("machine-a-20260101T000000Z-0123456789ab")
+        manager = self.manager()
+        with mock.patch.object(Path, "iterdir", side_effect=FileNotFoundError("gone")):
+            with self.assertLogs("codexsync.backup", level="WARNING") as logs:
+                manager.prune()
+        self.assertIn("next run tries again", logs.output[0])
+
 
 class LogRotationTests(_Sandbox):
     def handler(self, max_bytes: int = 10_000) -> _DailySizeRotatingFileHandler:

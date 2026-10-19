@@ -35,7 +35,8 @@ From a source checkout, use `pip install -e ".[gui]"` instead
 Without `-c`, the window opens the config it used last; failing that, a
 `config.toml` in the current folder or beside the executable. If there is none,
 it starts on the *First run* screen, and every other page offers to open an
-existing `config.toml` — from any folder — or to create one where you choose.
+existing `config.toml` — from any folder but Codex's own, whose `config.toml` is
+Codex's and is refused with a note saying so — or to create one where you choose.
 No location is proposed on your behalf, and choosing a file that already
 exists in the *Config file* field opens it rather than replacing it.
 
@@ -56,7 +57,13 @@ Nothing about the safety rules changes in the window.
   the confirmation dialog quotes the exact plan id. Restore, resume and rollback
   unlock only after a dry run of the same choice.
 - Long read-only scans show their progress in the status bar and can be
-  abandoned there; a write cannot be.
+  abandoned there; a write cannot be. **Tasks…** in the status bar lists what
+  runs — from which page, since when, how far — with *Stop waiting* for each
+  read, and the jobs that ended lately with their result.
+- The same work offered on two pages is one job: a dry run on *Overview* and
+  *Synchronisation*, *Synchronise* on *Synchronisation* and *Automation*, the
+  chat list on *Projects* and *Sessions*. While it runs its buttons are off on
+  both pages, and its result is shown on both.
 - Plans the window applies are saved under `<workspace>/plans/`.
 
 ## Home
@@ -88,7 +95,9 @@ Codex looks closed. The table is the `doctor` report: configuration, state
 directories, the Codex process, whether Codex can start, the detected global-state schema, the latest
 restorable snapshot, session files, the session index, the SQLite thread
 catalogue, what a sync is allowed to do, where projects are stored, and the sync
-manifest. Below it: a dry run of the sync, the last synchronisation with a link to its
+manifest — each line said in the window's language; hover it for the English
+line `doctor` prints. Click a column to sort it (the status by severity, errors
+first); select rows and press Ctrl+C, or right-click, to copy them. Below it: a dry run of the sync, the last synchronisation with a link to its
 history, and the state of the scheduled task with a link to the *Automation* page.
 
 ## First run
@@ -98,7 +107,10 @@ history, and the state of the scheduled task with a link to the *Automation* pag
 Creates `config.toml` from the template built into CodexSync, keeping every
 comment:
 
-- **Config file** — where to write it; it must not be inside `.codex`.
+- **Config file** — where to write it; it must not be inside `.codex`. The
+  field starts empty; **Standard place** writes the standard location into it
+  (see [CLI](CLI.md#which-config-is-opened)), where commands find it without
+  `-c` from any folder. The file is created only by *Create*.
 - **Machine name** — unique and permanent: backups, snapshots and mapping rules
   on the other machine refer to it.
 - **Local .codex** — Codex's own state directory. It is read and, only during a
@@ -118,14 +130,19 @@ name, finds a workspace codexSync created earlier, and creates nothing inside
 
 The cloud → local and local → cloud plan.
 
-- **Check plan** writes nothing and works while Codex is open.
-- **Dry run** and **Synchronise** need Codex closed. The sync builds its plan
-  again at the moment it writes, so what is on screen is never what gets
-  applied.
+- **Check plan** lists the settings files the sync would copy; it writes
+  nothing and works while Codex is open.
+- **Dry run** shows what *Synchronise* would do — files, chats to the cloud
+  copy and into Codex, chats that need a decision first, projects to add — and
+  writes nothing. It works while Codex is open, and then says it is a picture
+  of a state Codex is still writing (`codexsync plan` prints the same). At
+  `[sync] scope = "settings"` it is the files dry run, with Codex closed.
+- **Synchronise** needs Codex closed. It builds its plans again at the moment
+  it writes, so what is on screen is never what gets applied.
 - **Synchronise** is the full sync: settings, then chats, then the project
-  list, with the stage it is in shown while it runs and what it did — files,
-  chats, projects added — when it ends. The plan and the dry run cover the
-  settings files.
+  list, with the stage it is in and how many of its files are written ("3 of
+  10") shown while it runs, and what it did — files, chats, projects added —
+  when it ends.
 - Search, direction and folder filters change only what is shown: a sync always
   applies the whole plan. **This run** beside the buttons is different: it sets
   the direction of the next dry run or sync only (`--direction` on the command
@@ -174,18 +191,22 @@ See [Projects and chats](PROJECTS.md#chats).
 
 ![Sessions](../screenshots/en/06-sessions.png)
 
-How each branch of a session compares across two machines. Choose where the
-sessions were recorded and which machine this is, then **Scan**. Scanning reads
+How each chat compares between this machine and the cloud copy. Choose where the
+chats were recorded and which machine this is, then **Scan**. Scanning reads
 both sides and writes only the plan file; a plan made while Codex is open is
 marked volatile and cannot be applied.
 
-Each branch is shown with its group (needs a decision, transferable, not
+Each chat is shown with its group (needs a decision, transferable, not
 supported, outside the working set, identical), the action, the relation
 ("cloud is ahead", "this machine is ahead", "diverged"…), records on each side,
 the chat and the destination.
 
-- **A divergence is never merged or resolved by date.** Select it, choose which
-  side to keep and **Record decision**; the scan is repeated with it.
+- **Two different versions are never merged.** Select a chat, choose which
+  version to keep — the choices name the machines — and **Record decision**;
+  the scan is repeated with it. Or decide all of them by one rule.
+- Once you have decided, **Synchronise with these decisions** goes to
+  *Synchronisation* and runs the full sync, asking first — with the rule you
+  chose here, if you decided by a rule.
 - **Working set** narrows what is written into `.codex` to chosen projects and
   chats. The cloud mirror always receives every session.
 - **Session index** shows what each side's `session_index.jsonl` holds.
@@ -268,7 +289,8 @@ Every write keeps a journal. An unfinished journal blocks every new change until
 it is resumed or rolled back — that block is the protection.
 
 - **Mutation journals** — state, operation, start time, number of actions,
-  backup snapshot and id.
+  backup snapshot and id. The list takes the height the page has; drag the
+  handle under it to give the actions more room.
 - **Resume** closes the journal after verifying the backup still matches; then
   run the interrupted command again, which re-plans from what is on disk.
 - **Roll back into** restores the snapshot the operation created, then closes the
@@ -363,11 +385,15 @@ config file in use. *Copy these facts* puts those lines on the clipboard for a
 bug report; none of them comes from your Codex state, so they can be pasted as
 they are.
 
-The licence block names GPL-3.0-or-later and the separate commercial licence,
-and states that the core and the command line have no third-party dependencies
+The licence block names GPL-3.0-or-later and states that the core and the command line have no third-party dependencies
 while this window uses Qt through PySide6 under the LGPL-3.0. The links open
 the documentation in the window's language, the project page, the changelog
 and the issue tracker in your browser.
+
+On Linux, **Applications menu** adds the window to this user's menu, or removes
+it again — what `codexsync shortcut install` and `remove` do, for an install no
+package made (pipx, a virtual environment, the AppImage, the `tar.gz`); with a
+`.deb` or `.rpm` it says the package already did.
 
 ## Windows exe
 

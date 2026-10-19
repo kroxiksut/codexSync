@@ -26,7 +26,9 @@ from codexsync.codex_health import FINDING_CODES as CODEX_FINDING_CODES, Severit
 from codexsync.config_migrate import FINDING_CODES
 from codexsync.gui import i18n
 from codexsync.gui.controller import Failure
+from codexsync.gui.jobs import JOB_KINDS
 from codexsync.guardian_models import GuardianResultStatus
+from codexsync.preflight import DETAIL_CODES
 from codexsync.progress import PHASES
 from codexsync.mutation_journal import JournalState
 from codexsync.recovery import RecoveryAction
@@ -163,6 +165,8 @@ class CatalogueCompletenessTests(unittest.TestCase):
         computed |= {f"guardian.reason.{code}" for code in _module_codes(PACKAGE / "guardian_restore.py")}
         computed |= {f"sessions.index.{side}{suffix}" for side in ("local", "cloud") for suffix in ("", ".missing")}
         computed |= {f"progress.phase.{phase}" for phase in PHASES}
+        computed |= {f"job.{kind}" for kind in JOB_KINDS}
+        computed |= {f"check.detail.{code}" for code in DETAIL_CODES}
         computed |= {f"settings.migration.finding.{code}" for code in FINDING_CODES}
         computed |= {f"sync.history.result.{item.value}" for item in JournalState}
         computed |= {f"sync.note.not_done.{name}" for name in HANDOFF_STEPS}
@@ -257,6 +261,75 @@ class CatalogueCompletenessTests(unittest.TestCase):
                         text.format(**{name: "x" for name in names})
                     if isinstance(value, dict):
                         catalog.plural(key, 3, **{name: "x" for name in names - {"count"}})
+
+
+def _refusal_sites() -> list[tuple[str, int, str, set[str] | None]]:
+    """Every refusal kind core names: (module, line, code, params it carries).
+
+    Read from the source, because a refusal is raised only on the path that
+    fails and no test reaches each one. A ``code=`` on a raised error is a
+    keyword call; a class attribute ``code = "..."`` is a kind its whole class
+    has (params ``None``: its values come from its own ``details``).
+    """
+    sites: list[tuple[str, int, str, set[str] | None]] = []
+    for path in sorted(PACKAGE.rglob("*.py")):
+        if GUI in path.parents:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                keywords = {kw.arg: kw.value for kw in node.exc.keywords}
+                if "code" not in keywords:
+                    continue
+                code = keywords["code"]
+                if not (isinstance(code, ast.Constant) and isinstance(code.value, str)):
+                    raise AssertionError(f"{path.name}:{node.lineno}: a refusal code must be a literal")
+                params = keywords.get("params")
+                names: set[str] = set()
+                if params is not None:
+                    if not isinstance(params, ast.Dict) or not all(isinstance(k, ast.Constant) for k in params.keys):
+                        raise AssertionError(f"{path.name}:{node.lineno}: params must be a dict literal")
+                    names = {k.value for k in params.keys}
+                sites.append((path.name, node.lineno, code.value, names))
+            elif isinstance(node, ast.ClassDef):
+                for item in node.body:
+                    if (
+                        isinstance(item, ast.Assign) and len(item.targets) == 1
+                        and isinstance(item.targets[0], ast.Name) and item.targets[0].id == "code"
+                        and isinstance(item.value, ast.Constant) and isinstance(item.value.value, str)
+                    ):
+                        sites.append((path.name, item.lineno, item.value.value, None))
+    return sites
+
+
+class RefusalCodeTests(unittest.TestCase):
+    """A refusal core names by kind is said in the window's language (CS-332)."""
+
+    def test_the_scan_finds_the_refusals(self) -> None:
+        codes = {code for _, _, code, _ in _refusal_sites()}
+        self.assertGreaterEqual(len(codes), 25, "the scan stopped finding refusal codes")
+        self.assertTrue({"CODEX_RUNNING", "OPERATION_BUSY", "PLAN_CHANGED", "RECOVERY_PENDING"} <= codes)
+
+    def test_every_code_has_a_sentence_naming_only_the_values_it_carries(self) -> None:
+        english = _raw("en")
+        for module, line, code, params in _refusal_sites():
+            with self.subTest(site=f"{module}:{line}", code=code):
+                key = f"failure.code.{code}"
+                self.assertIn(key, english)
+                value = english[key]
+                texts = value.values() if isinstance(value, dict) else [value]
+                names = {name for text in texts for name in re.findall(r"\{(\w+)\}", text)}
+                if isinstance(value, dict):
+                    names.add("count")
+                if params is None:
+                    self.assertEqual(names, set(), "a class-wide code carries no params")
+                else:
+                    self.assertEqual(names, params)
+
+    def test_no_sentence_is_left_without_a_refusal(self) -> None:
+        codes = {code for _, _, code, _ in _refusal_sites()}
+        sentences = {key.removeprefix("failure.code.") for key in _raw("en") if key.startswith("failure.code.")}
+        self.assertEqual(sorted(sentences - codes), [])
 
 
 class LookupTests(unittest.TestCase):

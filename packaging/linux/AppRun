@@ -1,0 +1,7 @@
+#!/bin/sh
+# The AppImage's entry point. One program serves both uses: with no command it
+# opens the window, with one (`sync`, `doctor`, `--version` ...) it is the CLI.
+# The AppImage runtime sets $APPIMAGE to the file the person keeps, which is
+# what codexSync's scheduler tasks name (CS-420), never this mount point.
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/lib/codexsync/codexsync-gui" "$@"

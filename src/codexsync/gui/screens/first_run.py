@@ -34,6 +34,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QFileDialog, QFormLayout, QHBoxLayout, QLineEdit
 
 from ..controller import Outcome, find_workspaces, suggested_codex_dir, suggested_machine_id
+from ..locations import standard_config_path
 from ..widgets import Banner, PathField, button, card, field, label, machine_combo, row, set_tone
 from .base import Model, Screen
 
@@ -81,6 +82,12 @@ class FirstRunScreen(Screen):
         loaded = self._loaded_values()
         self.config_path.setText(m.values.get("config", opened))
         self.config_path.edit.setPlaceholderText(self.t("first_run.config.placeholder"))
+        # Offered, never chosen: the button only writes the path into the
+        # field, and *Create* is what creates the file (CS-410).
+        self.standard_button = button(self.t("first_run.config.standard"))
+        self.standard_button.setToolTip(str(standard_config_path()))
+        self.standard_button.clicked.connect(self.use_standard_place)
+        self.config_path.layout().addWidget(self.standard_button)
         self.machine = machine_combo(
             self._known_machines(),
             m.values.get("machine", loaded.get("machine", suggested_machine_id())),
@@ -141,6 +148,13 @@ class FirstRunScreen(Screen):
         widget = {"config": self.config_path, "machine": self.machine, "codex": self.codex,
                   "workspace": self.workspace, "mirror": self.mirror}[key]
         self.model.values[key] = widget.currentText() if key == "machine" else widget.text()
+        if self.model.result is not None and not self.model.busy:
+            # The message was about the values before this edit; a refusal must
+            # not hang over a path that may now be right (CS-414).
+            self.model.result = None
+            self.model.result_is_prompt = False
+            self.render()
+            return
         if key == "config":
             self._render_create_button()
         elif key == "machine":
@@ -195,6 +209,10 @@ class FirstRunScreen(Screen):
         self.create_button.setText(self.t(key))
         self.create_button.setEnabled(not self.model.busy and not self._is_open(existing))
 
+    def use_standard_place(self) -> None:
+        """Write the standard place into the config field; nothing is created."""
+        self.config_path.setText(str(standard_config_path()))
+
     def use_machine(self, name: str) -> None:
         """Take a name the workspace already holds: this machine continues it."""
         self.machine.setEditText(name)
@@ -218,7 +236,7 @@ class FirstRunScreen(Screen):
             model.searched = True
             model.workspaces = outcome.value if outcome.ok and outcome.value else ()
 
-        self.read(find_workspaces, apply)
+        self.read(find_workspaces, apply, kind="workspace_search")
 
     def open_existing(self, path: Path | None = None) -> None:
         """Switch the window to a config that already exists on this machine."""
@@ -278,7 +296,7 @@ class FirstRunScreen(Screen):
         self.run(lambda: controller.create_config(
             path, machine_id=machine, local_state_dir=codex,
             workspace_root_dir=workspace, cloud_root_dir=mirror,
-        ), done_and_switch)
+        ), done_and_switch, kind="config_create")
 
     def render(self) -> None:
         model = self.model

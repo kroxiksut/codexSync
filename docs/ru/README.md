@@ -73,6 +73,99 @@ cd codexSync
 pip install -e ".[gui]"
 ```
 
+### В Linux
+
+Все способы ниже рабочие, «основного» нет — выбирайте, что подходит машине.
+Есть root и `apt` или `dnf` — пакет; нет root — AppImage или `tar.gz`; есть
+Python 3.11 или новее — `pipx` или виртуальное окружение. Пакеты, AppImage и
+`tar.gz` лежат на [странице выпусков](https://github.com/kroxiksut/codexSync/releases)
+начиная со следующего выпуска, для x64 (glibc 2.35 и новее: Ubuntu 22.04,
+Debian 12, Fedora 36 и новее) и ARM64 (glibc 2.39 и новее: Ubuntu 24.04,
+Debian 13 и новее). В каждом обе программы, `codexsync` и `codexsync-gui`.
+
+**Пакет .deb** (Ubuntu, Debian и родственные) ставится в `/opt/codexsync`,
+обе команды попадают в `PATH`, появляется пункт меню:
+
+```sh
+sudo apt install ./codexsync-<версия>-linux-amd64.deb   # установка; та же команда с файлом новее — обновление
+sudo apt remove codexsync                               # удаление
+```
+
+**Пакет .rpm** (Fedora и родственные) — так же:
+
+```sh
+sudo dnf install ./codexsync-<версия>-linux-amd64.rpm   # установка; та же команда с файлом новее — обновление
+sudo dnf remove codexsync                               # удаление
+```
+
+**AppImage** — один файл, который можно держать где угодно; это окно, а с
+командой — командная строка:
+
+```sh
+chmod +x codexsync-<версия>-linux-amd64.AppImage
+./codexsync-<версия>-linux-amd64.AppImage                          # окно
+./codexsync-<версия>-linux-amd64.AppImage -c config.toml doctor    # командная строка
+```
+
+Чтобы обновить, положите новый файл по тому же пути под тем же именем (задачи
+планировщика называют именно этот файл); чтобы удалить — удалите его.
+`libfuse2` не нужна; где FUSE нет совсем, добавьте `--appimage-extract-and-run`.
+
+**tar.gz** — та же папка для любого места, куда можно писать. Распакуйте её в
+отдельную папку, чтобы при обновлении путь, который называют задачи
+планировщика, остался прежним:
+
+```sh
+mkdir -p ~/.local/opt/codexsync
+tar -xzf codexsync-<версия>-linux-amd64.tar.gz -C ~/.local/opt/codexsync --strip-components=1   # установка
+rm -rf ~/.local/opt/codexsync/* && tar -xzf <файл новее> -C ~/.local/opt/codexsync --strip-components=1   # обновление
+rm -rf ~/.local/opt/codexsync                                                                    # удаление
+```
+
+Программы — `~/.local/opt/codexsync/codexsync` и `codexsync-gui`. Чтобы
+вызывать их по имени, сделайте ссылки в `~/.local/bin`
+(`ln -s ~/.local/opt/codexsync/codexsync ~/.local/opt/codexsync/codexsync-gui ~/.local/bin/`).
+
+**pipx** сам создаёт виртуальное окружение и следит за ним (`sudo apt install
+pipx` или `sudo dnf install pipx`, затем `pipx ensurepath`):
+
+```sh
+pipx install --pip-args=--pre "codexsync[gui]"   # окно и командная строка; без [gui] — только командная строка
+pipx upgrade --pip-args=--pre codexsync          # обновить
+pipx uninstall codexsync                         # удалить
+```
+
+**Виртуальное окружение вручную** — системный Python отказывает в обычном
+`pip install` (PEP 668); в Ubuntu и Debian сначала `sudo apt install
+python3-venv`:
+
+```sh
+python3 -m venv ~/.venvs/codexsync
+~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"            # установить
+~/.venvs/codexsync/bin/pip install --upgrade --pre "codexsync[gui]"  # обновить
+rm -rf ~/.venvs/codexsync                                            # удалить
+```
+
+Добавьте `~/.venvs/codexsync/bin` в `PATH` или вызывайте команды по этому пути.
+`--pre` нужен, пока 0.2 — пре-релиз.
+
+**Меню приложений.** Пакет `.deb` или `.rpm` сам добавляет туда CodexSync;
+pipx, виртуальное окружение, AppImage и `tar.gz` — нет. Для них
+`codexsync shortcut install` (или «О программе → Меню приложений» в окне)
+пишет в `~/.local/share` ярлык и значок, которые запускают ту самую программу,
+которой вы выполнили команду, — файл AppImage, распакованную папку,
+виртуальное окружение. После переноса программы выполните команду снова;
+`codexsync shortcut status` показывает, что запускает ярлык, а
+`codexsync shortcut remove` убирает два записанных ею файла и ничего больше.
+Если установлен пакет, команда ничего не пишет.
+
+**Перед удалением codexSync** снимите его задачи планировщика —
+`codexsync -c config.toml automation remove` (или «Автоматизация» в окне) — и
+ярлык в меню, если вы его делали (`codexsync shortcut remove`):
+удаление программы не трогает ни ваши задачи, ни конфиг, ни рабочую папку, ни
+`.codex`, и оставшаяся задача продолжала бы запускать программу, которой нет.
+Конфиг и рабочая папка остаются на месте для будущей установки.
+
 ## Первый запуск
 
 **Окно:**
@@ -160,7 +253,10 @@ codexSync рассчитан на строгий порядок работы м�
   macOS написано и покрыто тестами на записанном выводе `ps`, но пока его не
   запустили на живом Codex на Mac, платформа сообщает о себе как о
   неподдерживаемой: состояние процесса читается как «неопределённое», и все
-  пишущие команды отказывают.
+  пишущие команды отказывают. `codexsync codex processes` показывает, что
+  проверка там видит, — совпадения по номеру процесса и правилу, без путей — и
+  что она прочитала бы, если бы ей доверяли; такой отчёт её и подтверждает
+  ([Есть Mac?](../../README.ru.md#есть-mac)).
 - **Linux** — экспериментально, как и само настольное приложение Codex для
   Linux, которое с августа 2026 года в превью. codexSync ставится из PyPI, его
   код и CI там работают. Определение процесса проверено на живом Codex под
@@ -170,7 +266,10 @@ codexSync рассчитан на строгий порядок работы м�
   приложение, и пока она не закончится, Codex считается запущенным.
 - **Минимальные версии:** Windows 10 (1809) или новее, Python 3.11 или новее
   для pip; окну на macOS нужна macOS 13 или новее (её поддерживает текущий
-  PySide6).
+  PySide6). Python 3.14 и новее читает чаты, которые Codex хранит сжатыми
+  (`.jsonl.zst`); более старые версии оставляют их заблокированными
+  ([сессии](SESSIONS.md#когда-codex-сжимает-свои-чаты)). Готовые программы
+  собраны на 3.14.
 - CI прогоняет тесты на `windows-latest` и `macos-latest` с Python 3.11, 3.12,
   3.13 и 3.14, а на `ubuntu-latest` — экспериментально: падение там не роняет
   весь прогон.

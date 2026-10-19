@@ -818,6 +818,10 @@ Linux stays experimental: no handoff to or from it has been tried, `close_codex`
 has no `PROVEN_CLOSERS` entry there (a request is refused, as designed), and
 the user-level scheduler is unproven on it.
 
+Amendment (D-037, 2026-10-12): Linux gets a frozen build after all (`.deb`,
+`.rpm`, AppImage and `tar.gz`, x64 and ARM64), for the systems where `pip` is not enough; no
+snap or Flatpak.
+
 ## D-032: A sync never asks Codex to rebuild its chat list; Codex's state can be checked and repaired
 On 2026-10-09 Codex stopped starting on the owner's main machine, with "could
 not load your organization's settings". The chain, each step proven on the
@@ -1068,3 +1072,101 @@ What was decided:
 - **Last work wins**, as for everything carried (D-034): the person worked on
   the machine whose list is new.
 
+
+## D-037: Linux ships as .deb, .rpm, AppImage and tar.gz, never as snap or Flatpak
+
+**Status:** accepted 2026-10-12 (owner), for the full 0.2.0 release.
+
+D-031 said Linux needs no build of its own because the package is pure
+Python. That holds for `pip`, not for the people it fails: a system Python
+older than 3.11, or PEP 668 refusing a plain `pip install`, leaves them with a
+venv to build by hand, and the window additionally needs PySide6. So Linux
+gets a frozen build, the same PyInstaller output the Windows exes come from.
+
+What was decided:
+
+- **No snap and no Flatpak.** Both run the program in a sandbox, and the
+  sandbox breaks the safety spine rather than an inconvenience:
+  - The process detector asks `ps -A`. In a sandbox that hides the host's
+    processes (Flatpak has its own PID namespace; strict snap confinement
+    without `system-observe` cannot read other `/proc` entries) `ps` succeeds
+    with a list that holds no Codex, which the gate reads as `STOPPED` -- a
+    write into `.codex` while Codex runs. A blind detector must never look
+    like a closed Codex.
+  - Strict snap's `home` interface excludes hidden directories, so `~/.codex`
+    is unreachable without `personal-files` or classic confinement, both of
+    which need manual store review; and `$HOME` is redirected to
+    `~/snap/<name>/<rev>`, so the default `.codex` lookup searches the wrong
+    place.
+  - The user-level scheduler writes units under `~/.config/systemd/user` and
+    calls `systemctl --user`; neither works from inside the sandbox.
+  - snapd is effectively Ubuntu-only; the other systems we test on do not use
+    it.
+  Revisit only if a sandboxed build can prove from inside that its detector
+  sees the host's processes, and reach `~/.codex` without a store exception.
+- **`.deb`, `.rpm`, AppImage and a plain `tar.gz`** of the same frozen
+  build (console and window programs) -- the formats Codex's own Linux app
+  ships as, plus the two that need neither root nor a package manager. The
+  `tar.gz` costs almost nothing and needs no FUSE. A package installs the
+  frozen build under one directory with the commands linked onto `PATH` and a
+  `.desktop` entry; its install and remove scripts touch nothing in any
+  home directory -- no config, no workspace, no `.codex`, no user task -- so
+  the documentation says to remove codexSync's own tasks before removing the
+  package. A frozen Linux build must name the file the person keeps, not the running
+  copy: inside an AppImage `sys.executable` lies under `/tmp/.mount_*`, which
+  disappears after exit, so scheduler tasks and the "config beside the
+  executable" lookup use `$APPIMAGE` when it is set. No built-in auto-update:
+  a tool that writes into `.codex` does not change version on its own.
+- **Every way is documented and none is preferred; the person chooses.**
+  The install pages give `.deb`, `.rpm`, AppImage, `tar.gz`, `pipx` (the core
+  has no runtime dependencies, and pipx makes the venv itself) and a plain
+  venv, each with its own update and removal steps.
+- **Architectures follow Codex, on every system.** codexSync is built for
+  exactly the architectures Codex itself ships for there, and for no other: a
+  codexSync where no Codex can run has nothing to synchronise. Today that is
+  x64 and ARM64 on Windows (no 32-bit, see `PUBLISHING.md`) and on Linux
+  (D-031). When Codex adds or drops one, the build matrix follows.
+
+Amendment (2026-10-19, owner): the base system. The plan had glibc 2.28 as
+"PySide6's lower bound"; PySide6 6.12, which the Windows builds carry, needs
+glibc 2.34 on x64 and 2.39 on ARM64. The x64 build is made on Ubuntu 22.04
+(glibc 2.35) and the ARM64 build on Ubuntu 24.04 (2.39), with the same
+PySide6 and Python 3.14 as the exes. Desktop Codex supports only Ubuntu
+24.04/26.04, Debian 13 and Fedora 43/44; 22.04 costs nothing extra and covers
+people who run only Codex CLI there. Systems on glibc 2.28 (Astra 1.7, RED OS
+7.3) run neither program; `pipx` or a venv remains for them where their
+Python is 3.11 or later.
+
+## D-038: A project folder's secret files are listed without their hash, unless the person chooses otherwise
+
+**Status:** accepted 2026-10-12 (owner: "the default is no hash, but the final
+choice is the user's").
+
+A full sync compares project folders (D-026). For a git repository it
+publishes the commit, the branch and one digest of the uncommitted changes;
+for a plain folder it publishes every file with its size, SHA-256 and change
+time into the shared workspace, which sits in the person's cloud folder.
+`SECRET_NAMES` was not applied there, so a plain folder's `.env`, keys and
+certificates went to the cloud as a name plus a hash of their contents -- and
+a short secret in a known format can be found from its hash by guessing. No
+content travelled, but it contradicts "credentials never travel", and the
+comparison does not need the hash to say that another machine has more or
+newer files.
+
+What was decided:
+
+- **A setting with three values**, editable in the window like every key:
+  `hash` (as before), `no_hash` (name, size and change time; **the default**)
+  and `presence` (name only). It applies to files the secret patterns match;
+  every other file keeps its hash. The patterns are `SECRET_NAMES` plus the
+  usual secret files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, SSH private
+  keys), and the person can extend the list.
+- **The machine that lists the file decides**: a hash that was never
+  published cannot be compared, so two machines with different settings are
+  compared by what both published (size and time, or presence alone), and
+  `presence` gives up "the other machine has a newer copy" for that file --
+  the person's trade.
+- A file under `no_hash` or `presence` is not read at all, so its hash is not
+  kept in the local cache either.
+- Git repositories are unaffected: what they publish names no file's
+  contents.

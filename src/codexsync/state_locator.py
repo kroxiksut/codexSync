@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-from .config import require_outside_state_dir
+from .config import codex_state_homes, require_outside_state_dir
 from .exceptions import ConfigError
 from .models import AppConfig
 
@@ -36,9 +35,9 @@ def resolve_state_dirs(local_state_dir: Path | None, cloud_root_dir: Path) -> tu
     cloud = cloud_root_dir.expanduser()
 
     if not cloud.exists():
-        raise ConfigError(f"Cloud state dir does not exist: {cloud}")
+        raise ConfigError(f"Cloud state dir does not exist: {cloud}", code="CLOUD_DIR_MISSING", params={"path": str(cloud)})
     if not cloud.is_dir():
-        raise ConfigError(f"Cloud state dir is not a directory: {cloud}")
+        raise ConfigError(f"Cloud state dir is not a directory: {cloud}", code="NOT_A_FOLDER", params={"path": str(cloud)})
 
     return local, cloud
 
@@ -48,15 +47,13 @@ def detect_local_state_dir(configured_path: Path | None) -> Path:
     if configured_path:
         candidates.append(configured_path.expanduser())
 
-    codex_home = os.getenv("CODEX_HOME")
-    if codex_home:
-        candidates.append(Path(codex_home).expanduser())
-
-    candidates.append(Path.home() / ".codex")
+    candidates.extend(codex_state_homes())
 
     for candidate in candidates:
         if candidate.exists() and candidate.is_dir():
             return candidate
 
     tried = ", ".join(str(path) for path in candidates)
-    raise ConfigError(f"Cannot detect Codex state directory. Tried: {tried}")
+    raise ConfigError(
+        f"Cannot detect Codex state directory. Tried: {tried}", code="CODEX_DIR_NOT_FOUND", params={"tried": tried},
+    )

@@ -118,6 +118,26 @@ codexsync -c config.toml sessions resolve --plan sessions-plan.json --format-mig
 执行计划时，每份即将被覆盖的旧副本都会被压缩保存一次，放在 `semantic.root_dir` 下的
 `superseded/` 中——那是丢失的记录唯一还存在的地方。与冲突包不同，胜出的副本不会再存一份。
 
+### 当 Codex 压缩自己的聊天
+
+自 2026 年 10 月起（在 Codex 0.163 上观察到），Codex 会把一段时间未动过的聊天保存为
+`rollout-….jsonl.zst`（zstd 压缩），而它的聊天列表仍然指向普通的 `.jsonl`。在 Python 能读
+zstd 的地方 —— Python 3.14 及更新版本，发布的程序就是用它构建的 —— codexSync 会读取它，并像
+其他聊天一样比较：在本机增长的内容会进入镜像（照常保存，从不使用 zstd）。在另一台机器上增长的
+聊天会留在镜像中（`IN_PLACE_CONTAINER`）：当普通的 `x.jsonl` 与 `x.jsonl.zst` 并存时 Codex
+读哪一个，目前还不清楚，所以不会覆盖它。
+
+在 Python 3.11–3.13 上通过 pip 安装的 codexSync 读不了这种容器。这样的文件仍然是该聊天的
+历史，因此从不跳过：该聊天在两侧都是
+`BLOCKED_INVALID_BRANCH`（`UNSUPPORTED_CONTAINER`）—— 不会为它向 `.codex` 写入任何东西，
+它在镜像中的副本保持原样 —— 也不会有副本被放在它旁边。`doctor` 在 `codex_compat` 中给出
+数量。其余聊天照常同步。
+
+同样的规则适用于 codexSync 写入的每一种 Codex 格式：`threads` 表缺少 codexSync 读取的
+某一列的聊天列表（`state_<n>.sqlite`）是不认识的形式（`CATALOG_SHAPE_UNKNOWN`），而不是
+没有目录，因此不会有聊天写入 `.codex`；不认识的重建状态永远不会被修复；形式不认识的项目
+不会被同步，`recover rollback` 也不会把旧的全局状态写在它们上面。
+
 ## 执行计划
 
 执行需要 Codex 关闭，还需要准确的计划标识。计划会先按当前状态重新构建，并且它的标识

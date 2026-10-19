@@ -12,7 +12,7 @@ it will replace is written before the first replace. In the window this is the
 ## Commands
 
 ```powershell
-codexsync -c config.toml plan              # what a sync would copy; works while Codex is open
+codexsync -c config.toml plan              # what a sync would do (files, chats, projects); works while Codex is open
 codexsync -c config.toml -v plan           # the same, plus the Codex processes that were seen
 codexsync -c config.toml sync --dry-run    # every check a sync makes, writes nothing
 codexsync -c config.toml sync --apply      # the real sync
@@ -24,7 +24,8 @@ so a real sync always needs `--apply`.
 **What `sync` carries** is `[sync] scope`. At `full` (the default) it is the
 window's *Synchronise*: settings files, chats and projects — the same run as
 [`handoff sync`](#handing-work-over), and the dry run builds every one of
-those plans. At `settings` it copies only the files under
+those plans with Codex closed; `plan` builds them while Codex is open and
+marks the result volatile, as the window's *Dry run* does. At `settings` it copies only the files under
 `targets.include_roots`, which is all `sync` did before 0.2. `--scope` chooses
 for one run, and `--direction` (`bidirectional`, `to_cloud`, `to_local`)
 overrides `sync.direction` for one run — the *This run* box beside

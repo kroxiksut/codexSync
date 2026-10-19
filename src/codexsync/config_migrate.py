@@ -329,7 +329,7 @@ def apply_migration(
     )
     if plan.plan_id != confirm_plan_id:
         raise ConflictError(
-            "Config changed since the plan was built; re-run the check and confirm the new id"
+            "Config changed since the plan was built; re-run the check and confirm the new id", code="PLAN_CHANGED"
         )
     if plan.is_current:
         raise ConfigError("Config is already up to date; nothing to apply")

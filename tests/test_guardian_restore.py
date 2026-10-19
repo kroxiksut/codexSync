@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
-import time
 import unittest
 
 from codexsync.exceptions import ConfigError, ConflictError, FailSafeError
@@ -31,6 +30,11 @@ from codexsync.guardian_restore import (
 )
 from codexsync.guardian_schema import ELECTRON_V2_SCHEMA, validate_global_state_references
 from codexsync.guardian_store import GuardianStore
+
+try:
+    from tests.test_guardian_state_isolation import forbid_writes_under
+except ImportError:  # collected with tests/ itself on sys.path
+    from test_guardian_state_isolation import forbid_writes_under
 
 
 HOST = "local:C:\\Users\\user\\.codex"
@@ -73,43 +77,27 @@ def _observation(payload: bytes) -> SourceObservation:
 
 
 def _tree(root: Path) -> dict[str, tuple[bool, int, int]]:
-    """Names, sizes and mtimes under ``root``; parent mtimes catch a created-then-removed file."""
+    """Names, file sizes and file mtimes under ``root``.
+
+    Directory mtimes are left out on purpose (CS-329). On Windows a
+    directory's recorded mtime can move by tens of milliseconds with nothing
+    created or removed in it, which failed the guard below depending on what
+    ran before it in the suite. A file created and then removed during
+    planning -- what a directory mtime was there to catch -- is caught at the
+    call instead, by `forbid_writes_under`.
+    """
     if not root.exists():
         return {}
-    result = {".": (True, 0, root.stat().st_mtime_ns)}
+    result: dict[str, tuple[bool, int, int]] = {}
     for path in root.rglob("*"):
         stat_result = path.stat()
+        is_dir = path.is_dir()
         result[path.relative_to(root).as_posix()] = (
-            path.is_dir(),
-            0 if path.is_dir() else stat_result.st_size,
-            stat_result.st_mtime_ns,
+            is_dir,
+            0 if is_dir else stat_result.st_size,
+            0 if is_dir else stat_result.st_mtime_ns,
         )
     return result
-
-
-def _settled_tree(root: Path, *, attempts: int = 40) -> dict[str, tuple[bool, int, int]]:
-    """`_tree`, read until two consecutive readings agree.
-
-    A directory's recorded mtime on Windows can still be settling just after a
-    file inside it was removed: two reads a moment apart return values that
-    differ by a millisecond or two with nothing having happened in between.
-    That made the "planning writes nothing" guard below fail depending on what
-    ran before it in the suite -- on a timestamp artefact, not on a write.
-    Requiring the baseline to be stable removes the artefact and keeps the
-    guard, which is what actually matters: a file created and removed during
-    planning still moves the parent's mtime after this baseline is taken.
-    """
-    previous = _tree(root)
-    for _ in range(attempts):
-        # 25 ms a turn, up to a second: on a loaded machine the value can take
-        # longer to settle than it does in a quiet run, and a guard that fails
-        # on someone else's disk contention is worse than a slow one.
-        time.sleep(0.025)
-        current = _tree(root)
-        if current == previous:
-            return current
-        previous = current
-    return previous
 
 
 class GuardianRestorePlanTests(unittest.TestCase):
@@ -364,15 +352,16 @@ class GuardianRestorePlanTests(unittest.TestCase):
         # A missing pointer is what the writer would rebuild; the planner must not.
         pointer = self.guardian_root / "latest-good" / "machine-a.json"
         pointer.unlink()
-        before = _settled_tree(self.root)
+        before = _tree(self.root)
 
-        plan, _ = self._plan(snapshot.snapshot_id, self.current)
-        self._plan(damaged.snapshot_id, self.current)
-        self._plan("20260101T000000.000000Z-missing", None)
-        verify_restore_still_valid(plan, root_dir=self.guardian_root, current_state=self.current,
-                                   confirm_plan=plan.plan_id)
+        with forbid_writes_under(self.root):
+            plan, _ = self._plan(snapshot.snapshot_id, self.current)
+            self._plan(damaged.snapshot_id, self.current)
+            self._plan("20260101T000000.000000Z-missing", None)
+            verify_restore_still_valid(plan, root_dir=self.guardian_root, current_state=self.current,
+                                       confirm_plan=plan.plan_id)
 
-        self.assertEqual(_settled_tree(self.root), before)
+        self.assertEqual(_tree(self.root), before)
         self.assertFalse(pointer.exists())
 
     # -- re-proving before the write ------------------------------------------

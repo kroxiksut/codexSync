@@ -465,11 +465,11 @@ def apply_project_move(
     copy a rerun picks up instead of discarding.
     """
     if confirm_plan != plan.plan_id:
-        raise ConfigError("The confirmation must exactly match the project move plan id")
+        raise ConfigError("The confirmation must exactly match the project move plan id", code="PLAN_CHANGED")
     if plan.codes:
         raise ConflictError("Project move plan is blocked: " + ", ".join(plan.codes))
     if plan.volatile:
-        raise FailSafeError("A project move plan built while Codex was running cannot be applied")
+        raise FailSafeError("A project move plan built while Codex was running cannot be applied", code="PLAN_VOLATILE")
     problem = _integrity_problem(plan)
     if problem is not None:
         raise FailSafeError(f"Project move plan does not verify: {problem}")
@@ -485,7 +485,7 @@ def apply_project_move(
     require_stopped()
     original = read_state()
     if hashlib.sha256(original).hexdigest() != plan.global_state_sha256:
-        raise FailSafeError("Codex state changed since the preview; preview again")
+        raise FailSafeError("Codex state changed since the preview; preview again", code="PLAN_CHANGED")
     candidate = _candidate_state(plan, original)
     action_count = 1 + len(plan.bindings)
 

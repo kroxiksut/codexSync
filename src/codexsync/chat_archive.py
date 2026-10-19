@@ -29,6 +29,7 @@ import sqlite3
 from typing import Callable
 
 from .exceptions import FailSafeError
+from .jsonl_codec import held_in_any_container
 from .peer_board import digest as _digest
 from .sqlite_audit import PlacementStatus, ThreadArchiveRows
 
@@ -138,7 +139,9 @@ def build_archive_plan(
     unresolved = 0
     for thread_id, (stored, archived, _archived_at) in sorted(rows.rows.items()):
         relative = _relative(stored, root)
-        if relative is None or (root / relative).exists():
+        # Codex names `x.jsonl` and reads `x.jsonl.zst` (CS-394): that file
+        # is where the row says, not gone.
+        if relative is None or held_in_any_container(root / relative):
             continue
         name = relative.rsplit("/", 1)[-1]
         if thread_id not in name:

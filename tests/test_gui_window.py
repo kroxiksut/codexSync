@@ -51,6 +51,7 @@ from codexsync.chat_directory import Association, ChatDirectory, ChatEntry, Chat
 from codexsync.chat_move import ChatMoveAction, ChatMoveKind, ChatMovePlan
 from codexsync.config_migrate import ConfigEdit, ConfigFinding, ConfigMigrationPlan
 from codexsync.gui import BRAND_NAME
+from codexsync.app import FullSyncSummary
 from codexsync.gui.controller import (
     CheckRow,
     ConfigInfo,
@@ -153,6 +154,10 @@ class FakeController(Controller):
     def sync(self, *, dry_run: bool, direction=None) -> Outcome:
         self.calls.append(("sync", dry_run) + ((direction,) if direction is not None else ()))
         return self._answer("sync", Outcome(value=SyncResult(applied=not dry_run, actions=3, conflicts=0)))
+
+    def dry_run(self, *, direction=None, progress=None) -> Outcome:
+        self.calls.append(("dry_run",) + ((direction,) if direction is not None else ()))
+        return self._answer("dry_run", Outcome(value=_full_preview()))
 
     def chats(self, *, source_machine=None, target_machine=None, progress=None) -> Outcome:
         # A long read reports as it goes; the fake reports once so the window's
@@ -733,6 +738,62 @@ class OverviewTests(_OverviewCase):
         window, _ = self.make(controller=controller)
         self.assertEqual(window.screen("overview").table.item(0, 0).text(), "brand_new_check")
 
+    def _checks_window(self, language: str = "ru"):
+        rows = (
+            CheckRow("config", "PASS", "Loaded config from C:/c.toml", (("config.loaded", {"path": "C:/c.toml"}),)),
+            CheckRow("orphan_temp_files", "WARN", "Found 3 orphan temp file(s) in T",
+                     (("orphan_temp_files.found", {"count": 3, "path": "T"}),)),
+            CheckRow("mutation_journal", "FAIL", "1 unfinished mutation(s) ...", (("mutation_journal.pending", {
+                "count": 1, "family": "sync", "operation": "op-1", "state": "COMMITTING",
+            }),)),
+            CheckRow("sync_rules", "PASS", "direction=to_cloud; delete_policy=never", (("sync_rules.rules", {
+                "direction": "to_cloud", "delete_policy": "never",
+            }),)),
+            CheckRow("brand_new", "WARN", "English from a newer core", (("brand_new.sentence", {}),)),
+        )
+        controller = FakeController()
+        controller.outcomes["state"] = Outcome(value=_view(stopped=True, checks=rows))
+        window, _ = self.make(language, controller)
+        return window, window.screen("overview")
+
+    def test_details_are_said_in_the_window_s_language(self) -> None:
+        # CS-338: the core's `sessions=252 invalid=0` becomes a sentence.
+        window, screen = self._checks_window("ru")
+        catalog = window.catalog
+        details = [screen.table.item(r, 2).text() for r in range(screen.table.rowCount())]
+        self.assertEqual(details[0], catalog.text("check.detail.config.loaded", path="C:/c.toml"))
+        self.assertEqual(details[1], catalog.plural("check.detail.orphan_temp_files.found", 3, path="T"))
+        self.assertIn(catalog.text("settings.choice.sync.direction.to_cloud"), details[3])
+        self.assertEqual(details[4], "English from a newer core", "an unknown code keeps the English line")
+        self.assertEqual(screen.table.item(0, 2).toolTip(), "Loaded config from C:/c.toml")
+
+    def test_the_status_column_sorts_by_how_bad_it_is(self) -> None:
+        window, screen = self._checks_window("en")
+        from PySide6.QtCore import Qt
+
+        self.assertEqual(screen.table.item(0, 0).text(), window.catalog.text("check.config"),
+                         "the diagnostic's own order until a column is clicked")
+        screen.table.sortItems(1, Qt.AscendingOrder)
+        statuses = [screen.table.item(r, 1).text() for r in range(screen.table.rowCount())]
+        order = [window.catalog.text(f"status.{s}") for s in ("FAIL", "WARN", "WARN", "PASS", "PASS")]
+        self.assertEqual([s.split("  ", 1)[1] for s in statuses], order)
+
+    def test_rows_can_be_copied_as_shown(self) -> None:
+        from PySide6.QtGui import QShortcut
+        from PySide6.QtWidgets import QApplication
+        from codexsync.gui.widgets import table_text
+
+        window, screen = self._checks_window("en")
+        everything = table_text(screen.table)
+        self.assertTrue(everything.startswith(window.catalog.text("checks.column.check")))
+        self.assertEqual(len(everything.splitlines()), 1 + screen.table.rowCount())
+        screen.table.selectRow(2)
+        shortcut = screen.table.findChild(QShortcut)
+        shortcut.activated.emit()
+        copied = QApplication.clipboard().text()
+        self.assertEqual(copied.split("\t")[0], window.catalog.text("check.mutation_journal"))
+        self.assertIn("op-1", copied)
+
     def test_a_second_refresh_is_ignored_while_one_is_running(self) -> None:
         window, _ = self.make()
         screen = window.screen("overview")
@@ -741,11 +802,36 @@ class OverviewTests(_OverviewCase):
         screen.refresh()
         self.assertIsNone(screen.model.state, "no second job may start")
 
-    def test_the_dry_run_reports_the_plan_and_that_nothing_was_written(self) -> None:
+    def test_the_dry_run_is_the_whole_sync_and_writes_nothing(self) -> None:
+        # CS-411: what Synchronise would do -- settings, chats and projects --
+        # not the settings files alone, and never through `sync`.
         window, controller = self.make()
         screen = window.screen("overview")
         screen.start_dry_run()
-        self.assertIn(("sync", True), controller.calls)
+        self.assertIn(("dry_run",), controller.calls)
+        self.assertNotIn(("sync", True), controller.calls)
+        text = screen.dry_run_result.text()
+        self.assertIn(window.catalog.text("dry_run.full.done"), text)
+        self.assertIn(window.catalog.plural("dry_run.full.chats_to_cloud", 17), text)
+        self.assertIn(window.catalog.plural("dry_run.full.chats_to_codex", 2), text)
+        self.assertIn(window.catalog.plural("dry_run.full.projects_to_add", 1), text)
+        self.assertNotIn(window.catalog.text("dry_run.full.volatile"), text)
+
+    def test_a_dry_run_while_codex_is_open_says_it_is_a_picture(self) -> None:
+        window, controller = self.make()
+        controller.outcomes["dry_run"] = Outcome(value=_full_preview(volatile=True, decide=1, projects=None))
+        screen = window.screen("overview")
+        screen.start_dry_run()
+        text = screen.dry_run_result.text()
+        self.assertIn(window.catalog.text("dry_run.full.volatile"), text)
+        self.assertIn(window.catalog.plural("dry_run.full.chats_to_decide", 1), text)
+        self.assertIn(window.catalog.text("dry_run.full.projects_not_carried"), text)
+
+    def test_at_settings_scope_the_files_dry_run_is_reported_as_before(self) -> None:
+        window, controller = self.make()
+        controller.outcomes["dry_run"] = Outcome(value=SyncResult(applied=False, actions=3, conflicts=0))
+        screen = window.screen("overview")
+        screen.start_dry_run()
         self.assertIn(window.catalog.text("dry_run.done"), screen.dry_run_result.text())
         self.assertIn(window.catalog.plural("dry_run.plan.actions", 3), screen.dry_run_result.text())
 
@@ -791,6 +877,14 @@ def _codex_health(code: str | None):
     elif code == "CATALOGUE_MISSES_CHATS":
         findings = (Finding(code, Severity.NOTE, {"chats": 3}, command="sessions catalogue"),)
     return CodexHealth(findings, ProcessState.STOPPED, plan)
+
+
+def _full_preview(*, volatile: bool = False, decide: int = 0, projects: int | None = 1):
+    return FullSyncSummary(
+        machine="laptop", source="desktop", files=3, file_conflicts=0, chats_to_cloud=17, chats_to_codex=2,
+        chats_to_decide=decide, projects_to_add=projects, project_changes=2 if projects is not None else None,
+        waiting_for=(), volatile=volatile,
+    )
 
 
 def _full_sync_result(
@@ -1073,7 +1167,10 @@ class SyncTests(_WindowTestCase):
         window, controller = self.make(confirm=False)
         window.screen("sync").start_run(dry_run=True)
         self.assertEqual(self.confirmations, [])
-        self.assertIn(("sync", True), controller.calls)
+        self.assertIn(("dry_run",), controller.calls)
+        self.assertIn(
+            window.catalog.text("dry_run.full.done"), window.screen("sync").result.text(),
+        )
 
 
 class SyncFilterTests(_WindowTestCase):
@@ -1220,6 +1317,55 @@ class SessionsTests(_WindowTestCase):
         screen.scan()
         self.assertFalse(screen.apply_button.isEnabled())
         self.assertEqual(screen.banner.title.text(), window.catalog.plural("sessions.decide.title", 1))
+
+    def _conflict_window(self):
+        controller = FakeController()
+        controller.outcomes["scan_sessions"] = Outcome(value=SessionScan(_transfer_plan(conflict=True), Path("C:/p/s.json"), Path("C:/p/r.json"), False))
+        window, _ = self.make(controller=controller)
+        window.go_to("sessions")
+        screen = window.screen("sessions")
+        screen.source.setEditText("desktop")
+        screen.target.setEditText("laptop")
+        screen._pair_changed()
+        screen.scan()
+        return window, controller, screen
+
+    def test_the_choices_name_the_machines_and_the_hint_names_the_chat(self) -> None:
+        # CS-343: "this machine's branch" and "the exact bytes of both
+        # branches" asked a person to know what a branch is.
+        from PySide6.QtCore import Qt
+
+        window, _, screen = self._conflict_window()
+        texts = [screen.choice.itemText(i) for i in range(screen.choice.count())]
+        self.assertIn(window.catalog.text("sessions.choice.KEEP_LOCAL", machine="laptop"), texts)
+        self.assertIn(window.catalog.text("sessions.choice.KEEP_REMOTE", machine="desktop"), texts)
+        conflict_row = next(
+            r for r in range(screen.table.rowCount())
+            if screen.table.item(r, 0).data(Qt.UserRole).conflict_id
+        )
+        screen.table.selectRow(conflict_row)
+        self.assertEqual(screen.resolution_hint.text(), window.catalog.text(
+            "sessions.resolve.hint", chat="j" * 12, local=4, remote=6,
+        ))
+
+    def test_after_a_decision_the_page_offers_the_sync_that_applies_it(self) -> None:
+        window, controller, screen = self._conflict_window()
+        self.assertTrue(screen.after_frame.isHidden(), "nothing decided yet, nothing to offer")
+        screen.decide_all("prefer_local")
+        # The fake still answers with the conflict: one is left.
+        self.assertFalse(screen.after_frame.isHidden())
+        self.assertEqual(screen.after_text.text(), window.catalog.plural("sessions.after.left", 1))
+        self.assertTrue(screen.after_sync.isHidden())
+
+        controller.outcomes["scan_sessions"] = Outcome(value=SessionScan(_transfer_plan(conflict=False), Path("C:/p/s.json"), Path("C:/p/r.json"), False))
+        screen.decide_all("prefer_local")
+        self.assertEqual(screen.after_text.text(), window.catalog.text("sessions.after.ready"))
+        screen.after_sync.click()
+        from codexsync.gui.window import PAGES
+
+        self.assertEqual(window._nav.currentRow(), PAGES.index("sync"))
+        self.assertTrue(self.confirmations, "the sync asks first, as on its own page")
+        self.assertEqual(controller.calls[-1], ("handoff_now", "prefer_local"), "the rule chosen here, for this sync")
 
     def test_a_volatile_plan_cannot_be_applied(self) -> None:
         controller = FakeController()
@@ -1505,6 +1651,19 @@ class CodexStateTests(_WindowTestCase):
 
 
 class RecoveryTests(_WindowTestCase):
+    def test_the_journal_list_takes_the_height_and_the_actions_keep_theirs(self) -> None:
+        # CS-340: squeezed into one screen, the actions card drew its
+        # sentences over each other and the list showed one row.
+        from codexsync.gui.screens.journals import JOURNAL_LIST_MIN_HEIGHT
+
+        window, _ = self.make()
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        self.assertTrue(screen.scrollable)
+        self.assertEqual(screen.splitter.count(), 2)
+        self.assertFalse(screen.splitter.childrenCollapsible())
+        self.assertGreaterEqual(screen.table.minimumHeight(), JOURNAL_LIST_MIN_HEIGHT)
+
     def test_an_open_journal_blocks_and_rollback_goes_to_each_files_own_side(self) -> None:
         window, controller = self.make()
         window.go_to("recovery")
@@ -1733,6 +1892,185 @@ class ActivityTests(_WindowTestCase):
         self.assertFalse(sync.model.preview.ok)
         self.assertEqual(sync.model.preview.message, window.catalog.text("activity.cancelled"))
         self.assertTrue(sync.model.run_busy, "the write is still awaited")
+
+
+class _HeldRunner:
+    """Holds every job until the test lets it finish: work "in flight"."""
+
+    busy = False
+
+    def __init__(self) -> None:
+        self.pending: list[tuple] = []
+        self.abandoned: list[int] = []
+
+    def start(self, call, done, report=None):
+        self.pending.append((call, done, report))
+        return len(self.pending)
+
+    def abandon(self, token):
+        self.abandoned.append(token)
+        return True
+
+    def finish(self, token: int) -> None:
+        call, done, report = self.pending[token - 1]
+        done(call(progress=report) if report is not None else call())
+
+
+class SharedJobsTests(_WindowTestCase):
+    """CS-336: work offered on two pages is one job, busy and answered on both."""
+
+    def _window(self, controller=None):
+        from codexsync.gui.window import MainWindow
+
+        runner = _HeldRunner()
+        controller = controller or FakeController()
+        window = MainWindow(controller, language="en", runner=runner)
+        window.confirm = lambda *a, **k: True
+        self.addCleanup(window.deleteLater)
+        # Whatever the pages read on start is let through first.
+        for token in range(1, len(runner.pending) + 1):
+            runner.finish(token)
+        return window, controller, runner
+
+    def test_a_dry_run_from_overview_is_the_sync_pages_dry_run(self) -> None:
+        window, controller, runner = self._window()
+        window.go_to("overview")
+        overview, sync = window.screen("overview"), window.screen("sync")
+        overview.start_dry_run()
+        token = len(runner.pending)
+        self.assertTrue(window.busy("dry_run"))
+        sync.render()
+        self.assertFalse(sync.dry_button.isEnabled(), "the other page knows it is running")
+        self.assertFalse(sync.apply_button.isEnabled())
+        self.assertEqual(sync.result.text(), window.catalog.text("sync.running"))
+
+        sync.start_run(dry_run=True)
+        self.assertEqual(len(runner.pending), token, "a second click does not run it twice")
+
+        runner.finish(token)
+        self.assertFalse(window.busy("dry_run"))
+        self.assertIs(sync.model.result, overview.model.dry_run, "one result, on both pages")
+        self.assertEqual(sync.model.run_kind, "dry")
+        self.assertTrue(sync.dry_button.isEnabled())
+        self.assertIn(window.catalog.text("dry_run.full.done"), sync.result.text())
+
+    def test_a_sync_from_automation_shows_on_the_sync_page_and_locks_both(self) -> None:
+        controller = FakeController()
+        controller.outcomes["handoff_now"] = Outcome(value=_full_sync_result())
+        window, _, runner = self._window(controller)
+        window.go_to("automation")
+        automation = window.screen("automation")
+        automation.run_handoff_now()
+        token = len(runner.pending)
+        sync, overview = window.screen("sync"), window.screen("overview")
+        sync.render()
+        overview.render()
+        self.assertFalse(sync.apply_button.isEnabled())
+        self.assertFalse(overview.dry_run_button.isEnabled(), "no dry run while a sync writes")
+        sync.start_run(dry_run=False)
+        self.assertEqual(len(runner.pending), token)
+
+        runner.finish(token)
+        self.assertEqual(sync.model.run_kind, "apply")
+        self.assertIs(sync.model.result, automation.model.handoff_result)
+        self.assertIn(window.catalog.text("sync.done.apply"), sync.result.text())
+
+    def test_the_chat_list_is_read_once_for_projects_and_sessions(self) -> None:
+        window, controller, runner = self._window()
+        window.go_to("projects")
+        window.screen("projects").refresh()
+        token = len(runner.pending)
+        window.screen("sessions").load_projects()
+        self.assertEqual(len(runner.pending), token)
+        runner.finish(token)
+        self.assertIs(window.model("sessions").directory, window.model("projects").directory)
+        self.assertTrue(window.model("sessions").directory.ok)
+
+    def test_a_job_of_the_previous_config_keeps_no_page_of_the_new_one_busy(self) -> None:
+        window, _, runner = self._window()
+        window.screen("overview").start_dry_run()
+        self.assertTrue(window.busy("dry_run"))
+        window._models = {page: type(model)() for page, model in window._models.items()}
+        self.assertFalse(window.busy("dry_run"))
+        runner.finish(len(runner.pending))
+        self.assertIsNone(window.model("sync").result, "the late result lands nowhere new")
+
+    def test_a_kind_the_window_does_not_know_is_refused(self) -> None:
+        window, _, _ = self._window()
+        with self.assertRaises(ValueError):
+            window.run("sync", lambda: Outcome(value=None), lambda *_: None, kind="no-such-kind")
+
+
+class TasksDialogTests(_WindowTestCase):
+    """CS-337: what runs, from where, since when, how far; what ended and how."""
+
+    def _window(self):
+        from codexsync.gui.window import MainWindow
+
+        runner = _HeldRunner()
+        window = MainWindow(FakeController(), language="en", runner=runner)
+        window.confirm = lambda *a, **k: True
+        self.addCleanup(window.deleteLater)
+        for token in range(1, len(runner.pending) + 1):
+            runner.finish(token)
+        return window, runner
+
+    def _texts(self, table) -> list[list[str]]:
+        return [
+            [table.item(r, c).text() if table.item(r, c) else "" for c in range(table.columnCount())]
+            for r in range(table.rowCount())
+        ]
+
+    def test_the_list_names_each_job_its_page_and_offers_stop_only_for_reads(self) -> None:
+        window, runner = self._window()
+        window.go_to("sync")
+        sync = window.screen("sync")
+        sync.check_plan()
+        read_token = len(runner.pending)
+        sync.model.preview_busy = False
+        sync.start_run(dry_run=False)
+        write_token = len(runner.pending)
+        self.assertTrue(window._activity_open.isVisibleTo(window))
+        window.show_tasks()
+        dialog = window._tasks_dialog
+        rows = self._texts(dialog.running)
+        self.assertEqual([row[0] for row in rows], [
+            window.catalog.text("job.sync_preview"), window.catalog.text("job.full_sync"),
+        ])
+        self.assertEqual({row[1] for row in rows}, {window.catalog.text("nav.sync")})
+        self.assertEqual(set(dialog.stop_buttons), {read_token}, "a write has no stop button")
+
+        dialog.stop_buttons[read_token].click()
+        self.assertEqual(runner.abandoned, [read_token])
+        self.assertEqual(sync.model.preview.message, window.catalog.text("activity.cancelled"))
+        recent = self._texts(dialog.recent)
+        self.assertEqual(recent[0][0], window.catalog.text("job.sync_preview"))
+        self.assertEqual(recent[0][4], window.catalog.text("tasks.result.abandoned"))
+
+        runner.finish(write_token)
+        recent = self._texts(dialog.recent)
+        self.assertEqual(recent[0][0], window.catalog.text("job.full_sync"))
+        self.assertEqual(recent[0][4], window.catalog.text("failure.codex-not-stopped"))
+        self.assertEqual(self._texts(dialog.running), [])
+        self.assertEqual(dialog.running_empty.text(), window.catalog.text("tasks.running.none"))
+
+    def test_a_dry_run_says_so_and_a_job_without_a_kind_is_named_by_its_page(self) -> None:
+        window, runner = self._window()
+        catalog = window.catalog
+        self.assertEqual(
+            window.job_title("restore", "backups", dry_run=True),
+            catalog.text("job.as_dry_run", job=catalog.text("job.restore")),
+        )
+        self.assertEqual(
+            window.job_title(None, "settings", cancellable=True),
+            catalog.text("job.page.read", page=catalog.text("nav.settings")),
+        )
+
+    def test_the_open_list_follows_a_language_switch(self) -> None:
+        window, _ = self._window()
+        window.show_tasks()
+        window.set_language("ru")
+        self.assertEqual(window._tasks_dialog.windowTitle(), load("ru").text("tasks.title"))
 
 
 @unittest.skipUnless(_HAS_QT, "PySide6 is an optional extra and is not installed")
@@ -2226,8 +2564,9 @@ class ProgressTests(_WindowTestCase):
     def test_an_unlabelled_phase_falls_back_to_its_own_id(self) -> None:
         """A phase without a label is a bug the i18n test catches, not a blank line."""
         window, _ = self.make()
-        window._active["t"] = ("chats", lambda *_: None, True, 0.0, window.model("chats"))
-        window._progress["t"] = ("no-such-phase", 1, 2)
+        window.jobs().start("t", page="chats", kind=None, apply=lambda *_: None,
+                            model=window.model("chats"), cancellable=True)
+        window.jobs().report("t", "no-such-phase", 1, 2)
         self.assertIn("no-such-phase", window.progress_text("chats"))
 
 
@@ -2296,6 +2635,33 @@ class ConfigScreensTests(_WindowTestCase):
         self.assertEqual(window.controller.config_path, path)
         self.assertEqual(remembered, [path])
         self.assertEqual(window.machine_id(), "laptop")
+
+    def test_codexs_own_config_is_not_opened_and_the_window_says_why(self) -> None:
+        # CS-412: Codex keeps a config.toml of its own in its folder.
+        from codexsync.gui.window import MainWindow
+
+        path = self._create()
+        codex_home = self.root / "home" / ".codex"
+        codex_home.mkdir(parents=True)
+        codex_own = codex_home / "config.toml"
+        codex_own.write_text('model = "gpt-5"\n', encoding="utf-8")
+        remembered: list[Path] = []
+        window = MainWindow(
+            Controller(path), language="en",
+            runner=_InlineRunner(), settings=_Settings({}), remember=remembered.append,
+        )
+        self.addCleanup(window.deleteLater)
+        told: list[tuple[str, str]] = []
+        window.inform = lambda title, text: told.append((title, text))
+        remembered.clear()
+        with mock.patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}):
+            window.open_config(codex_own)
+        self.assertEqual(window.controller.config_path, path, "the window stays on its file")
+        self.assertEqual(remembered, [])
+        (title, text), = told
+        self.assertIn("Codex", title)
+        self.assertIn(str(codex_own), text)
+        self.assertIn(str(codex_home), text)
 
     def test_the_first_run_screen_offers_a_workspace_it_found(self) -> None:
         """The form is filled from a folder codexSync itself made, not typed again."""
@@ -2416,6 +2782,38 @@ class ConfigScreensTests(_WindowTestCase):
         screen.create()
         self.assertEqual(screen.status.text(), window.catalog.text("first_run.config.required"))
         self.assertIsNone(window.controller.config_path)
+
+    def test_the_standard_place_is_offered_and_never_created(self) -> None:
+        # CS-410: the field stays empty until the button writes the path into
+        # it; only Create would make the file.
+        standard = self.root / "std" / "config.toml"
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        self.assertEqual(screen.config_path.text(), "")
+        with mock.patch("codexsync.gui.screens.first_run.standard_config_path", return_value=standard):
+            screen.use_standard_place()
+        self.assertEqual(screen.config_path.text(), str(standard))
+        self.assertFalse(standard.exists())
+        self.assertIsNone(window.controller.config_path)
+        self.assertEqual(screen.create_button.text(), window.catalog.text("first_run.create"))
+
+    def test_an_edit_clears_the_message_about_the_values_before_it(self) -> None:
+        # CS-414: the refusal described the old values; it must not hang over
+        # a path that may now be right.
+        window, _ = self.make(controller=Controller(None))
+        screen = window.screen("first_run")
+        screen.create()
+        self.assertTrue(screen.status.isVisibleTo(window))
+        screen.config_path.edit.setText(str(self.root / "new" / "config.toml"))
+        self.assertEqual(screen.status.text(), "")
+        self.assertFalse(screen.status.isVisibleTo(window))
+        self.assertIsNone(screen.model.result)
+        screen.config_path.edit.setText("")
+        screen.create()
+        self.assertIsNotNone(screen.model.result)
+        screen.workspace.edit.setText(str(self.root / "elsewhere"))
+        self.assertIsNone(screen.model.result, "any field, not only the path")
+        self.assertFalse((self.root / "new" / "config.toml").exists(), "nothing was created")
 
     def test_a_known_machine_is_offered_calmly_with_a_button(self) -> None:
         from codexsync.gui.locations import WorkspaceCandidate
@@ -3050,6 +3448,85 @@ class AboutTests(_WindowTestCase):
             self.assertIn(f"{name}: {value}", copied)
         self.assertEqual(screen.copied_line.text(), load("en").text("about.build.copied"))
 
+    def _menu_status(self, **overrides):
+        from codexsync.desktop_shortcut import ShortcutStatus
+
+        fields = dict(
+            supported=True, entry=Path("/home/u/.local/share/applications/codexsync.desktop"),
+            icon=Path("/home/u/.local/share/icons/hicolor/256x256/apps/codexsync.png"),
+            present=False, ours=False, program=None, program_exists=False,
+            would_start=Path("/home/u/.local/bin/codexsync-gui"), system_entry=None,
+        )
+        fields.update(overrides)
+        return ShortcutStatus(**fields)
+
+    def test_the_menu_card_is_shown_only_where_a_menu_entry_can_be_made(self) -> None:
+        # CS-399: Linux only; a .deb/.rpm already has one, pip and the rest do not.
+        controller = FakeController()
+        controller.menu_entry = lambda: Outcome(value=self._menu_status(supported=False))  # type: ignore[method-assign]
+        window, _ = self.make(controller=controller)
+        window.go_to("about")
+        self.assertIsNone(window.screen("about").menu_card)
+
+    def test_a_missing_entry_offers_to_add_it_and_says_where_it_went(self) -> None:
+        controller = FakeController()
+        state = {"status": self._menu_status()}
+        controller.menu_entry = lambda: Outcome(value=state["status"])  # type: ignore[method-assign]
+
+        def add():
+            state["status"] = self._menu_status(
+                present=True, ours=True, program=Path("/home/u/.local/bin/codexsync-gui"), program_exists=True,
+            )
+            return Outcome(value=state["status"])
+
+        controller.add_menu_entry = add  # type: ignore[method-assign]
+        window, _ = self.make(controller=controller)
+        window.go_to("about")
+        screen = window.screen("about")
+        catalog = load("en")
+        self.assertEqual(screen.menu_state.text(), catalog.text("about.menu.absent"))
+        self.assertFalse(screen.menu_add.isHidden())
+        self.assertTrue(screen.menu_remove.isHidden())
+        screen.menu_add.click()
+        self.pump(lambda: window.screen("about").model.menu_result is not None)
+        screen = window.screen("about")
+        self.assertEqual(
+            screen.menu_line.text(), catalog.text("about.menu.done", path=str(state["status"].entry)),
+        )
+        self.assertTrue(screen.menu_add.isHidden(), "the entry already starts this program")
+        self.assertFalse(screen.menu_remove.isHidden())
+
+    def test_an_entry_a_package_installed_offers_nothing(self) -> None:
+        controller = FakeController()
+        packaged = Path("/usr/share/applications/codexsync.desktop")
+        controller.menu_entry = lambda: Outcome(value=self._menu_status(system_entry=packaged))  # type: ignore[method-assign]
+        window, _ = self.make(controller=controller)
+        window.go_to("about")
+        screen = window.screen("about")
+        self.assertEqual(screen.menu_state.text(), load("en").text("about.menu.package", path=str(packaged)))
+        self.assertTrue(screen.menu_add.isHidden())
+        self.assertTrue(screen.menu_remove.isHidden())
+
+    def test_a_refused_entry_is_said_in_the_windows_language(self) -> None:
+        from codexsync.exceptions import ConfigError
+        from codexsync.gui.controller import run
+
+        controller = FakeController()
+        controller.menu_entry = lambda: Outcome(value=self._menu_status())  # type: ignore[method-assign]
+
+        def refuse():
+            raise ConfigError("x exists and was not written by codexSync", code="SHORTCUT_NOT_OURS",
+                              params={"path": "/home/u/x.desktop"})
+
+        controller.add_menu_entry = lambda: run(refuse)  # type: ignore[method-assign]
+        window, _ = self.make("ru", controller=controller)
+        window.go_to("about")
+        window.screen("about").menu_add.click()
+        self.pump(lambda: window.screen("about").model.menu_result is not None)
+        text = window.screen("about").menu_line.text()
+        self.assertIn("/home/u/x.desktop", text)
+        self.assertNotIn("was not written", text)
+
     def test_the_documentation_link_follows_the_language(self) -> None:
         for language in available_languages():
             with self.subTest(language=language):
@@ -3131,6 +3608,66 @@ class ConfigBannerTests(_WindowTestCase):
         outcome = run(refuse)
         self.assertEqual(outcome.failure, Failure.CONFIGURATION)
         self.assertEqual(outcome.code, "CONFIG_OUTDATED")
+
+    def test_codex_open_is_said_in_the_windows_language(self) -> None:
+        """CS-332: the gate's refusal used to reach the window as English text."""
+        from codexsync.exceptions import SafetyPreconditionError
+        from codexsync.gui.controller import run
+
+        def refuse():
+            raise SafetyPreconditionError("Codex is running; sync requires it to be stopped.", code="CODEX_RUNNING")
+
+        window, _controller = self._window(language="ru")
+        outcome = run(refuse)
+        self.assertEqual((outcome.failure, outcome.code), (Failure.CODEX_NOT_STOPPED, "CODEX_RUNNING"))
+        screen = window.screen("sync")
+        ru = load("ru")
+        self.assertEqual(
+            screen.failure_text(outcome),
+            f"{ru.text('failure.codex-not-stopped')}: {ru.text('failure.code.CODEX_RUNNING')}",
+        )
+        body = screen.refusal_text(outcome)
+        self.assertTrue(body.startswith("Закройте"), "a banner body stands alone and starts with a capital")
+
+    def test_a_refusal_says_its_values_and_its_count(self) -> None:
+        from codexsync.exceptions import ConfigError, ConflictError
+        from codexsync.gui.controller import run
+
+        window, _controller = self._window(language="ru")
+        screen = window.screen("sync")
+
+        def missing():
+            raise ConfigError("Cloud state dir does not exist: X:/cloud", code="CLOUD_DIR_MISSING", params={"path": "X:/cloud"})
+
+        def conflicts():
+            raise ConflictError("Conflict detected for files: a, b, c.", code="FILE_CONFLICTS", params={"count": 3})
+
+        def changed():
+            raise ConflictError("config.toml changed on disk", code="CONFIG_CHANGED_ON_DISK",
+                                params={"name": "config.toml"})
+
+        self.assertTrue(screen.refusal_text(run(changed)).startswith("config.toml "),
+                        "a value that starts the sentence keeps its own case")
+        text = screen.refusal_text(run(missing))
+        self.assertIn("X:/cloud", text)
+        self.assertNotIn("does not exist", text)
+        self.assertEqual(screen.refusal_text(run(conflicts)), load("ru").plural("failure.code.FILE_CONFLICTS", 3))
+
+    def test_a_refusal_without_a_sentence_stays_in_english(self) -> None:
+        from codexsync.exceptions import FailSafeError
+        from codexsync.gui.controller import run
+
+        window, _controller = self._window(language="ru")
+        screen = window.screen("sync")
+
+        def unknown():
+            raise FailSafeError("Mutation journal is missing or invalid")
+
+        def unfilled():
+            raise FailSafeError("A copy named x.zip already exists", code="COPY_EXISTS")  # no params
+
+        self.assertEqual(screen.refusal_text(run(unknown)), "Mutation journal is missing or invalid")
+        self.assertEqual(screen.refusal_text(run(unfilled)), "A copy named x.zip already exists")
 
 
 if __name__ == "__main__":
@@ -3439,7 +3976,7 @@ class SyncHistoryTests(_WindowTestCase):
         screen.start_run(dry_run=False)
         self.assertIn(("handoff_now", ("direction", "to_cloud")), controller.calls)
         screen.start_run(dry_run=True)
-        self.assertIn(("sync", True, "to_cloud"), controller.calls)
+        self.assertIn(("dry_run", "to_cloud"), controller.calls)
         window.set_language("ru")
         rebuilt = window.screen("sync")
         self.assertEqual(rebuilt.run_direction.currentData(), "to_cloud", "kept on the model")
