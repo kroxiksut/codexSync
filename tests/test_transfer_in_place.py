@@ -21,6 +21,7 @@ from unittest.mock import patch
 import uuid
 
 from codexsync.app import apply_session_transfer, scan_session_transfer
+from codexsync.jsonl_codec import ZSTD_READABLE
 from codexsync.safety_gate import OperationKind, ProcessState, SafetyDecision
 from codexsync.semantic_merge import BranchRelation
 from codexsync.semantic_transfer import (
@@ -28,6 +29,7 @@ from codexsync.semantic_transfer import (
     IN_PLACE_ARCHIVE_FLAG_DIFFERS,
     IN_PLACE_CATALOG_ABSENT,
     IN_PLACE_CONTAINER,
+    IN_PLACE_DECOMPRESSED,
     IN_PLACE_STATE_CHANGES,
     MOVES_BRANCH,
     PROVEN_LAYOUTS,
@@ -140,6 +142,53 @@ class InPlacePlanTests(unittest.TestCase):
         self.assertEqual(item.action, TransferAction.FAST_FORWARD_LOCAL)
         self.assertIn(IN_PLACE, item.codes)
         self.assertIn("RESOLVED_BY_USER", item.codes)
+
+    def _resolved(self, placements):
+        path = "sessions/a.jsonl"
+        self._branch(self.local_root, path, ["1", "left"])
+        self._branch(self.remote_root, path, ["1", "right"])
+        local, remote = [self._descriptor(path, 2)], [self._descriptor(path, 2)]
+        blocked = self._plan(local, remote, placements=placements).items[0]
+        resolution = BranchResolution(
+            blocked.conflict_id, blocked.session_hash, blocked.local_sha256, blocked.remote_sha256,
+            ResolutionChoice.KEEP_REMOTE,
+        )
+        return self._plan(local, remote, placements=placements, resolutions={blocked.conflict_id: resolution}).items[0]
+
+    def test_a_resolution_never_replaces_a_chat_codex_has_projected(self) -> None:
+        # CS-426, 2026-10-19: Codex kept showing the old turns from its
+        # thread_history projection, whose offset then pointed past the file.
+        projected = ThreadPlacements(
+            PlacementStatus.AVAILABLE, {"s1": "sessions/a.jsonl"}, history=PlacementStatus.AVAILABLE,
+            projected=frozenset({"s1"}),
+        )
+        item = self._resolved(projected)
+        self.assertEqual(item.action, TransferAction.BLOCKED_UNPROVEN_LAYOUT)
+        self.assertIn("IN_PLACE_PROJECTED_REWRITE", item.codes)
+
+    def test_a_history_store_that_cannot_be_read_refuses_a_replacement(self) -> None:
+        unknown = ThreadPlacements(
+            PlacementStatus.AVAILABLE, {"s1": "sessions/a.jsonl"}, history=PlacementStatus.INDETERMINATE,
+        )
+        self.assertIn("IN_PLACE_HISTORY_UNKNOWN", self._resolved(unknown).codes)
+
+    def test_a_continuation_of_a_projected_chat_is_still_written(self) -> None:
+        # An append keeps the projection's offset valid; Codex then showed the
+        # new turn and moved the offset to the new end (observed).
+        projected = ThreadPlacements(
+            PlacementStatus.AVAILABLE, {"s1": "sessions/2026/09/27/a.jsonl"}, history=PlacementStatus.AVAILABLE,
+            projected=frozenset({"s1"}),
+        )
+        item = self._continued(placements=projected)
+        self.assertEqual(item.action, TransferAction.FAST_FORWARD_LOCAL)
+        self.assertIn(IN_PLACE, item.codes)
+
+    def test_a_resolution_for_a_chat_without_a_projection_is_written(self) -> None:
+        other = ThreadPlacements(
+            PlacementStatus.AVAILABLE, {"s1": "sessions/a.jsonl"}, history=PlacementStatus.AVAILABLE,
+            projected=frozenset({"someone-else"}),
+        )
+        self.assertEqual(self._resolved(other).action, TransferAction.FAST_FORWARD_LOCAL)
 
     def test_in_place_is_part_of_the_plan_id(self) -> None:
         allowed = self._plan_id(placements=_catalogue({"s1": "sessions/a.jsonl"}))
@@ -346,6 +395,35 @@ class InPlaceApplyTests(unittest.TestCase):
         self.assertEqual(len(manifests), 1)
         snapshot = self.root / "backups" / json.loads(manifests[0].read_text(encoding="utf-8"))["snapshot"]
         self.assertEqual((snapshot / Path(*relative.split("/"))).read_bytes(), before)
+
+    @unittest.skipUnless(ZSTD_READABLE, "this Python has no compression.zstd (added in 3.14)")
+    def test_a_compressed_chat_continued_elsewhere_becomes_plain_and_the_zst_is_backed_up(self) -> None:
+        # CS-430: Codex keeps `x.jsonl.zst` while its row names `x.jsonl`.
+        from compression import zstd
+
+        relative = "sessions/2026/09/27/rollout-s1.jsonl"
+        plain = self._branch(self.local_dir, relative, "s1", ["one"])
+        packed = plain.with_name(plain.name + ".zst")
+        before = zstd.compress(plain.read_bytes())
+        packed.write_bytes(before)
+        plain.unlink()
+        remote = self._branch(self.cloud_dir, relative, "s1", ["one", "two"])
+        self._thread_catalogue({"s1": plain})
+
+        plan = self._scan()
+        (item,) = plan.items
+        self.assertEqual(item.action, TransferAction.FAST_FORWARD_LOCAL, item.codes)
+        self.assertIn(IN_PLACE_DECOMPRESSED, item.codes)
+
+        self.assertEqual(self._apply(plan), 2, "one copy, one removal")
+        self.assertEqual(plain.read_bytes(), remote.read_bytes())
+        siblings = sorted(path.name for path in plain.parent.iterdir())
+        self.assertEqual(siblings, ["rollout-s1.jsonl"], "the .zst is gone, no second file for one chat")
+
+        manifests = list((self.root / "backups").glob("*.manifest.json"))
+        self.assertEqual(len(manifests), 1)
+        snapshot = self.root / "backups" / json.loads(manifests[0].read_text(encoding="utf-8"))["snapshot"]
+        self.assertEqual((snapshot / Path(*(relative + ".zst").split("/"))).read_bytes(), before)
 
     def test_a_new_chat_stays_in_the_cloud_copy_when_asked_to(self) -> None:
         # `keep_in_cloud`; the default carries it (test_new_chats_same_path).

@@ -150,9 +150,14 @@ for a while as `rollout-….jsonl.zst`, compressed with zstd, while its chat lis
 still names the plain `.jsonl`. codexSync reads it where Python reads zstd —
 Python 3.14 or later, which the release programs are built with — and compares
 it like any other chat: what grew here goes to the mirror (stored there as
-usual, never as zstd). A chat that grew on the other machine waits in the
-mirror (`IN_PLACE_CONTAINER`): what Codex reads when a plain `x.jsonl` sits
-beside `x.jsonl.zst` is not known yet, so nothing is written over it.
+usual, never as zstd). A chat that grew on the other machine is written here
+as the plain `x.jsonl` its chat list names, and the `x.jsonl.zst` is removed
+after it is in a verified backup (`IN_PLACE_DECOMPRESSED`): Codex reads a
+plain `x.jsonl`, and turns a compressed chat plain itself when it is opened
+(observed). Only a continuation is written so: a chat whose two copies
+diverged and were resolved keeps its compressed file and the kept copy waits
+in the mirror (`IN_PLACE_CONTAINER`). Opening such a chat in Codex turns it
+back into a plain file, after which it is continued as usual.
 
 Installed with pip on Python 3.11–3.13, codexSync cannot read that container.
 Such a file is still that chat's history, so it is never skipped: the chat is
@@ -219,7 +224,18 @@ chat is active on both machines or archived on both. Otherwise the item stays
 `BLOCKED_UNPROVEN_LAYOUT` with a code saying why: `IN_PLACE_CATALOG_ABSENT`,
 `SESSION_NOT_IN_CATALOG`, `CATALOG_PLACES_ELSEWHERE`, `CATALOG_UNREADABLE`,
 `IN_PLACE_STATE_CHANGES`, `IN_PLACE_ARCHIVE_FLAG_DIFFERS` or
-`IN_PLACE_CONTAINER`.
+`IN_PLACE_CONTAINER`. A chat Codex compressed here is written as its plain
+file instead (`IN_PLACE_DECOMPRESSED`, see
+[When Codex compresses its chats](#when-codex-compresses-its-chats)).
+
+A chat continued on the other machine is only *extended* here, which is always
+allowed. A resolved conflict *replaces* this machine's copy, and since Codex
+0.163 that is refused for a chat Codex has already opened
+(`IN_PLACE_PROJECTED_REWRITE`): Codex keeps a projection of an opened chat in
+`thread_history_1.sqlite`, remembers how far into the file it has read, and
+after the file's content was replaced it kept showing the old turns
+(observed). If that store cannot be read, a replacement is refused too
+(`IN_PLACE_HISTORY_UNKNOWN`). The chosen branch stays in the cloud copy.
 
 Codex also keeps each chat's title, preview and time in that catalogue, and
 codexSync never writes it. The chat list may therefore show the old ones until

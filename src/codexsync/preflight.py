@@ -29,6 +29,7 @@ from .config_migrate import BLOCKER, inspect_config, read_config_source
 from .exceptions import FailSafeError
 from .mutation_journal import JournalStore
 from .runtime import _make_safety_gate
+from .process_knowledge import CLI_DAEMON_STOP_COMMAND
 from .safety_gate import OperationKind, ProcessState
 from .session_catalog import (
     RECORD_FORMAT_UNSUPPORTED,
@@ -65,6 +66,7 @@ DETAIL_CODES = frozenset({
     "path.missing", "path.not_dir", "path.ok", "path.unreadable",
     "manifest.ok", "manifest.failed",
     "codex_process.stopped", "codex_process.running", "codex_process.found", "codex_process.unknown",
+    "codex_process.cli_daemon",
     "codex_startup.not_checked", "codex_startup.state", "codex_startup.finding", "codex_startup.broken",
     "codex_startup.warning",
     "session_catalog.counts", "session_catalog.unavailable",
@@ -592,7 +594,15 @@ def _check_process_state(cfg: AppConfig, operation: OperationKind) -> PreflightC
         # The gate names what it found after a colon (`SafetyGate._detail`).
         _, _, found = decision.reason.partition(": ")
         parts = (_part("codex_process.running"),) + ((_part("codex_process.found", processes=found),) if found else ())
-        return PreflightCheckResult("codex_process", status, decision.reason, parts)
+        details = decision.reason
+        if decision.cli_daemon_only:
+            # CS-429: the one thing left is Codex CLI's server, which outlives the CLI.
+            parts += (_part("codex_process.cli_daemon", command=CLI_DAEMON_STOP_COMMAND),)
+            details += (
+                f"; only Codex CLI's background server is left (it stays after the CLI is closed): "
+                f"stop it with `{CLI_DAEMON_STOP_COMMAND}`"
+            )
+        return PreflightCheckResult("codex_process", status, details, parts)
     return PreflightCheckResult(
         "codex_process", status, decision.reason, (_part("codex_process.unknown", reason=decision.reason),),
     )

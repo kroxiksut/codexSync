@@ -202,6 +202,7 @@ from .semantic_transfer import (
     TransferAction,
     TransferPlan,
     FORMAT_MIGRATION,
+    IN_PLACE_DECOMPRESSED,
     MOVES_BRANCH,
     OLDER_FORMAT_HAS_LATER_RECORDS,
     NEW_CHAT_SAME_PATH,
@@ -2745,7 +2746,9 @@ def _transfer_copy_actions(
     A move (`MOVES_BRANCH`, D-023) is a copy to the new path plus the removal of
     the destination side's old file. The engine backs that file up and verifies
     the backup before replacing or removing anything, and removes it only after
-    every copy is in place.
+    every copy is in place. A chat Codex compressed and the other machine
+    continued (`IN_PLACE_DECOMPRESSED`, CS-430) goes the same way: the plain
+    file is written and the `.zst` removed.
     """
     to_local: list[CopyAction] = []
     to_cloud: list[CopyAction] = []
@@ -2779,7 +2782,7 @@ def _transfer_copy_actions(
                 codec=codec,
             )
         )
-        if MOVES_BRANCH in item.codes:
+        if MOVES_BRANCH in item.codes or IN_PLACE_DECOMPRESSED in item.codes:
             old = (local_by_hash if towards_local else remote_by_hash).get(item.session_hash)
             if old is None:
                 raise FailSafeError("A planned move no longer finds the file it moves", code="PLAN_CHANGED")

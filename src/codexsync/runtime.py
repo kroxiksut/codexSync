@@ -22,6 +22,7 @@ from .native_programs import is_native_program
 from .manifest import save_manifest
 from .models import AppConfig, FileMeta, SyncManifest, SyncPlan
 from .process_detector import CodexProcessDetector, ProcessInfo
+from .process_knowledge import is_cli_daemon_path
 from .safety_gate import ProcessState, SafetyGate
 from .scanner import scan_tree
 from .session_index import SESSION_INDEX_FILE
@@ -95,16 +96,18 @@ def _make_safety_gate(cfg: AppConfig) -> SafetyGate:
     detector = CodexProcessDetector(cfg.process_detection.process_names)
     # What the last sample saw, so the gate's reason can name it. Kept here and
     # not returned from `sample` because the decision must not depend on it.
-    last: dict[str, str] = {"detail": ""}
+    last: dict[str, object] = {"detail": "", "cli_daemon": False}
 
     def sample() -> ProcessState:
         state, snapshot = sample_process_state(cfg, detector)
         last["detail"] = describe_process_snapshot(snapshot) if snapshot is not None else ""
+        last["cli_daemon"] = snapshot is not None and only_cli_daemon(snapshot)
         return state
 
     return SafetyGate(
         sample,
-        describe=lambda: last["detail"],
+        describe=lambda: str(last["detail"]),
+        cli_daemon_only=lambda: bool(last["cli_daemon"]),
         stable_window_seconds=2.0,
         sample_interval_seconds=0.25,
         monotonic=time.monotonic,
@@ -167,6 +170,21 @@ def describe_process_snapshot(snapshot: ProcessSnapshot) -> str:
             shown += f", +{len(pids) - 3}"
         parts.append(f"{name} (pid {shown})")
     return ", ".join(parts)
+
+
+def only_cli_daemon(snapshot: ProcessSnapshot) -> bool:
+    """Is Codex CLI's left-behind app-server daemon all that reads as running (CS-429)?
+
+    Said so the refusal can name it and its stop command; it never changes the
+    decision -- the daemon is Codex, and a write still waits for it.
+    """
+    found = [*snapshot.main_processes, *snapshot.background_processes]
+    if not found or snapshot.sandbox_detected:
+        return False
+    return all(
+        is_cli_daemon_path(proc.program or (proc.command_line.split(maxsplit=1) or [proc.name])[0])
+        for proc in found
+    )
 
 
 def collect_codex_processes(cfg: AppConfig) -> list[ProcessInfo]:

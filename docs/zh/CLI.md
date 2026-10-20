@@ -186,6 +186,10 @@ codexsync -c config.toml backups list
   桌面应用退出，只有在进程检查再也看不到它之后才继续；它没有退出时，同步以退出码 `3` 停止，
   什么都不写。旧的「结束进程」开关会以退出码 `4` 被拒绝，对会写入
   的命令而言 `allow_terminate_if_running = true` 同样如此。
+- Codex CLI 0.163 及更新版本在 CLI 关闭后仍让其后台服务器继续运行（来自
+  `~/.codex/packages/app-server-daemon/` 的 `codex app-server`）。它属于 Codex，所以写入会等待它；
+  只剩它在运行时，拒绝信息和 `doctor` 会说明这一点并给出 `codex app-server daemon stop`。
+  在 Linux 上，开启 `close_codex` 且没有打开的 CLI 时，同步会用这条命令请求它停止。
 - 一次写入要求 Codex 已经连续停止两秒，另加提交前和提交过程中的直接检查。
 - 同一个 Codex 文件夹同一时间只能有一条会写入的命令在工作，不论它是哪一种；第二条会以
   退出码 `5` 停下。

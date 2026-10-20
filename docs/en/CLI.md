@@ -216,6 +216,11 @@ only together with `--confirm`.
   stops with exit code `3` and writes nothing. The old termination flags are
   rejected with exit code `4`, as is `allow_terminate_if_running = true` for
   commands that write.
+- Codex CLI 0.163 and later leaves its background server running after the
+  CLI is closed (`codex app-server` from `~/.codex/packages/app-server-daemon/`).
+  It is Codex, so writes wait for it; when it is all that runs, the refusal and
+  `doctor` say so and name `codex app-server daemon stop`. On Linux, with
+  `close_codex` on and no CLI open, a sync asks it to stop with that command.
 - A write requires Codex to have been stopped continuously for two seconds, plus
   direct checks before and during the commit.
 - Only one writing command works on one Codex folder at a time, whatever its

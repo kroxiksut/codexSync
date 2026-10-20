@@ -3,6 +3,7 @@ scripts/scheduler/macos/*.sh text eol=lf
 # Linux packaging runs these as they are: a CRLF shebang does not start.
 scripts/linux_package_check.sh text eol=lf
 packaging/linux/AppRun text eol=lf
+packaging/npm/** text eol=lf
 src/codexsync/desktop/codexsync.desktop text eol=lf
 src/codexsync/desktop/codexsync.png binary
 scripts/scheduler/windows/*.ps1 text eol=crlf

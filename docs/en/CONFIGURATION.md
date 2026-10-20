@@ -210,12 +210,11 @@ codexsync -c config.toml automation run      # run the configured job once, now
 - **Closing Codex for a sync** (`[sync] close_codex = true`, the *Close Codex
   when a sync starts while it is open* checkbox on the Automation page; off by
   default). Any sync that finds Codex — the ChatGPT app — open asks it to quit
-  first, the way Windows closes an app for an update, and waits up to a minute
+  first, the way Windows closes an app for an update (on Linux, with *Quit* in its tray menu, as you would), and waits up to a minute
   for it to be gone. It is never forced: if Codex declines or stays, nothing is
   written and the sync says why. A running agent turn is interrupted, so leave
   Codex idle; a Codex CLI running in a terminal is never closed; the handoff
-  watcher and dry runs never ask. Proven on Windows; on macOS it stays off until
-  it has been seen to work on a Mac.
+  watcher and dry runs never ask. Proven on Windows and on Linux (there through the tray icon's menu; without a tray icon the window is asked to close, which a signed-in Codex answers by hiding); on macOS it stays off until it has been seen to work on a Mac.
 - It is a user-level task — Task Scheduler on Windows, a LaunchAgent on macOS,
   `systemd --user` on Linux — never a service.
 - `automation run` exits like the job would: `0` on success or when another

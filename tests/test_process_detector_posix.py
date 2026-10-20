@@ -162,6 +162,27 @@ class LinuxMatchingTests(unittest.TestCase):
         found = _match_posix(self.listing, ["/usr/lib/chatgpt/"])
         self.assertEqual([proc.pid for proc in found], [901, 902, 903])
 
+    def test_a_marker_among_the_arguments_is_not_codex(self) -> None:
+        """Seen 2026-10-19: a shell whose command mentioned the install path read as Codex.
+
+        It kept a sync that had asked Codex to quit waiting the whole minute
+        and refusing, with Codex long gone.
+        """
+        listing = processes(
+            "  950 bash\n  951 grep\n  952 less\n",
+            "  950 bash -c pgrep -fc /usr/lib/chatgpt/; sleep 60\n"
+            "  951 grep -r version /usr/lib/chatgpt/\n"
+            "  952 less /usr/lib/chatgpt/LICENSE\n",
+        )
+        self.assertEqual(_match_posix(listing, ["/usr/lib/chatgpt/"]), [])
+
+    def test_the_program_proc_names_is_the_path_even_with_a_space(self) -> None:
+        listing = [
+            ProcessInfo(960, "ChatGPT", "/opt/My Apps/chatgpt/ChatGPT --type=renderer", program="/opt/My Apps/chatgpt/ChatGPT"),
+            ProcessInfo(961, "bash", "bash -c ls /opt/My Apps/chatgpt/", program="/usr/bin/bash"),
+        ]
+        self.assertEqual([p.pid for p in _match_posix(listing, ["/opt/My Apps/chatgpt/"])], [960])
+
 
 # Recorded on Ubuntu 26.04 with the Codex desktop deb 26.1002.52244 while a
 # chat ran `sleep 600` in the sandbox (2026-10-09), trimmed to one process of
@@ -203,6 +224,23 @@ LINUX_AFTER_QUIT_COMMAND = """\
 """
 
 
+# Codex CLI 0.163.0 from npm (`npm i -g @openai/codex`), idle at its prompt in a
+# terminal, Ubuntu 26.04 (2026-10-19, CS-415); home directory renamed. A node
+# wrapper starts the native program, which starts Codex's shared app-server
+# daemon -- installed by that first run under ~/.codex/packages/ -- and the
+# daemon stays after the CLI is quit, re-parented to init.
+LINUX_NPM_CLI_COMM = """\
+ 258008 node
+ 258021 codex
+ 258119 codex
+"""
+LINUX_NPM_CLI_COMMAND = """\
+ 258008 node /home/someone/.npm-global/bin/codex
+ 258021 /home/someone/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+ 258119 /home/someone/.codex/packages/app-server-daemon/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex app-server --listen unix:// --analytics-default-enabled --managed-daemon
+"""
+
+
 class LinuxObservedTests(unittest.TestCase):
     """The shipped names against what a live Linux Codex actually produced."""
 
@@ -231,6 +269,13 @@ class LinuxObservedTests(unittest.TestCase):
         helper = [p for p in listing if p.pid == 193758]
         self.assertEqual(_match_posix(helper, ["/usr/lib/chatgpt/"]), [])
         self.assertEqual(_match_posix(helper, ["codex-linux-sandbox"]), helper)
+
+    def test_codex_cli_from_npm_is_found_by_its_native_program(self) -> None:
+        """No npm marker is needed: the native `codex` carries the name (CS-415)."""
+        names, markers = self.shipped()
+        listing = processes(LINUX_NPM_CLI_COMM, LINUX_NPM_CLI_COMMAND)
+        self.assertEqual([p.pid for p in _match_posix(listing, names + markers)], [258021, 258119])
+        self.assertNotIn(258008, [p.pid for p in _match_posix(listing, names + markers)], "node is never Codex by name")
 
     def test_a_command_that_outlives_the_app_still_reads_as_running(self) -> None:
         """Codex's work is still in flight, so a write must still wait."""

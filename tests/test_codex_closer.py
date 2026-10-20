@@ -83,6 +83,16 @@ class WindowsTests(unittest.TestCase):
         self.assertFalse(outcome.asked)
         self.assertIn("terminal", outcome.detail)
 
+    def test_the_cli_server_left_behind_is_named_not_stopped(self) -> None:
+        daemon = (
+            _proc(4, 1, "explorer.exe", r"C:\Windows\explorer.exe"),
+            _proc(500, 4, "codex.exe", r"C:\Users\me\.codex\packages\app-server-daemon\releases\x\bin\codex.exe"),
+        )
+        outcome, asked = self.ask(daemon)
+        self.assertEqual(asked, [])
+        self.assertFalse(outcome.asked)
+        self.assertIn("codex app-server daemon stop", outcome.detail)
+
     def test_force_is_not_an_option_anywhere(self) -> None:
         # RmForceShutdown is 0x1; the call passes flags 0 and nothing can change that.
         source = Path(codex_closer.__file__).read_text(encoding="utf-8")
@@ -100,6 +110,203 @@ class WindowsTests(unittest.TestCase):
         self.assertFalse([text for text in code_strings if "taskkill" in text.lower() or "kill" == text])
         self.assertNotIn("TerminateProcess", names)
         self.assertNotIn("kill", names)
+
+
+LINUX_APP = "/usr/lib/chatgpt/ChatGPT"
+
+
+def _lproc(pid: int, parent: int, name: str, path: str) -> codex_closer.LinuxProcess:
+    return codex_closer.LinuxProcess(pid, parent, name, path)
+
+
+#: The tree seen on 2026-10-19 (Ubuntu 26.04, Codex deb 26.1002.52244): the
+#: app's root under the user's systemd, its two crash handlers beside it, its
+#: helpers, and Codex's server.
+LINUX_DESKTOP = (
+    _lproc(1629, 1, "systemd", "/usr/lib/systemd/systemd"),
+    _lproc(100, 1629, "ChatGPT", LINUX_APP),
+    _lproc(101, 1629, "browser_crashpa", "/usr/lib/chatgpt/browser_crashpad_handler"),
+    _lproc(102, 100, "ChatGPT", LINUX_APP),
+    _lproc(103, 102, "ChatGPT", LINUX_APP),
+    _lproc(200, 100, "codex", "/usr/lib/chatgpt/resources/codex"),
+)
+
+
+DAEMON = "/home/me/.codex/packages/app-server-daemon/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex"
+#: Codex CLI 0.163's server, left running after the CLI quit (2026-10-19).
+LINUX_DAEMON_ONLY = (
+    _lproc(1, 0, "systemd", "/usr/lib/systemd/systemd"),
+    _lproc(258119, 1, "codex", DAEMON),
+)
+
+
+class _Display(codex_closer.X11Windows):
+    def __init__(self, windows) -> None:
+        self._windows = list(windows)
+        self.closed: list = []
+
+    def windows(self):
+        return self._windows
+
+    def close(self, windows) -> None:
+        self.closed.append(tuple(windows))
+
+
+class _Tray(codex_closer.TrayMenus):
+    """No tray host unless entries are given; records clicks."""
+
+    def __init__(self, entries=()) -> None:
+        self._entries = list(entries)
+        self.clicked: list = []
+
+    def quit_entries(self, app_pids):
+        return [entry for entry in self._entries if entry.pid in app_pids]
+
+    def click(self, entries) -> None:
+        self.clicked.append(tuple(entries))
+
+
+class LinuxTests(unittest.TestCase):
+    def ask(self, processes, windows, tray=None) -> tuple[CloseOutcome, _Display]:
+        display = _Display(windows)
+        outcome = ask_codex_to_quit(
+            "linux", list_linux_processes=lambda: processes, x11=display, tray=tray or _Tray(),
+        )
+        return outcome, display
+
+    def test_signed_in_the_trays_quit_is_clicked_not_the_window(self) -> None:
+        # Signed in, a window close only hid Codex to its tray (2026-10-19).
+        quit_entry = codex_closer.TrayEntry(":1.125", "/org/chromium/DbusMenu", 2817, 100)
+        tray = _Tray([quit_entry, codex_closer.TrayEntry(":1.100", "/StatusNotifierItem", 5, 4242)])
+        outcome, display = self.ask(LINUX_DESKTOP, [(0x600004, 100)], tray)
+        self.assertEqual(tray.clicked, [(quit_entry,)], "only the app's own icon")
+        self.assertEqual(display.closed, [])
+        self.assertTrue(outcome.accepted)
+        self.assertIn("tray", outcome.detail)
+
+    def test_quit_is_found_in_a_layout_as_busctl_prints_it(self) -> None:
+        # The tail of the layout Codex 26.1013 published (chat titles left out).
+        layout = [0, {}, [
+            {"type": "(ia{sv}av)", "data": [2813, {"label": {"type": "s", "data": "New Chat"}}, []]},
+            {"type": "(ia{sv}av)", "data": [2814, {"type": {"type": "s", "data": "separator"}}, []]},
+            {"type": "(ia{sv}av)", "data": [2815, {"label": {"type": "s", "data": "Open ChatGPT"}}, []]},
+            {"type": "(ia{sv}av)", "data": [2817, {"label": {"type": "s", "data": "Quit"}}, []]},
+        ]]
+        self.assertEqual(codex_closer._quit_ids(layout), [2817])
+        self.assertEqual(codex_closer._quit_ids([1, {"label": {"type": "s", "data": "_Quit"}}, []]), [1])
+        self.assertEqual(codex_closer._quit_ids([1, {"label": {"type": "s", "data": "Quit soon"}}, []]), [])
+
+    def test_the_apps_window_is_asked_to_close(self) -> None:
+        outcome, display = self.ask(LINUX_DESKTOP, [(0x600004, 100), (0x800001, 4242)])
+        self.assertEqual(display.closed, [(0x600004,)], "only the window whose process is the app's")
+        self.assertTrue(outcome.accepted)
+        self.assertEqual(outcome.pids, (100,))
+
+    def test_the_app_is_told_apart_by_the_detectors_own_marker(self) -> None:
+        self.assertEqual(codex_closer.LINUX_APP_MARKERS, ("/usr/lib/chatgpt/",))
+
+    def test_no_window_on_x11_means_nothing_is_asked(self) -> None:
+        # A window drawn on Wayland itself is not listed, and cannot be asked.
+        outcome, display = self.ask(LINUX_DESKTOP, [(0x800001, 4242)])
+        self.assertEqual(display.closed, [])
+        self.assertFalse(outcome.asked)
+        self.assertIn("X11", outcome.detail)
+
+    def test_a_display_that_cannot_be_opened_is_reported(self) -> None:
+        class NoDisplay(_Display):
+            def windows(self):
+                raise OSError("no X display (DISPLAY is not set)")
+
+        outcome = ask_codex_to_quit(
+            "linux", list_linux_processes=lambda: LINUX_DESKTOP, x11=NoDisplay([]), tray=_Tray(),
+        )
+        self.assertFalse(outcome.asked)
+        self.assertIn("DISPLAY", outcome.detail)
+
+    def test_a_codex_cli_in_a_terminal_is_never_closed(self) -> None:
+        terminal = LINUX_DESKTOP + (
+            _lproc(400, 1629, "gnome-terminal-", "/usr/libexec/gnome-terminal-server"),
+            _lproc(401, 400, "bash", "/usr/bin/bash"),
+            _lproc(402, 401, "codex", "/home/me/.npm-global/lib/node_modules/@openai/codex/vendor/codex"),
+        )
+        outcome, display = self.ask(terminal, [(0x600004, 100)])
+        self.assertEqual(display.closed, [], "not even the app is asked while a terminal session runs")
+        self.assertFalse(outcome.asked)
+        self.assertIn("terminal", outcome.detail)
+
+    def ask_with_run(self, processes, windows, answer: int = 0):
+        display, seen = _Display(windows), []
+
+        def run(argv):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, answer, "", "")
+
+        outcome = ask_codex_to_quit(
+            "linux", list_linux_processes=lambda: processes, x11=display, run=run, tray=_Tray(),
+        )
+        return outcome, display, seen
+
+    def test_the_cli_daemon_left_behind_is_asked_to_stop_by_codexs_own_command(self) -> None:
+        # Codex CLI 0.163 after the CLI was quit (2026-10-19): only its server.
+        outcome, display, seen = self.ask_with_run(LINUX_DAEMON_ONLY, [])
+        self.assertEqual(display.closed, [])
+        self.assertEqual(seen, [[DAEMON, "app-server", "daemon", "stop"]])
+        self.assertTrue(outcome.accepted)
+        self.assertEqual(outcome.pids, (258119,))
+
+    def test_a_daemon_that_refuses_to_stop_is_reported(self) -> None:
+        outcome, _, _ = self.ask_with_run(LINUX_DAEMON_ONLY, [], answer=1)
+        self.assertTrue(outcome.asked)
+        self.assertFalse(outcome.accepted)
+        self.assertIn("daemon stop", outcome.detail)
+
+    def test_the_daemon_is_left_alone_while_a_cli_uses_it(self) -> None:
+        with_cli = LINUX_DAEMON_ONLY + (
+            _lproc(400, 1, "bash", "/usr/bin/bash"),
+            _lproc(402, 400, "codex", "/home/me/.npm-global/lib/node_modules/@openai/codex/vendor/codex"),
+        )
+        outcome, _, seen = self.ask_with_run(with_cli, [])
+        self.assertEqual(seen, [])
+        self.assertFalse(outcome.asked)
+        self.assertIn("terminal", outcome.detail)
+
+    def test_the_app_and_a_left_daemon_are_both_asked(self) -> None:
+        outcome, display, seen = self.ask_with_run(LINUX_DESKTOP + LINUX_DAEMON_ONLY[1:], [(0x600004, 100)])
+        self.assertEqual(display.closed, [(0x600004,)])
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(outcome.accepted)
+
+    def test_with_only_a_daemon_no_display_is_needed(self) -> None:
+        class NoDisplay(_Display):
+            def windows(self):
+                raise OSError("no X display (DISPLAY is not set)")
+
+        seen = []
+        outcome = ask_codex_to_quit(
+            "linux", list_linux_processes=lambda: LINUX_DAEMON_ONLY, x11=NoDisplay([]), tray=_Tray(),
+            run=lambda argv: seen.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
+        )
+        self.assertTrue(outcome.accepted)
+        self.assertEqual(len(seen), 1)
+
+    def test_a_command_codex_started_in_a_chat_is_the_apps(self) -> None:
+        chat = LINUX_DESKTOP + (
+            _lproc(300, 200, "codex-linux-san", "/usr/lib/chatgpt/resources/codex-linux-sandbox"),
+            _lproc(301, 300, "codex", "/home/me/bin/codex"),
+        )
+        outcome, display = self.ask(chat, [(0x600004, 100)])
+        self.assertEqual(display.closed, [(0x600004,)])
+        self.assertTrue(outcome.accepted)
+
+    def test_no_signal_is_ever_sent(self) -> None:
+        # SIGTERM ends this app at once and leaves its server orphaned
+        # (observed 2026-10-19); only the window's close request is a request.
+        tree = ast.parse(Path(codex_closer.__file__).read_text(encoding="utf-8"))
+        imported = {
+            alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        } | {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+        self.assertNotIn("signal", imported)
 
 
 class MacTests(unittest.TestCase):

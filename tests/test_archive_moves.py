@@ -39,6 +39,7 @@ from codexsync.semantic_transfer import (
     save_transfer_plan,
     transfer_direction,
 )
+from codexsync.jsonl_codec import ZSTD_READABLE
 from codexsync.session_catalog import SessionState, scan_sessions
 from codexsync.sqlite_audit import PlacementStatus, ThreadPlacements
 
@@ -149,6 +150,28 @@ class _Machine(unittest.TestCase):
 
 
 class ArchiveMoveApplyTests(_Machine):
+    @unittest.skipUnless(ZSTD_READABLE, "this Python has no compression.zstd (added in 3.14)")
+    def test_a_compressed_chat_archived_elsewhere_follows_into_the_archive(self) -> None:
+        # Codex keeps `x.jsonl.zst` while its row names `x.jsonl`; read as two
+        # paths, the move was refused as `CATALOG_PLACES_ELSEWHERE` (CS-430).
+        from compression import zstd
+
+        plain = self.branch(self.local_dir, ACTIVE_PATH, ["one", "two"])
+        packed = plain.with_name(plain.name + ".zst")
+        packed.write_bytes(zstd.compress(plain.read_bytes()))
+        plain.unlink()
+        remote = self.branch(self.cloud_dir, ARCHIVED_PATH, ["one", "two"])
+        self.catalogue({SID: plain})
+        self.agreed("desktop", "ARCHIVED", ["one", "two"])
+
+        plan = self.scan()
+        (item,) = plan.items
+        self.assertEqual(item.action, TransferAction.ARCHIVE_TRANSITION, item.codes)
+        self.assertIn(MOVES_BRANCH, item.codes)
+        self.assertEqual(self.apply(plan), 2, "one copy and one removal")
+        self.assertEqual((self.local_dir / Path(*ARCHIVED_PATH.split("/"))).read_bytes(), remote.read_bytes())
+        self.assertFalse(packed.exists())
+
     def test_a_chat_archived_on_the_other_machine_is_archived_here(self) -> None:
         # The laptop case: the desktop archived the chat, the laptop never
         # recorded an agreement of its own, the contents are the same.

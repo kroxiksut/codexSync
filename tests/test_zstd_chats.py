@@ -29,7 +29,15 @@ from codexsync.jsonl_codec import (
     transcode,
     unsupported_container,
 )
-from codexsync.semantic_transfer import IN_PLACE_CONTAINER, SAME_PATH_LAYOUT_ID, TransferAction, build_transfer_plan
+from codexsync.semantic_transfer import (
+    IN_PLACE,
+    IN_PLACE_CONTAINER,
+    IN_PLACE_DECOMPRESSED,
+    MOVES_BRANCH,
+    SAME_PATH_LAYOUT_ID,
+    TransferAction,
+    build_transfer_plan,
+)
 from codexsync.session_catalog import UNSUPPORTED_CONTAINER, SessionState, scan_sessions
 from codexsync.sqlite_audit import read_thread_placements
 
@@ -124,14 +132,53 @@ class ReadTests(_Roots):
         self.assertEqual(item.action, TransferAction.FAST_FORWARD_REMOTE, item.codes)
         self.assertEqual(item.target_relative_path, f"{DAY}/{NAME}.xz")
 
-    def test_a_chat_that_grew_elsewhere_is_not_written_over_the_compressed_file(self) -> None:
-        # What Codex reads when `x.jsonl` sits beside `x.jsonl.zst` is not
-        # known yet; until it is, the newer copy waits in the mirror.
+    def test_a_chat_that_grew_elsewhere_is_written_as_the_plain_file_codex_names(self) -> None:
+        # Codex reads `x.jsonl` when it sits beside `x.jsonl.zst` and opens a
+        # chat kept only plainly (2026-10-19); the `.zst` goes after its
+        # backup, through the plan's deletions (CS-430).
         self.packed.write_bytes(_zstd(_records(3)))
         (item,) = self.plan(3, 5).items
-        self.assertEqual(item.action, TransferAction.BLOCKED_UNPROVEN_LAYOUT, item.codes)
-        self.assertIn(IN_PLACE_CONTAINER, item.codes)
-        self.assertFalse((self.local / DAY / NAME).exists())
+        self.assertEqual(item.action, TransferAction.FAST_FORWARD_LOCAL, item.codes)
+        self.assertEqual(item.target_relative_path, f"{DAY}/{NAME}")
+        self.assertIn(IN_PLACE, item.codes)
+        self.assertIn(IN_PLACE_DECOMPRESSED, item.codes)
+        self.assertNotIn(MOVES_BRANCH, item.codes)
+
+    def test_a_plain_file_already_at_that_name_is_never_replaced(self) -> None:
+        # One the scan did not take for this chat is still a file, and the
+        # copy would replace a history nobody compared.
+        self.packed.write_bytes(_zstd(_records(3)))
+        (self.mirror / DAY / f"{NAME}.xz").write_bytes(lzma.compress(_records(5)))
+        local, mirror = scan_sessions(self.local), scan_sessions(self.mirror)
+        (self.local / DAY / NAME).write_bytes(b"not this chat\n")
+        (item,) = build_transfer_plan(
+            local, mirror, local_root=self.local, remote_root=self.mirror,
+            source_machine="desktop", target_machine="laptop",
+            layout_id=SAME_PATH_LAYOUT_ID, placements=read_thread_placements(self.local),
+        ).items
+        self.assertEqual(item.action, TransferAction.BLOCKED_INVALID_BRANCH, item.codes)
+        self.assertIn("DESTINATION_OCCUPIED", item.codes)
+
+    def test_a_resolved_conflict_still_waits_in_the_mirror(self) -> None:
+        # Replacing the content of a compressed chat is not an extension: the
+        # history store may hold the old turns (CS-426).
+        from codexsync.semantic_transfer import _in_place_refusal
+        from codexsync.session_catalog import SessionDescriptor
+
+        local = SessionDescriptor(CHAT, SessionState.ACTIVE, f"{DAY}/{NAME}.zst", "0" * 64, 0, 4)
+        source = SessionDescriptor(CHAT, SessionState.ACTIVE, f"{DAY}/{NAME}.xz", "1" * 64, 0, 6)
+        placements = read_thread_placements(self.local)
+        self.assertEqual(_in_place_refusal(placements, CHAT, local, source, replacing=True), (IN_PLACE_CONTAINER,))
+        self.assertIsNone(_in_place_refusal(placements, CHAT, local, source, replacing=False))
+
+    def test_a_container_codex_does_not_make_is_still_refused(self) -> None:
+        from codexsync.semantic_transfer import _in_place_refusal
+        from codexsync.session_catalog import SessionDescriptor
+
+        local = SessionDescriptor(CHAT, SessionState.ACTIVE, f"{DAY}/{NAME}.gz", "0" * 64, 0, 4)
+        source = SessionDescriptor(CHAT, SessionState.ACTIVE, f"{DAY}/{NAME}.xz", "1" * 64, 0, 6)
+        placements = read_thread_placements(self.local)
+        self.assertEqual(_in_place_refusal(placements, CHAT, local, source), (IN_PLACE_CONTAINER,))
 
     def test_doctor_does_not_call_a_compressed_chat_hidden(self) -> None:
         # Codex's row names `x.jsonl` and Codex reads `x.jsonl.zst`: that is a

@@ -187,10 +187,10 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
   任务的上次运行及其结果含义。
 - **为同步关闭 Codex**（`[sync] close_codex = true`，即“自动化”页面上的「同步开始时若
   Codex 开着，则关闭它」复选框；默认关闭）。任何一次同步如果发现 Codex（ChatGPT 应用）
-  开着，会先像 Windows 为更新关闭程序那样请求它退出，并最多等待一分钟直到它消失。绝不
+  开着，会先像 Windows 为更新关闭程序那样（在 Linux 上则像你自己那样，点击托盘图标菜单中的 *Quit*）请求它退出，并最多等待一分钟直到它消失。绝不
   强制：如果 Codex 拒绝或仍在运行，什么都不写入，同步会说明原因。正在进行的智能体回合会被
   中断，所以请让 Codex 处于空闲；终端中运行的 Codex CLI 从不会被关闭；交接监视器和试运行
-  从不请求关闭。已在 Windows 上验证；在 macOS 上保持关闭，直到在 Mac 上验证可用。
+  从不请求关闭。已在 Windows 和 Linux 上验证（Linux 上通过托盘图标的菜单；没有托盘图标时会请求窗口关闭，而已登录的 Codex 对此只会隐藏）；在 macOS 上保持关闭，直到在 Mac 上验证可用。
 - 它是用户级任务 —— Windows 上是任务计划程序，macOS 上是 LaunchAgent，Linux 上是
   `systemd --user` —— 绝不是系统服务。
 - `automation run` 的退出码与该作业本身一致：成功、或者已有另一个守护在运行时为 `0`，

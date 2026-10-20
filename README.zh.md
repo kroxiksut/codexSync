@@ -64,6 +64,8 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 
 - **本地优先。** codexSync 没有自己的服务：共享状态只经过你选择的文件夹。
 - **你的登录信息绝不外传。** `auth.json` 和其他凭据文件在任何层级都不会被复制。
+- **代码通过 git 传递，而不是 codexSync。** 项目文件从不被复制，其中的机密文件甚至不会被打开；IDE 中 Codex 扩展的聊天位于 `~/.codex`，会和其他内容一起传递。
+  → [项目文件夹](docs/zh/PROJECTS.md#项目文件夹)
 - **只在 Codex 关闭时写入。** 无法确定时，什么都不写。如果你允许，同步会先请求 Codex 退出——绝不强制。
 - **没有经过校验的备份，什么都不会被替换**；每次写入都记入事务日志，被中断的写入可以
   继续完成或回滚。
@@ -74,6 +76,8 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 
 **Windows，无需 Python：** 从 [Releases](https://github.com/kroxiksut/codexSync/releases)
 下载 `codexsync-gui-…-windows-amd64.zip`（或 `…-arm64.zip`），解压后运行 `codexsync-gui.exe`。同一个可执行文件也能运行命令行子命令。需要 Windows 10（1809）或更新版本。
+
+**使用 Node.js**，在 Windows 或 Linux 上，从下一个版本起：`npm install -g codexsync`（[通过 npm 安装](docs/zh/README.md#安装)）。
 
 **使用 Python 3.11+**，在 Windows、macOS 或 Linux 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1；
 加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，

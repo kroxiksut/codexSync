@@ -112,8 +112,29 @@ def missing_background_process_names(configured: Mapping[str, list[str]]) -> dic
     return result
 
 
+#: Where Codex CLI 0.163 keeps the shared app-server it leaves running after
+#: the CLI quits (`<CODEX_HOME>/packages/app-server-daemon/...`, started with
+#: `--managed-daemon`; observed on Linux 2026-10-19, CS-429). It is Codex --
+#: it holds `logs_2` and `queue_1.sqlite` -- so it reads as running; this only
+#: lets a refusal say what it is and how to stop it.
+CLI_DAEMON_PATH_MARKER = "/packages/app-server-daemon/"
+
+
+def is_cli_daemon_path(path: str) -> bool:
+    """Is ``path`` a program of Codex CLI's managed app-server daemon?"""
+    return CLI_DAEMON_PATH_MARKER in path.replace("\\", "/").lower()
+
+
+#: The person's way to stop it, which is also the request `[sync] close_codex`
+#: sends on Linux.
+CLI_DAEMON_STOP_COMMAND = "codex app-server daemon stop"
+
+
 __all__ = [
     "BACKGROUND_PROCESS_NAMES",
+    "CLI_DAEMON_PATH_MARKER",
+    "CLI_DAEMON_STOP_COMMAND",
+    "is_cli_daemon_path",
     "OS_KEYS",
     "PROCESS_NAMES",
     "default_background_process_names",

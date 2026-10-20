@@ -64,6 +64,20 @@ needs Python installed:
 
 There is no 32-bit build: Codex itself is published for x64 and ARM64 only.
 
+**With Node.js**, on Windows or Linux (x64 and ARM64), the same builds come
+through npm from the next release on, the way Codex CLI is installed:
+
+```sh
+npm install -g codexsync      # both programs, codexsync and codexsync-gui; the same command updates
+npm uninstall -g codexsync    # remove
+```
+
+Install it globally rather than running it through `npx`: a scheduled task
+names the program where it is installed, and `npx` keeps it in a cache that is
+cleared. On Windows a running program cannot be replaced, so close the window
+and end the handoff watcher, if it runs, before updating. There is no macOS
+build on npm.
+
 From source, for development or an unreleased change:
 
 ```powershell

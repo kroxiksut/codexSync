@@ -2,8 +2,18 @@
 
 ## Status
 
-**Not yet run.** Until it is, a chat this machine holds as `.jsonl.zst` and the
-other machine continued waits in the mirror (`IN_PLACE_CONTAINER`, CS-425).
+**Run 2026-10-19** on the test laptop (Ubuntu 26.04, Codex desktop 26.1013.40934,
+bundled codex 0.163.0-alpha.10.2), without looking at the screen: each chat was
+opened through Codex's own app-server over stdio (`initialize`,
+`thread/resume`, `thread/unsubscribe`; no turn, no model request) and its
+turns, the file and `thread_history_projection_state` (read from a copy) were
+recorded. Results below. C is acted on (`IN_PLACE_PROJECTED_REWRITE`), and so
+is B since 2026-10-20 (CS-430, D-019 amendment): a compressed chat the other
+machine continued is written as plain JSONL and the `.zst` removed after its
+backup (`IN_PLACE_DECOMPRESSED`); a resolved conflict over one still waits in
+the mirror (`IN_PLACE_CONTAINER`). Still owed: one end-to-end run on the
+laptop -- `sessions apply` over a compressed chat, then `thread/resume` shows
+the new turn and the `.zst` is in the backup.
 
 ## Why
 
@@ -57,10 +67,12 @@ Put the copy of `.codex` back afterwards.
 
 | Field | Value |
 |---|---|
-| Date, Codex version (`models_cache.json` `client_version`), OS | |
-| A: which file Codex read; files after | |
-| B: listed / opens / recompressed | |
-| C: opens / which turns / projection offset before and after | |
+| Date, Codex version (`models_cache.json` `client_version`), OS | 2026-10-19, 0.163.0, Ubuntu 26.04. Online for the first time, Codex compressed every chat at once (309 of 309), not only old ones |
+| Opening a compressed chat | It is written back as plain `x.jsonl` (the `.zst` is gone) with one `event_msg` `thread_settings_applied` appended; a projection is built at the plain file's end offset (CS-251: opening writes) |
+| A: which file Codex read; files after | The plain one: projection ordinal 86 = the plain file's records (the `.zst` has 195); the `.zst` untouched, the plain file got the appended record |
+| B: listed / opens / recompressed | Listed and opens, read from the plain file (ordinal 51); recompression not seen in the minutes watched |
+| C: opens / which turns / projection offset before and after | Opens, but shows the *old* four turns from the projection; offset stays 115115 while the replaced file is 110418 bytes. Broken silently |
+| Append after a projection (fast-forward) | Shown: five turns, offset moved to the new end (149088) |
 
 ## What the results unlock
 

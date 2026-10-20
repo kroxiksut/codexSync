@@ -25,6 +25,11 @@ on:
         required: true
         default: false
         type: boolean
+      publish_npm:
+        description: "Publish the npm packages (cannot be undone: a version is published once)"
+        required: true
+        default: false
+        type: boolean
       github_release:
         description: "Create the GitHub release with the builds attached"
         required: true
@@ -261,6 +266,113 @@ jobs:
         run: docker run --rm -v "$PWD:/w" ubuntu:24.04 sh /w/scripts/linux_package_check.sh appimage /w/release/codexsync-$RELEASE_TAG-linux-${{ matrix.arch }}.AppImage "$VERSION"
       - name: tar.gz on the oldest system it is built for
         run: docker run --rm -v "$PWD:/w" ${{ matrix.oldest }} sh /w/scripts/linux_package_check.sh tarball /w/release/codexsync-$RELEASE_TAG-linux-${{ matrix.arch }}.tar.gz "$VERSION"
+
+  # The same builds as npm packages (CS-416): a launcher plus one package per
+  # system, each holding the release build unchanged. See scripts/npm_packages.py.
+  npm:
+    name: npm packages
+    needs: [meta, exe, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || inputs.release_tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{windows,linux}-*"
+          path: assets
+          merge-multiple: true
+      - name: Stage and pack
+        run: python scripts/npm_packages.py stage --tag "$RELEASE_TAG" --assets assets --out npm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm
+          path: npm/*.tgz
+
+  # Installed as a person would, on each system a package is for: the launcher
+  # finds its program, and both programs report the version.
+  npm-check:
+    name: npm on ${{ matrix.key }}
+    needs: [meta, npm]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: win32-x64
+            runner: windows-latest
+          - key: win32-arm64
+            runner: windows-11-arm
+          - key: linux-x64
+            runner: ubuntu-latest
+          - key: linux-arm64
+            runner: ubuntu-24.04-arm
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm
+          path: npm
+      - name: Install and run
+        shell: bash
+        run: |
+          launcher="$(ls npm/codexsync-*.tgz | grep -Ev -- '-(win32|linux)-(x64|arm64)\.tgz$')"
+          npm install -g "./$launcher"
+          npm install -g "codexsync-${{ matrix.key }}@file:./$(ls npm/codexsync-*-${{ matrix.key }}.tgz)"
+          for program in codexsync codexsync-gui; do
+            actual="$("$program" --version)"
+            test "$actual" = "codexsync $VERSION" || { echo "$program reports '$actual', expected 'codexsync $VERSION'"; exit 1; }
+          done
+
+  # Platform packages first, the launcher last; a version npm already holds is
+  # skipped, so a failed run can be repeated. Trusted publishing (OIDC); the
+  # NPM_TOKEN secret is only for the very first publish, before npm knows the
+  # package (docs/dev/PUBLISHING.md).
+  npm-publish:
+    name: Publish to npm
+    needs: [meta, dist, exe, linux, linux-check, npm, npm-check]
+    if: ${{ inputs.publish_npm && inputs.ref == '' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/codexsync
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          sparse-checkout: |
+            scripts/npm_packages.py
+            scripts/release_meta.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm
+          path: npm
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm --version
+          python scripts/npm_packages.py publish --tag "$RELEASE_TAG" --dir npm
 
   # Only after every build above succeeded, so PyPI never holds a version whose
   # Windows or Linux builds failed. Trusted publishing: no token is stored anywhere.

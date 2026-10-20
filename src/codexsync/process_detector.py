@@ -109,6 +109,9 @@ class ProcessInfo:
     name: str
     command_line: str = ""
     parent_pid: int | None = None
+    #: The program's own path, where the system says it exactly (`/proc` on
+    #: Linux); empty elsewhere, and then the command line's first word stands in.
+    program: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -358,9 +361,34 @@ class CodexProcessDetector:
         names = _parse_ps(_run_ps(ps, "comm="))
         commands = _parse_ps(_run_ps(ps, "command="))
         return [
-            ProcessInfo(pid=pid, name=name, command_line=commands.get(pid, ""))
+            ProcessInfo(pid=pid, name=name, command_line=commands.get(pid, ""), program=proc_program(pid))
             for pid, name in sorted(names.items())
         ]
+
+
+def proc_program(pid: int) -> str:
+    """The program a Linux process runs, from `/proc`: its executable, else its first argument.
+
+    `ps -o command=` joins the arguments with spaces, so it cannot say where
+    the program's path ends -- and a path marker found among the *arguments*
+    (`grep -r x /usr/lib/chatgpt/`, a shell whose command mentions it) read a
+    stopped Codex as running for as long as that process lived (2026-10-19).
+    `/proc/<pid>/cmdline` separates the arguments with NUL. Empty where there
+    is no `/proc` (macOS, whose `comm` is the full path anyway) or the process
+    is gone or not this user's.
+    """
+    if not sys.platform.startswith("linux"):
+        return ""
+    base = f"/proc/{pid}"
+    try:
+        return os.readlink(f"{base}/exe")
+    except OSError:
+        pass
+    try:
+        with open(f"{base}/cmdline", "rb") as handle:
+            return handle.read().split(b"\0", 1)[0].decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 def _run_ps(ps: str, column: str) -> str:
     result = _run_console_tool([ps, "-A", "-o", "pid=", "-o", column], encoding="utf-8")
@@ -408,9 +436,14 @@ def _posix_name_matches(proc: ProcessInfo, target: str) -> bool:
 
 
 def _posix_marker_matches(proc: ProcessInfo, marker: str) -> bool:
-    """A path marker against a process's own path, on a segment boundary."""
+    """A path marker against a process's own path -- never against its arguments.
+
+    The path is the name where `comm` is a full path (macOS), and the program
+    `/proc` names (Linux), or else the command line's first word.
+    """
     marker = marker.strip().lower().replace("\\", "/")
-    haystacks = [proc.name.lower().replace("\\", "/"), proc.command_line.lower().replace("\\", "/")]
+    program = proc.program or (proc.command_line.split(maxsplit=1) or [""])[0]
+    haystacks = [proc.name.lower().replace("\\", "/"), program.lower().replace("\\", "/")]
     return any(marker in value for value in haystacks if value)
 
 

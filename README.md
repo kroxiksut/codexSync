@@ -76,6 +76,10 @@ force, and edits Codex's databases only in three narrow, backed-up ways:
   through the folder you choose.
 - **Your sign-in never travels.** `auth.json` and other credential files are
   never copied, at any depth.
+- **Your code travels by git, not by codexSync.** A project's files are never
+  copied and a secret file in one is never opened; chats of the Codex extension
+  in your IDE are in `~/.codex` and travel with the rest.
+  → [Project folders](docs/en/PROJECTS.md#project-folders)
 - **Writes only while Codex is closed.** When that cannot be determined, nothing
   is written. If you allow it, a sync asks Codex to quit first — never forcibly.
 - **Nothing is replaced without a verified backup**, and every write is
@@ -89,6 +93,9 @@ Found a security or data-safety problem? See [SECURITY.md](./SECURITY.md).
 (or `…-arm64.zip`) from [Releases](https://github.com/kroxiksut/codexSync/releases),
 unpack it and run `codexsync-gui.exe`. The same executable can also run CLI
 subcommands. Windows 10 (1809) or later.
+
+**With Node.js**, on Windows or Linux, from the next release on:
+`npm install -g codexsync` ([installing with npm](docs/en/README.md#install)).
 
 **With Python 3.11+**, on Windows, macOS or Linux — `--pre` while 0.2 is an
 alpha, or pip installs 0.1, and `--upgrade` so that an installed 0.1 is

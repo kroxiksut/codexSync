@@ -357,6 +357,21 @@ IN_PLACE_CATALOG_ABSENT = "IN_PLACE_CATALOG_ABSENT"
 IN_PLACE_STATE_CHANGES = "IN_PLACE_STATE_CHANGES"
 IN_PLACE_CONTAINER = "IN_PLACE_CONTAINER"
 IN_PLACE_ARCHIVE_FLAG_DIFFERS = "IN_PLACE_ARCHIVE_FLAG_DIFFERS"
+#: The chat Codex compressed here (`x.jsonl.zst`) was continued on the other
+#: machine: the continuation is written as the plain `x.jsonl` the catalogue
+#: names, and the `.zst` is removed after its verified backup, in the same
+#: envelope (CS-430). Codex reads the plain file when both exist and opens a
+#: chat kept only plainly (observed 2026-10-19); an opened chat Codex turns
+#: plain itself. Only an extension -- a replaced content keeps
+#: `IN_PLACE_CONTAINER`, since the history store may hold the old turns.
+IN_PLACE_DECOMPRESSED = "IN_PLACE_DECOMPRESSED"
+#: A resolution would *replace* the content of a chat Codex has projected into
+#: `thread_history_*.sqlite`; Codex keeps showing the stale projection and its
+#: byte offset no longer points into this file (CS-426, observed 2026-10-19).
+IN_PLACE_PROJECTED_REWRITE = "IN_PLACE_PROJECTED_REWRITE"
+#: That history store exists but could not be read, so whether a replacement
+#: would be shown is unknown.
+IN_PLACE_HISTORY_UNKNOWN = "IN_PLACE_HISTORY_UNKNOWN"
 #: The catalogue names another file of the same chat -- the page its history
 #: now ends in, or the file it began in -- which is how Codex reaches this one
 #: (CS-356). Codex lists the chat from whichever file its row names.
@@ -1195,7 +1210,9 @@ def _gate_write(
                     target=target, conflict=conflict, extra=extra + objection,
                 )
         else:
-            refusal = _in_place_refusal(placements, session_id, local, source, moving=True, chain=chain)
+            refusal = _in_place_refusal(
+                placements, session_id, local, source, moving=True, chain=chain, replacing=conflict is not None,
+            )
             if refusal is not None:
                 return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra + refusal)
             target = logical_relative_path(source.relative_path)
@@ -1222,11 +1239,23 @@ def _gate_write(
             # and whether the runtime would find it there, is what the layout
             # experiment is for (CS-330b).
             return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra)
-        refusal = _in_place_refusal(placements, session_id, local, source, chain=chain)
+        refusal = _in_place_refusal(
+            placements, session_id, local, source, chain=chain, replacing=conflict is not None,
+        )
         if refusal is not None:
             return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra + refusal)
-        side, target = "local", local.relative_path
+        side, target = "local", _catalogued_path(local)
         extra = extra + (IN_PLACE,) + _other_part_code(placements, session_id, target, chain)
+        if target != local.relative_path:
+            # The compressed file goes after its backup; the plain name it
+            # becomes must hold nothing, or the copy would replace a file no
+            # one compared (CS-430).
+            extra = extra + (IN_PLACE_DECOMPRESSED,)
+            if occupied is not None and occupied(side, target, exact=True):
+                return make(
+                    TransferAction.BLOCKED_INVALID_BRANCH,
+                    target=target, conflict=conflict, extra=extra + (DESTINATION_OCCUPIED,),
+                )
     else:
         side, target = "local", target_relative_path(layout_id, source)
         objection = _catalogue_objection(placements, session_id, target, chain)
@@ -1272,6 +1301,7 @@ def _in_place_refusal(
     *,
     moving: bool = False,
     chain: frozenset[str] = frozenset(),
+    replacing: bool = False,
 ) -> tuple[str, ...] | None:
     """Why ``source`` may not replace ``local`` where it lies, if it may not.
 
@@ -1294,20 +1324,45 @@ def _in_place_refusal(
       archive flag in the catalogue disagrees with the folder it sits in --
       that is a move, and a move needs a delete;
     * a local branch in a compressed container, which the runtime would not
-      read as the plain JSONL the write produces.
+      read as the plain JSONL the write produces -- except the `.zst` Codex
+      makes itself, continued rather than replaced: that one is written as
+      the plain file its catalogue row names (`IN_PLACE_DECOMPRESSED`,
+      CS-430);
+    * with ``replacing`` -- a resolved divergence, where the file's content is
+      replaced rather than extended -- a chat Codex has projected into its
+      history store, or a store that cannot be read: the projection keeps the
+      old turns on screen and its offset points past the new content
+      (CS-426). An extension keeps the offset valid and is allowed.
     """
-    if not moving and codec_of(local.relative_path) is not JsonlCodec.NONE:
+    codec = codec_of(local.relative_path)
+    if not moving and codec is not JsonlCodec.NONE and (codec is not JsonlCodec.ZSTD or replacing):
         return (IN_PLACE_CONTAINER,)
     if not moving and source.state is not local.state:
         return (IN_PLACE_STATE_CHANGES,)
     if placements is None or placements.status is PlacementStatus.ABSENT:
         return (IN_PLACE_CATALOG_ABSENT,)
-    objection = _catalogue_objection(placements, session_id, local.relative_path, chain)
+    objection = _catalogue_objection(placements, session_id, _catalogued_path(local), chain)
     if objection is not None:
         return objection
     if (session_id in placements.archived) != (local.state is SessionState.ARCHIVED):
         return (IN_PLACE_ARCHIVE_FLAG_DIFFERS,)
+    if replacing:
+        if placements.history is PlacementStatus.INDETERMINATE:
+            return (IN_PLACE_HISTORY_UNKNOWN,)
+        if session_id in placements.projected or chain & placements.projected:
+            return (IN_PLACE_PROJECTED_REWRITE,)
     return None
+
+
+def _catalogued_path(local: SessionDescriptor) -> str:
+    """The path Codex's catalogue names for a branch this machine holds.
+
+    Codex compresses a chat as `x.jsonl.zst` and its row keeps naming
+    `x.jsonl` (CS-394); every other file is named as it lies.
+    """
+    if codec_of(local.relative_path) is JsonlCodec.ZSTD:
+        return logical_relative_path(local.relative_path)
+    return local.relative_path
 
 
 def _catalogue_objection(
@@ -1646,7 +1701,11 @@ def _destination_check(
     }
     roots = {"local": local_root, "mirror": remote_root}
 
-    def occupied(side: str, target: str) -> bool:
+    def occupied(side: str, target: str, *, exact: bool = False) -> bool:
+        if exact:
+            # Only that very file: the session's own compressed copy sits
+            # beside it and is what the write replaces (CS-430).
+            return os.path.lexists(roots[side] / _os_path(target))
         logical = logical_relative_path(target)
         if logical in known[side]:
             return True

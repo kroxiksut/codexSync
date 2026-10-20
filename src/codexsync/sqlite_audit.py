@@ -100,6 +100,15 @@ class ThreadPlacements:
     by_session: dict[str, str | None]
     archived: frozenset[str] = frozenset()
     codes: tuple[str, ...] = ()
+    #: Codex 0.163's own history store (`thread_history_<n>.sqlite`, CS-426):
+    #: ``history`` says whether it could be read, ``projected`` which threads
+    #: it has a projection of. A projection remembers the byte offset in the
+    #: rollout file it has read up to, so a file whose content is *replaced*
+    #: under it is shown from the stale projection (observed 2026-10-19); an
+    #: append keeps the offset valid and is shown.
+    history: PlacementStatus = PlacementStatus.ABSENT
+    projected: frozenset[str] = frozenset()
+    history_codes: tuple[str, ...] = ()
 
     def placement_of(self, session_id: str) -> str | None:
         return self.by_session.get(session_id)
@@ -191,9 +200,57 @@ def read_thread_placements(
             )
     if any(value is None for value in by_session.values()):
         codes.append("ROLLOUT_PATH_OUTSIDE_STATE_ROOT")
+    history, projected, history_codes = read_projected_threads(root, timeout_seconds=timeout_seconds)
     return ThreadPlacements(
-        PlacementStatus.AVAILABLE, by_session, frozenset(archived), tuple(dict.fromkeys(codes))
+        PlacementStatus.AVAILABLE, by_session, frozenset(archived),
+        tuple(dict.fromkeys(codes)), history, projected, history_codes,
     )
+
+
+#: The table where Codex 0.163 records how far it has projected each thread.
+PROJECTION_TABLE = "thread_history_projection_state"
+
+
+def read_projected_threads(
+    state_root: Path, *, timeout_seconds: float = 2.0,
+) -> tuple[PlacementStatus, frozenset[str], tuple[str, ...]]:
+    """Which threads Codex's history store has a projection of, strictly read-only.
+
+    ``ABSENT`` when there is no `thread_history_*.sqlite` (Codex before 0.163);
+    every way of not reading one that exists is ``INDETERMINATE``, so a write
+    that would replace a chat's history is refused rather than guessed safe.
+    Only thread ids are read.
+    """
+    root = state_root.resolve()
+    stores = sorted(path for path in root.glob("thread_history_*.sqlite") if path.is_file())
+    if not stores:
+        return PlacementStatus.ABSENT, frozenset(), ()
+    if len(stores) > 1:
+        return PlacementStatus.INDETERMINATE, frozenset(), ("SEVERAL_HISTORY_STORES",)
+    database = stores[0]
+    if _would_create_a_sidecar(database):
+        return PlacementStatus.INDETERMINATE, frozenset(), (WAL_WITHOUT_SHARED_INDEX,)
+    immutable = not _has_pending_frames(database)
+    try:
+        connection = _read_only_connect(database, timeout_seconds)
+    except sqlite3.Error:
+        return PlacementStatus.INDETERMINATE, frozenset(), ("HISTORY_STORE_UNAVAILABLE",)
+    if connection is None:
+        return PlacementStatus.INDETERMINATE, frozenset(), (WAL_WITHOUT_SHARED_INDEX,)
+    try:
+        if "thread_id" not in _columns(connection, PROJECTION_TABLE):
+            return PlacementStatus.INDETERMINATE, frozenset(), ("HISTORY_SHAPE_UNKNOWN",)
+        ids = frozenset(
+            str(row[0]) for row in connection.execute(f'SELECT thread_id FROM "{PROJECTION_TABLE}"')
+            if isinstance(row[0], str) and row[0]
+        )
+    except sqlite3.Error:
+        return PlacementStatus.INDETERMINATE, frozenset(), ("HISTORY_STORE_UNREADABLE",)
+    finally:
+        connection.close()
+    if _wal_appeared(database, immutable):
+        return PlacementStatus.INDETERMINATE, frozenset(), ("HISTORY_STORE_CHANGED",)
+    return PlacementStatus.AVAILABLE, ids, ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -60,6 +60,18 @@ python -m pip install --upgrade --pre codexsync           # 只装命令行
 
 没有 32 位版本：Codex 本身只为 x64 和 ARM64 发布。
 
+**使用 Node.js**，在 Windows 或 Linux（x64 和 ARM64）上，从下一个版本起可以通过 npm
+获得同样的构建，安装方式与 Codex CLI 相同：
+
+```sh
+npm install -g codexsync      # 两个程序 codexsync 和 codexsync-gui；同一命令用于更新
+npm uninstall -g codexsync    # 卸载
+```
+
+请全局安装，而不要通过 `npx` 运行：计划任务记录的是程序的安装位置，而 `npx`
+把它放在会被清理的缓存里。在 Windows 上无法替换正在运行的程序，所以更新前请关闭窗口，
+并停止正在运行的交接监视器。npm 上没有 macOS 版本。
+
 从源码安装，用于开发或尚未发布的改动：
 
 ```powershell

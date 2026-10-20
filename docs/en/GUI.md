@@ -316,8 +316,7 @@ removes what is off.
   exit code meant. **Run now** runs the job in the window.
 - **After signing in** — the delay for everything that starts at sign-in, the
   one-time sync, and **Close Codex when a sync starts while it is open**
-  (`[sync] close_codex`): Codex is asked to quit the way Windows closes an app
-  for an update, never forced; if it does not quit, nothing is written. See
+  (`[sync] close_codex`): Codex is asked to quit the way Windows closes an app for an update (on Linux, with *Quit* in its tray menu, as you would), never forced; if it does not quit, nothing is written. See
   [Configuration](CONFIGURATION.md#automation).
 - **Copies of `.codex`** — the folder (your choice; nothing is proposed), a copy
   after signing in and/or every N hours, how many to keep, the copies that

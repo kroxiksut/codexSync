@@ -124,8 +124,11 @@ codexsync -c config.toml sessions resolve --plan sessions-plan.json --format-mig
 `rollout-….jsonl.zst`（zstd 压缩），而它的聊天列表仍然指向普通的 `.jsonl`。在 Python 能读
 zstd 的地方 —— Python 3.14 及更新版本，发布的程序就是用它构建的 —— codexSync 会读取它，并像
 其他聊天一样比较：在本机增长的内容会进入镜像（照常保存，从不使用 zstd）。在另一台机器上增长的
-聊天会留在镜像中（`IN_PLACE_CONTAINER`）：当普通的 `x.jsonl` 与 `x.jsonl.zst` 并存时 Codex
-读哪一个，目前还不清楚，所以不会覆盖它。
+聊天会以聊天列表所指向的普通 `x.jsonl` 写入本机，而 `x.jsonl.zst` 会在进入经过校验的备份后
+被删除（`IN_PLACE_DECOMPRESSED`）：Codex 读取普通的 `x.jsonl`，并且在聊天被打开时自己把压缩
+的聊天变回普通文件（已验证）。只有后续内容会这样写入：两份副本已分叉并已做出选择的聊天会保留
+压缩文件，选中的副本留在镜像中（`IN_PLACE_CONTAINER`）。
+在 Codex 中打开这样的聊天会让它重新变回普通文件，之后照常继续。
 
 在 Python 3.11–3.13 上通过 pip 安装的 codexSync 读不了这种容器。这样的文件仍然是该聊天的
 历史，因此从不跳过：该聊天在两侧都是
@@ -177,7 +180,14 @@ Codex 运行时到哪里去找会话文件，是那个运行时自己的属性�
 同为活动或同为已归档时才允许。否则条目保持 `BLOCKED_UNPROVEN_LAYOUT`，并附上说明原因的
 代码：`IN_PLACE_CATALOG_ABSENT`、`SESSION_NOT_IN_CATALOG`、`CATALOG_PLACES_ELSEWHERE`、
 `CATALOG_UNREADABLE`、`IN_PLACE_STATE_CHANGES`、`IN_PLACE_ARCHIVE_FLAG_DIFFERS` 或
-`IN_PLACE_CONTAINER`。
+`IN_PLACE_CONTAINER`。Codex 在本机压缩过的聊天则改为写成它的普通文件（`IN_PLACE_DECOMPRESSED`，见
+[当 Codex 压缩自己的聊天](#当-codex-压缩自己的聊天)）。
+
+在另一台电脑上继续的聊天在这里只会被*追加*，这总是允许的。已解决的冲突则会*替换*本机的
+副本；自 Codex 0.163 起，对于 Codex 已经打开过的聊天，这会被拒绝
+（`IN_PLACE_PROJECTED_REWRITE`）：Codex 会把打开过的聊天投影到 `thread_history_1.sqlite`，
+并记住已经读到文件的哪个位置；文件内容被替换后，它仍显示旧的回合（已验证）。如果该存储
+无法读取，替换同样会被拒绝（`IN_PLACE_HISTORY_UNKNOWN`）。所选的分支保留在云端副本中。
 
 Codex 还在这个目录中保存每个聊天的标题、预览和时间，而 codexSync 从不写入它。因此在
 Codex 刷新之前，聊天列表可能仍显示旧值；对话本身则从文件读取。

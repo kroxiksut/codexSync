@@ -373,6 +373,40 @@ it, so the chat list may show the old values until Codex refreshes them. The
 conversation is read from the file. Whether Codex rewrites a file merely
 because it was opened (CS-251) is asked by the same experiment as CS-330b.
 
+Amendment (2026-10-19, CS-426 on the test laptop, Codex 26.1013 with codex
+0.163.0-alpha.10.2, through Codex's own app-server, no model request):
+opening a chat (`thread/resume`) writes to it -- a compressed chat is written
+back as plain `.jsonl` (the `.zst` gone) and an `event_msg`
+`thread_settings_applied` record is appended (CS-251 answered: yes). Opening
+also builds a projection in `thread_history_1.sqlite` holding the byte offset
+and ordinal read up to. An append afterwards was shown and the offset moved
+to the new end. A *replaced* content was not: the old four turns stayed on
+screen from the projection, whose offset then pointed past the new file. So an
+in-place write that replaces content -- a resolution choosing the other
+machine's branch -- is refused for a projected chat
+(`IN_PLACE_PROJECTED_REWRITE`), and for any chat when that store cannot be
+read (`IN_PLACE_HISTORY_UNKNOWN`); an extension stays allowed. Also seen: with
+a plain `x.jsonl` beside `x.jsonl.zst` Codex read the plain file (its
+projection ordinal was the plain file's record count), and a plain file alone
+was listed and opened -- which would let a chat Codex compressed be continued
+here as plain JSONL; that is a separate decision, not taken yet.
+
+Amendment (2026-10-20, CS-430, the owner's decision of 2026-10-19: enable). A
+chat Codex keeps as `x.jsonl.zst` here and the other machine continued is
+written as the plain `x.jsonl` its catalogue row names, and the `.zst` goes
+through `SyncPlan.deletions` -- backed up and verified before the removal, in
+the same envelope, exactly as an archive move removes its old file (D-023);
+code `IN_PLACE_DECOMPRESSED`. Limits: only `.zst` (the container Codex makes;
+`.gz`/`.xz` in `.codex` stay `IN_PLACE_CONTAINER`), only an extension (a
+resolved conflict replaces content and stays `IN_PLACE_CONTAINER`, as the
+history store may hold the old turns), every catalogue check as before against
+the plain path, and nothing may sit at that plain path already
+(`DESTINATION_OCCUPIED`). The catalogue is compared with the plain path for
+any `.zst` branch, which also lets an archive move of a compressed chat
+through; before, it read as `CATALOG_PLACES_ELSEWHERE`. Not yet seen end to end
+on the test laptop (`sessions apply`, then `thread/resume` showing the new
+turn); that run is still owed.
+
 ## D-020: A new chat may be written at its source path, on request
 Asked for by the owner on 2026-09-29 ("the point is to sync everything; in 0.1
 everything synced"), after D-019 had brought only chats both machines held. In
@@ -751,6 +785,45 @@ when Codex closes, and a Codex open at its start is the person's. A dry run
 never asks. Amends `AI_RULES` 2 and the "codexSync never starts or stops
 Codex" rule: it still never stops Codex; it may ask Codex to stop itself.
 
+Amendment (2026-10-19): Linux. The desktop app (`/usr/lib/chatgpt/ChatGPT`,
+Electron, its window drawn through XWayland) is asked the way its window's
+close button asks: the EWMH request `_NET_CLOSE_WINDOW` to each window whose
+`_NET_WM_PID` is a process under the detector's own install-path marker, sent
+through the system's `libX11`. Observed on the test laptop (Ubuntu 26.04,
+GNOME 50 on Wayland, Codex 26.1002.52244), three runs: the app gone in under
+two seconds and its `codex app-server` about ten seconds later, the global
+state written on the way out, SQLite's log closed; it quits rather than
+hiding to a tray. `SIGTERM`, the obvious alternative, is *not* a request to
+this app: it ended at once, the server was orphaned, nothing was written on
+the way out and the log stayed open -- so it is never sent. A window drawn on
+Wayland itself cannot be asked from outside; then nothing is asked and the
+sync is refused, as on an unproven platform.
+
+Amendment (same day, later): the window is the fallback, the tray is the
+request. Signed in and online, Codex 26.1013 answers a window close by hiding
+to its tray icon (all 19 processes stayed, no window), exactly as on Windows.
+The request is now that icon's own *Quit*: the StatusNotifierItem owned by an
+app process, its `com.canonical.dbusmenu` menu read with `busctl --user
+--json=short` (systemd's, present in every user session; no Python D-Bus
+library is needed or bundled), and an `Event(id, "clicked")` on the entry
+labelled `Quit`. Observed three times, once through codexSync's own code:
+every process gone in 2-3 s including `codex app-server`, the global state
+written on the way out, SQLite logs closed. The menu also lists chat titles;
+only labels are requested and nothing but the *Quit* id is kept. Without a
+tray icon (a desktop with no StatusNotifier host) the window is asked; when
+that only hides Codex, the sync's minute runs out and nothing is written.
+
+Amendment (2026-10-19, owner: hint and stop): Codex CLI 0.163 starts a shared
+app-server (`<CODEX_HOME>/packages/app-server-daemon/…/codex app-server
+--managed-daemon`) and leaves it running after the CLI quits -- alive 42
+minutes later on the laptop, holding `logs_2` and `queue_1.sqlite`. It is
+Codex, so the gate keeps reading it as running; when it is all that runs, the
+refusal (`CODEX_CLI_DAEMON`) and `doctor` name it and the command that stops
+it. On Linux, with `close_codex` on and no CLI open (an open CLI is its
+client), the sync asks it to stop with Codex's own `codex app-server daemon
+stop`, run from the daemon's own program: observed answer 0, gone in 0.4 s,
+its pid file removed. Windows and macOS only get the sentence until seen.
+
 
 ## D-030: On-disk formats are a compatibility promise from 0.2.0a1
 0.2 ships as a series of alphas, and the people running them keep real work in
@@ -816,7 +889,8 @@ running in the sandbox, and after the app quit -- following
 records it, so writes are open on Linux. The shipped names needed no change.
 Linux stays experimental: no handoff to or from it has been tried, `close_codex`
 has no `PROVEN_CLOSERS` entry there (a request is refused, as designed), and
-the user-level scheduler is unproven on it.
+the user-level scheduler is unproven on it. (2026-10-19: `close_codex` was
+observed there and has its entry, see the D-029 amendment.)
 
 Amendment (D-037, 2026-10-12): Linux gets a frozen build after all (`.deb`,
 `.rpm`, AppImage and `tar.gz`, x64 and ARM64), for the systems where `pip` is not enough; no
@@ -1136,6 +1210,17 @@ PySide6 and Python 3.14 as the exes. Desktop Codex supports only Ubuntu
 people who run only Codex CLI there. Systems on glibc 2.28 (Astra 1.7, RED OS
 7.3) run neither program; `pipx` or a venv remains for them where their
 Python is 3.11 or later.
+
+Amendment (2026-10-19, owner; asked for on 2026-10-11): **npm** is one more way
+in, for people who install Codex CLI with it, and it carries the same frozen
+builds -- nothing is built for it. The layout is Codex's own: `codexsync` is a
+launcher whose optional dependencies are one package per system, each a
+version of the same name, holding both programs exactly as the release ships
+them (on Linux, symbolic links npm would drop become copies). Name `codexsync`,
+as on PyPI. No package has an install script, so nothing runs before the
+person runs codexSync; no macOS package exists while there is no frozen macOS
+build. Published by `release.yml` after every build and an install on each
+system succeeded.
 
 ## D-038: A project folder's secret files are listed without their hash, unless the person chooses otherwise
 

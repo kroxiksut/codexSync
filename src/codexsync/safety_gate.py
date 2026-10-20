@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Callable
 
 from .exceptions import FailSafeError, SafetyPreconditionError
+from .process_knowledge import CLI_DAEMON_STOP_COMMAND
 
 
 class OperationKind(str, Enum):
@@ -53,6 +54,9 @@ class SafetyDecision:
     process_state: ProcessState
     allowed: bool
     reason: str
+    #: What reads as running is only Codex CLI's left-behind app-server daemon
+    #: (CS-429). Descriptive: it never changes ``allowed``.
+    cli_daemon_only: bool = False
 
 
 OPERATION_PROFILES: dict[OperationKind, OperationProfile] = {
@@ -99,6 +103,7 @@ class SafetyGate:
         sample: Callable[[], ProcessState],
         *,
         describe: Callable[[], str] | None = None,
+        cli_daemon_only: Callable[[], bool] | None = None,
         stable_window_seconds: float = 2.0,
         sample_interval_seconds: float = 0.25,
         monotonic: Callable[[], float],
@@ -106,6 +111,7 @@ class SafetyGate:
     ) -> None:
         self._sample = sample
         self._describe = describe
+        self._cli_daemon_only = cli_daemon_only
         self._stable_window_seconds = max(0.0, stable_window_seconds)
         self._sample_interval_seconds = max(0.01, sample_interval_seconds)
         self._monotonic = monotonic
@@ -115,10 +121,10 @@ class SafetyGate:
         profile = OPERATION_PROFILES[operation]
         state, reason = self._sample_state()
         if not profile.requires_stopped:
-            return SafetyDecision(operation, state, True, reason)
+            return SafetyDecision(operation, state, True, reason, self._daemon_only(state))
 
         if state is not ProcessState.STOPPED:
-            return SafetyDecision(operation, state, False, reason)
+            return SafetyDecision(operation, state, False, reason, self._daemon_only(state))
 
         if final:
             return SafetyDecision(operation, ProcessState.STOPPED, True, "final stopped process check passed")
@@ -128,13 +134,21 @@ class SafetyGate:
             self._sleep(min(self._sample_interval_seconds, max(0.0, deadline - self._monotonic())))
             state, reason = self._sample_state()
             if state is not ProcessState.STOPPED:
-                return SafetyDecision(operation, state, False, reason)
+                return SafetyDecision(operation, state, False, reason, self._daemon_only(state))
         return SafetyDecision(operation, ProcessState.STOPPED, True, "continuous stopped process window passed")
 
     def require(self, operation: OperationKind, *, final: bool = False) -> SafetyDecision:
         decision = self.check(operation, final=final)
         if decision.allowed:
             return decision
+        if decision.process_state is ProcessState.RUNNING and decision.cli_daemon_only:
+            raise SafetyPreconditionError(
+                f"Codex is running; {operation.value} requires it to be stopped. Only Codex CLI's background "
+                f"server is left (it stays after the CLI is closed); stop it with `{CLI_DAEMON_STOP_COMMAND}`. "
+                f"{decision.reason}",
+                code="CODEX_CLI_DAEMON",
+                params={"command": CLI_DAEMON_STOP_COMMAND},
+            )
         if decision.process_state is ProcessState.RUNNING:
             raise SafetyPreconditionError(
                 f"Codex is running; {operation.value} requires it to be stopped. {decision.reason}",
@@ -155,6 +169,15 @@ class SafetyGate:
         if state is ProcessState.RUNNING:
             return state, f"Codex or known background process detected{self._detail()}"
         return ProcessState.UNKNOWN, "process detector returned an unknown state"
+
+    def _daemon_only(self, state: ProcessState) -> bool:
+        """Whether the last sample found only Codex CLI's daemon; a failing hook says no."""
+        if state is not ProcessState.RUNNING or self._cli_daemon_only is None:
+            return False
+        try:
+            return bool(self._cli_daemon_only())
+        except Exception:
+            return False
 
     def _detail(self) -> str:
         """``: name (pid N), …`` for what was found, or nothing.

@@ -45,6 +45,27 @@ All notable changes to this project are documented in this file.
   into `~/.local/share`, never replaces or removes an entry it did not write,
   and writes nothing when a package installed one. Also in the window: *About
   → Applications menu*.
+- `[sync] close_codex` works on Linux: the Codex desktop app is asked to quit
+  the way a person quits it — *Quit* in its tray icon's menu, over D-Bus — and
+  without a tray icon its window is asked to close. Never with a signal:
+  `SIGTERM` ends this app abruptly, its server orphaned and nothing saved on
+  the way out. Seen on Ubuntu 26.04 with GNOME on Wayland: Codex and its
+  server gone in two to three seconds, its state saved. Closing the window
+  alone only hides a signed-in Codex to the tray.
+- Codex CLI 0.163 leaves its background server (`codex app-server`, from
+  `~/.codex/packages/app-server-daemon/`) running after the CLI is closed, and
+  codexSync rightly waits for it. When it is all that runs, a refused write and
+  `doctor` now say so and name `codex app-server daemon stop`; on Linux, with
+  `[sync] close_codex` on and no CLI open, a sync asks it to stop with that
+  command.
+- npm packages for Windows and Linux, x64 and ARM64: `npm install -g
+  codexsync` installs both programs, laid out like Codex CLI's own package —
+  a launcher plus the release build for your system as an optional package,
+  with nothing run at install time. Each is installed and checked on its
+  system before a release is published.
+- README: one line on what travels and what does not — a project's code goes
+  by git, a secret file in it is never opened, and the chats of the Codex
+  extension in an IDE are in `~/.codex` and travel with the rest.
 
 ### Changed
 - A project folder without git no longer publishes the SHA-256 of files that
@@ -87,6 +108,17 @@ All notable changes to this project are documented in this file.
   licence with nothing extra to sign.
 
 ### Fixed
+- A resolved conflict is no longer written over a chat Codex 0.163 has already
+  opened: Codex keeps such a chat in its own history store and, after the
+  file's content was replaced, kept showing the old turns. The chosen branch
+  stays in the cloud copy (`IN_PLACE_PROJECTED_REWRITE`); a chat continued on
+  the other machine, which only extends the file, is written as before.
+- On Linux and macOS, a program whose *arguments* mention Codex's install
+  folder (`grep -r … /usr/lib/chatgpt/`, a terminal command, a file viewer)
+  no longer reads as Codex running: the install-path marker is compared with
+  the program's own path only (`/proc` on Linux). Such a process blocked every
+  write for as long as it lived, and kept a sync that had asked Codex to quit
+  waiting a full minute after Codex was gone.
 - A sync, chat transfer or restore that had written everything no longer
   reports a failure when removing old backups afterwards fails (a folder a
   cloud client briefly held, for one): the clean-up logs a warning and the next
@@ -112,9 +144,12 @@ All notable changes to this project are documented in this file.
   not know that container, took such a chat for absent, and a sync would have
   put the mirror's older copy into `.codex` beside it. On Python 3.14 or later
   such a chat is read and compared like any other, and what grew here goes to
-  the mirror (never stored as zstd); a continuation from the other machine
-  waits in the mirror (`IN_PLACE_CONTAINER`) until it is known what Codex reads
-  beside a compressed file. On Python 3.11–3.13 the chat is blocked on both
+  the mirror (never stored as zstd); a continuation from the other machine is
+  written as the plain `x.jsonl` Codex's chat list names, and the `.zst` is
+  removed after its verified backup (`IN_PLACE_DECOMPRESSED`). A resolved
+  conflict over such a chat still waits in the mirror (`IN_PLACE_CONTAINER`).
+  An archive move of a compressed chat is no longer refused as
+  `CATALOG_PLACES_ELSEWHERE`. On Python 3.11–3.13 the chat is blocked on both
   sides (`UNSUPPORTED_CONTAINER`); the other chats sync as before. The Windows
   programs are now built with Python 3.14 for this.
 - A format of Codex's this version does not know now blocks the write it would

@@ -117,9 +117,10 @@ version, so `codexsync --version`, PyPI and the tag never name different builds.
 
 1. **Rehearse before tagging.** Run the `Release` workflow by hand with
    `release_tag` set to the tag you are about to push, `ref` set to `main`,
-   and both publishing switches off. It checks the metadata, runs the suite on
-   each Windows architecture, builds every exe and the wheel, and leaves them
-   as artifacts of the run. Nothing is published from anything but the tag.
+   and every publishing switch off. It checks the metadata, runs the suite on
+   each Windows and Linux architecture, builds every exe, Linux package, npm
+   package and the wheel, installs them on clean systems, and leaves them as
+   artifacts of the run. Nothing is published from anything but the tag.
 2. **Tag and push:**
 
    ```powershell
@@ -129,14 +130,14 @@ version, so `codexsync --version`, PyPI and the tag never name different builds.
    ```
 
 3. **Release:** run `Release` with that tag, `ref` empty, `publish_pypi` on,
-   `github_release` on and `draft` on. PyPI is uploaded only after every build
-   succeeded; the GitHub release is created as a draft, marked pre-release
+   `publish_npm` on, `github_release` on and `draft` on. PyPI and npm are
+   published only after every build succeeded; the GitHub release is created as a draft, marked pre-release
    automatically for an `alpha`/`beta`/`rc` tag. Read the draft, then publish
    it on GitHub.
 
 If a build fails after the tag is pushed, fix it on `main` and release the next
 number (`v0.2.0-alpha.2`) rather than moving the tag: a tag others may have
-fetched is not rewritten, and a PyPI version can never be uploaded twice.
+fetched is not rewritten, and a PyPI or npm version can never be uploaded twice.
 
 ### PyPI: one-time setup
 
@@ -165,6 +166,20 @@ git checkout README.md
 `pypi-readme` pins every relative link and picture in `README.md` to the tag on
 GitHub, because PyPI shows the file without the repository around it, and turns
 GitHub's `> [!IMPORTANT]` alerts, which PyPI shows literally, into a bold label.
+
+### npm: one-time setup
+
+npm's trusted publishing works the same way, but npm adds a trusted publisher
+only to a package that already exists, so the first publish needs a token:
+
+1. On npmjs.com (an account with two-factor authentication) create a granular
+   access token that may publish, with a short expiry. On GitHub → *Settings*
+   → *Environments* create `npm` and give it the secret `NPM_TOKEN`.
+2. Run the release with `publish_npm` on. The job publishes with the token.
+3. On npmjs.com → package `codexsync` → *Settings* → *Trusted publishing* →
+   GitHub Actions: owner `kroxiksut`, repository `codexSync`, workflow
+   `release.yml`, environment `npm`. Then delete the `NPM_TOKEN` secret and
+   revoke the token: every later publish goes through OIDC, with provenance.
 
 ### 5. Verify after push
 
@@ -317,5 +332,47 @@ D-037: the same frozen build packed four ways — `.deb`, `.rpm`, AppImage and
   .venv/bin/python scripts/linux_packages.py --tag v0.0.0-local --out release
   ```
 
-- **The package Maintainer field** holds the author's name from
-  `pyproject.toml` and no address, since none is published there.
+- **The package Maintainer field** is the author's name from
+  `pyproject.toml` with the address `MAINTAINER_EMAIL` in the script (the
+  owner's choice, 2026-10-19; PyPI and the Windows programs carry no address).
+
+## E. npm packages
+
+CS-416: the same builds through npm, for people who already install Codex
+CLI with it. No macOS package: there is no frozen macOS build.
+
+- **The layout is Codex's own.** `codexsync` is a launcher
+  (`packaging/npm`: `bin/codexsync.js`, `bin/codexsync-gui.js`,
+  `lib/launch.js`) whose `optionalDependencies` alias one package per
+  system — `codexsync-linux-x64` is `npm:codexsync@<version>-linux-x64` —
+  and npm installs only the one whose `os`/`cpu` match. The launcher passes
+  the arguments through and returns the program's exit code; a missing
+  platform package is exit 4 with a sentence saying why. On Windows the
+  window started with no command is left running on its own.
+- **A platform package is the release build unchanged:** the two Windows
+  exes out of their zips, the Linux folder out of its `tar.gz`. npm does not
+  pack symbolic links, so the Linux folder's links (PyInstaller links Qt's
+  libraries into `_internal`) become copies of their targets — about 28 MB
+  more compressed, and every path PyInstaller laid out still exists. A
+  Linux package is staged on Linux, where file modes survive.
+- **No package has an install script.** Nothing runs on a machine until the
+  person runs codexSync.
+- **Versions and tags.** The npm version is the tag's spelling
+  (`0.2.0-alpha.2`). A platform package gets a tag of its own
+  (`linux-x64`, `alpha-linux-x64`) and never `latest`; the launcher gets
+  `latest` for a release and, while no release exists, for a pre-release
+  too, otherwise its label (`alpha`, `beta`, `rc`).
+- **The jobs:** `npm` stages and packs everything
+  (`scripts/npm_packages.py stage`); `npm-check` installs the launcher and
+  the platform package on each of the four systems and checks that both
+  programs report the version; `npm-publish` (`publish_npm`, a tag only)
+  publishes the platform packages first and the launcher last, and skips a
+  version npm already holds, so a failed run can be repeated.
+- **Local smoke test** (Windows; for Linux the same with the `tar.gz`):
+
+  ```sh
+  python scripts/npm_packages.py stage --tag v0.2.0-alpha.2 --assets release --out npm --platforms win32-x64
+  npm install -g --prefix ./prefix ./npm/codexsync-0.2.0-alpha.2.tgz
+  npm install -g --prefix ./prefix "codexsync-win32-x64@file:./npm/codexsync-0.2.0-alpha.2-win32-x64.tgz"
+  ./prefix/codexsync --version
+  ```
