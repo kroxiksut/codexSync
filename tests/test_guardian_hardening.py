@@ -399,6 +399,30 @@ class WatchSurvivalTests(unittest.TestCase):
         self.assertIn(4.0, self.clock.sleeps)
         self.assertIn(outcome.status, {GuardianResultStatus.COMMITTED, GuardianResultStatus.UNCHANGED})
 
+    def test_source_gone_then_unreadable_metadata_backs_off(self) -> None:
+        # CS-442: the signature taken while reporting a missing source raised
+        # SourceUnstableError out of an except clause and ended the watch.
+        from codexsync.stable_reader import SourceMissingError, SourceUnstableError
+
+        runner = GuardianRunner(
+            self.source, self.store, self.config, monotonic=self.clock.monotonic, sleep=self.clock.sleep
+        )
+        real_signature = runner.reader.signature
+        calls = {"n": 0}
+
+        def signature():
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise SourceUnstableError("Cannot inspect Guardian source metadata")
+            return real_signature()
+
+        with mock.patch.object(runner.reader, "signature", side_effect=signature), \
+                mock.patch.object(runner.reader, "read_stable", side_effect=SourceMissingError("gone")):
+            outcome = runner._process_candidate(deadline=None, debounce=False)
+
+        self.assertEqual(outcome.status, GuardianResultStatus.FAILED)
+        self.assertIsNone(runner._last_signature)
+
 
 if __name__ == "__main__":
     unittest.main()

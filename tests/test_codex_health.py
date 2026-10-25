@@ -103,6 +103,14 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(found[0].counts, {"chats": 306, "megabytes": 900})
         self.assertEqual(found[0].fix, FIX_CATALOGUE_REBUILD)
 
+    def test_a_missing_status_row_offers_no_fix(self) -> None:
+        # CS-473: `codex repair` settles only pending/running; a missing row
+        # must not promise a repair the plan would never write.
+        from codexsync.codex_health import CATALOGUE_STATUS_MISSING
+
+        for process in (ProcessState.STOPPED, ProcessState.RUNNING, ProcessState.UNKNOWN):
+            self.assertEqual(self.codes(None, process), [(CATALOGUE_STATUS_MISSING, Severity.NOTE, None)])
+
     def test_a_complete_catalogue_reports_only_what_it_misses(self) -> None:
         self.assertEqual(self.codes(BACKFILL_COMPLETE, ProcessState.STOPPED), [])
         found = diagnose_catalogue(reading(BACKFILL_COMPLETE), ProcessState.STOPPED, FILES, unnamed=3)

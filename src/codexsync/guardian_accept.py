@@ -79,6 +79,9 @@ NOTHING_TO_ACCEPT = "NOTHING_TO_ACCEPT"
 STATE_REJECTED = "STATE_REJECTED"
 #: The state file does not exist.
 SOURCE_MISSING = "SOURCE_MISSING"
+#: The drop could not be explained (a payload did not parse into a known
+#: schema), so the plan id could not pin which bindings went (CS-477).
+NOT_EXPLAINED = "NOT_EXPLAINED"
 
 #: Codes that describe "no decision is needed" rather than "refused".
 INFORMATIONAL_CODES = frozenset({NO_BASELINE, NOTHING_TO_ACCEPT})
@@ -175,6 +178,10 @@ def build_guardian_accept_plan(
             codes.append(BASELINE_UNRESOLVED)
         else:
             explanation, digest = _explain(baseline_payload, candidate_payload)
+    if shrink_codes and not codes and explanation is None:
+        # Without a digest two different drops with equal counts would share
+        # one plan id (D-014); refuse rather than pin the counts alone.
+        codes.append(NOT_EXPLAINED)
 
     plan_material = {
         "version": GUARDIAN_ACCEPT_PLAN_VERSION,

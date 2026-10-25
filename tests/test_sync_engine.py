@@ -309,20 +309,25 @@ class SyncEngineTests(unittest.TestCase):
             untouched.write_text("a user file", encoding="utf-8")
 
             clock = {"now": time.time()}
-            engine = SyncEngine(
-                backup_manager=BackupManager(
-                    backup_root=root / "backups",
-                    machine_id="machine-a",
-                    retention_days=7,
-                    max_backups=0,
-                ),
-                temp_dir=root / ".tmp",
-                backup_before_overwrite=True,
-                fail_on_unknown=True,
-                now=lambda: clock["now"],
-            )
 
-            engine.execute(
+            def engine() -> SyncEngine:
+                # One backup manager per run, as every caller builds it: a
+                # snapshot holds one copy per path, and a second run into the
+                # same snapshot is refused (CS-454).
+                return SyncEngine(
+                    backup_manager=BackupManager(
+                        backup_root=root / "backups",
+                        machine_id="machine-a",
+                        retention_days=7,
+                        max_backups=0,
+                    ),
+                    temp_dir=root / ".tmp",
+                    backup_before_overwrite=True,
+                    fail_on_unknown=True,
+                    now=lambda: clock["now"],
+                )
+
+            engine().execute(
                 SyncPlan(to_local=[CopyAction(src=src, dst=dst, relative_path="dst.txt")]),
                 dry_run=False,
             )
@@ -331,7 +336,7 @@ class SyncEngineTests(unittest.TestCase):
 
             clock["now"] += 2 * 3600
             src.write_text("newer-data", encoding="utf-8")
-            engine.execute(
+            engine().execute(
                 SyncPlan(to_local=[CopyAction(src=src, dst=dst, relative_path="dst.txt")]),
                 dry_run=False,
             )

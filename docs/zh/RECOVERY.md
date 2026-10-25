@@ -134,6 +134,7 @@ codexsync -c config.toml codex repair --confirm-plan <plan-id>
 | `CATALOGUE_REBUILDING` | Codex 正在重建。 | 保持打开 |
 | `CATALOGUE_MISSES_CHATS` | 聊天文件在原位，但 Codex 没有显示。 | `sessions catalogue` |
 | `CATALOGUE_STATUS_UNKNOWN` | Codex 的聊天列表报告了本版本不认识的重建状态；对此不作判断。 | 无：`codex repair` 不会改动它 |
+| `CATALOGUE_STATUS_MISSING` | Codex 的聊天列表中没有重建状态；Codex 会自行写入。 | 无：`codex repair` 无需处理 |
 | `GLOBAL_STATE_MISSING`、`GLOBAL_STATE_INVALID` | 项目、置顶或聊天所属项目丢失或已经脱节。 | `guardian restore` |
 | `GLOBAL_STATE_UNRECOGNISED` | 全局状态是本版本不认识的形式（还没有项目的 Codex 会写出这种形式）。这不影响 Codex；在认识这种形式之前，项目不会被同步。 | 无需修复 |
 | `OPEN_JOURNAL` | 某个 codexSync 操作中途停止，阻止所有写入。 | [被中断的写操作](#被中断的写操作) |

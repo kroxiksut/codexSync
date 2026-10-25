@@ -1303,12 +1303,23 @@ def change_config_value(path: Path, name: str, value: Any, *, dry_run: bool = Fa
     return _change(path, document, text, dry_run=dry_run)
 
 
+def _parsed(text: str, path: Path) -> dict[str, Any]:
+    """The file's TOML, or a ConfigError (exit 4) instead of a traceback (CS-458)."""
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Invalid TOML in {path}: {exc}") from exc
+
+
 def remove_config_value(path: Path, name: str, *, dry_run: bool = False) -> ConfigChange:
     """Remove one ``section.key``, so the built-in default applies again."""
     _template_value(name)
     document = read_config_document(path)
     section, _, key = name.partition(".")
-    if key not in (tomllib.loads(document.text).get(section) or {}):
+    table = _parsed(document.text, path).get(section) or {}
+    if not isinstance(table, dict):
+        raise ConfigError(f"[{section}] in {path} is not a table; fix the file by hand first")
+    if key not in table:
         return ConfigChange(path, "", None)
     try:
         text = remove_key(document.text, section, key)
@@ -1326,7 +1337,10 @@ def change_path_mappings(
 ) -> ConfigChange:
     """Add one `[[path_mappings]]` rule, or remove one by its `rule_id`."""
     document = read_config_document(path)
-    rules = [dict(item) for item in tomllib.loads(document.text).get("path_mappings") or []]
+    listed = _parsed(document.text, path).get("path_mappings") or []
+    if not isinstance(listed, list) or not all(isinstance(item, dict) for item in listed):
+        raise ConfigError(f"path_mappings in {path} is not a list of tables; fix the file by hand first")
+    rules = [dict(item) for item in listed]
     ids = [str(item.get("rule_id")) for item in rules]
     if add is not None:
         entry = {key: add[key] for key in MAPPING_KEYS if add.get(key) is not None}

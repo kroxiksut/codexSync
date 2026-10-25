@@ -154,6 +154,20 @@ class GuardianAcceptTests(unittest.TestCase):
             (4, 0, 0),
         )
 
+    def test_a_drop_that_cannot_be_explained_is_not_acceptable(self) -> None:
+        # CS-477: with no digest two drops of equal counts shared one plan id.
+        from unittest import mock
+
+        self._stuck_store()
+        with mock.patch("codexsync.guardian_accept._explain", return_value=(None, "")):
+            plan = self._runner().preview_accept()
+
+        self.assertEqual(plan.codes, ("NOT_EXPLAINED",))
+        self.assertFalse(plan.acceptable)
+        with mock.patch("codexsync.guardian_accept._explain", return_value=(None, "")):
+            with self.assertRaises(ConflictError):
+                self._runner().accept(confirm_plan=plan.plan_id)
+
     def test_a_binding_lost_from_a_project_that_still_exists_is_called_dropped(self) -> None:
         self._write(BEFORE)
         self._runner().once()
@@ -305,6 +319,40 @@ class GuardianAcceptTests(unittest.TestCase):
         self.assertNotIn(accepted.snapshot_id, removed)
         self.assertTrue(baseline.directory.is_dir())
         self.assertTrue(accepted.directory.is_dir())
+
+    def test_retention_keeps_the_baseline_when_the_decision_does_not_verify(self) -> None:
+        # CS-441: marks come from the manifest, not from a payload that verifies.
+        baseline = self._stuck_store()
+        _, accepted = self._runner().accept(confirm_plan=self._runner().preview_accept().plan_id)
+        for step in range(4):
+            self._write(_state({"n1": "C:/a", "n2": "C:/b", "n3": "C:/c"}, {"t9": "n1"}, **{"window-bounds": [step]}))
+            self.assertEqual(self._runner().once().status, GuardianResultStatus.COMMITTED)
+        accepted.payload_path.write_bytes(b"damaged")
+
+        removed = prune_snapshots(
+            self.config.root_dir, "machine-a", retention_days=1, max_snapshots=1,
+            now=datetime.now(timezone.utc) + timedelta(days=400),
+        )
+
+        self.assertTrue(removed)
+        self.assertNotIn(baseline.snapshot_id, removed)
+        self.assertTrue(baseline.directory.is_dir())
+
+    def test_retention_prunes_nothing_when_a_manifest_cannot_be_read(self) -> None:
+        baseline = self._stuck_store()
+        _, accepted = self._runner().accept(confirm_plan=self._runner().preview_accept().plan_id)
+        for step in range(4):
+            self._write(_state({"n1": "C:/a", "n2": "C:/b", "n3": "C:/c"}, {"t9": "n1"}, **{"window-bounds": [step]}))
+            self.assertEqual(self._runner().once().status, GuardianResultStatus.COMMITTED)
+        accepted.manifest_path.write_bytes(b"{")
+
+        removed = prune_snapshots(
+            self.config.root_dir, "machine-a", retention_days=1, max_snapshots=1,
+            now=datetime.now(timezone.utc) + timedelta(days=400),
+        )
+
+        self.assertEqual(removed, [])
+        self.assertTrue(baseline.directory.is_dir())
 
 
 class GuardianSchemaChangeAcceptTests(unittest.TestCase):

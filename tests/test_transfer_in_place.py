@@ -183,6 +183,29 @@ class InPlacePlanTests(unittest.TestCase):
         self.assertEqual(item.action, TransferAction.FAST_FORWARD_LOCAL)
         self.assertIn(IN_PLACE, item.codes)
 
+    def test_a_continuation_matched_only_canonically_is_a_replacement(self) -> None:
+        # CS-443: the shared record differs in bytes (key order), so writing
+        # the longer copy rewrites the prefix Codex has projected.
+        path = "sessions/2026/09/27/a.jsonl"
+        for root, lines in (
+            (self.local_root, [b'{"a": 1, "r": "1"}\n']),
+            (self.remote_root, [b'{"r": "1", "a": 1}\n', b'{"r": "2"}\n']),
+        ):
+            target = root / Path(*path.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"".join(lines))
+        projected = ThreadPlacements(
+            PlacementStatus.AVAILABLE, {"s1": path}, history=PlacementStatus.AVAILABLE,
+            projected=frozenset({"s1"}),
+        )
+        item = self._plan(
+            [self._descriptor(path, 1)], [self._descriptor(path, 2)], placements=projected,
+        ).items[0]
+        self.assertEqual(item.relation, BranchRelation.FAST_FORWARD_LOCAL)
+        self.assertEqual(item.action, TransferAction.BLOCKED_UNPROVEN_LAYOUT)
+        self.assertIn("IN_PLACE_PROJECTED_REWRITE", item.codes)
+        self.assertIn("CANONICAL_PREFIX_REWRITE", item.codes)
+
     def test_a_resolution_for_a_chat_without_a_projection_is_written(self) -> None:
         other = ThreadPlacements(
             PlacementStatus.AVAILABLE, {"s1": "sessions/a.jsonl"}, history=PlacementStatus.AVAILABLE,
@@ -415,7 +438,7 @@ class InPlaceApplyTests(unittest.TestCase):
         self.assertEqual(item.action, TransferAction.FAST_FORWARD_LOCAL, item.codes)
         self.assertIn(IN_PLACE_DECOMPRESSED, item.codes)
 
-        self.assertEqual(self._apply(plan), 2, "one copy, one removal")
+        self.assertEqual(self._apply(plan), 1, "one chat: its .zst removal is part of it")
         self.assertEqual(plain.read_bytes(), remote.read_bytes())
         siblings = sorted(path.name for path in plain.parent.iterdir())
         self.assertEqual(siblings, ["rollout-s1.jsonl"], "the .zst is gone, no second file for one chat")

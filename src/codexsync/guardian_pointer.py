@@ -38,12 +38,20 @@ def resolve_or_restore_latest_good(root_dir: Path, machine_id: str) -> GuardianS
     # A pointer file names its machine; one that names another machine (a copy
     # dropped into the wrong file) must not hand that machine's snapshot out as
     # this one's baseline. It is treated as damaged and rebuilt.
-    if pointer is not None and pointer.machine_id == machine:
+    if pointer is not None and pointer.machine_id != machine:
+        pointer = None
+    if pointer is not None:
+        # Raises when the named snapshot cannot be read right now (CS-434):
+        # rebuilding then moved the pointer back for good.
         snapshot = _snapshot_from_pointer(root, pointer)
         if snapshot is not None:
             return snapshot
     recovered = _scan_latest_committed(root, machine)
-    if recovered is not None:
+    if recovered is None:
+        return None
+    # Never move the pointer below the generation it names (CS-434): the
+    # older snapshot serves as a baseline, the pointer stays as written.
+    if pointer is None or recovered.generation >= pointer.generation:
         _write_pointer(root, recovered)
     return recovered
 
@@ -61,12 +69,16 @@ def find_latest_good(root_dir: Path, machine_id: str) -> tuple[GuardianSnapshot 
     if not root.is_dir():
         return None, True
     pointer = _read_pointer(_pointer_path(root, machine))
-    if pointer is not None and pointer.machine_id == machine:
-        snapshot = _snapshot_from_pointer(root, pointer)
-        if snapshot is not None:
-            return snapshot, True
-    if _scan_latest_committed(root, machine) is None and pointer is None:
-        return None, True
+    try:
+        if pointer is not None and pointer.machine_id == machine:
+            snapshot = _snapshot_from_pointer(root, pointer)
+            if snapshot is not None:
+                return snapshot, True
+        if _scan_latest_committed(root, machine) is None and pointer is None:
+            return None, True
+    except GuardianIntegrityError:
+        # A snapshot that cannot be read now: not resolved, nothing rebuilt.
+        return None, False
     return None, False
 
 
@@ -152,9 +164,21 @@ def _snapshot_from_pointer(root: Path, pointer: LatestGoodPointer) -> GuardianSn
         return None
     try:
         manifest = _verify_candidate(root, snapshot)
-    except GuardianIntegrityError:
+    except GuardianIntegrityError as exc:
+        if _unreadable_now(exc):
+            raise
         return None
     return snapshot if manifest.sha256 == pointer.sha256 else None
+
+
+def _unreadable_now(exc: GuardianIntegrityError) -> bool:
+    """True when a read failed (locked, offline placeholder), not proven corrupt.
+
+    A file that is gone is absent; any other ``OSError`` says nothing about the
+    bytes, so it must not count as damage (CS-434).
+    """
+    cause = exc.__cause__
+    return isinstance(cause, OSError) and not isinstance(cause, FileNotFoundError)
 
 
 def _scan_latest_committed(root: Path, machine_id: str) -> GuardianSnapshot | None:
@@ -171,7 +195,12 @@ def _scan_latest_committed(root: Path, machine_id: str) -> GuardianSnapshot | No
             if snapshot.directory != directory:
                 continue
             _verify_candidate(root, snapshot)
-        except GuardianIntegrityError:
+        except GuardianIntegrityError as exc:
+            if _unreadable_now(exc):
+                # Skipping it could pick an older snapshot as the newest.
+                raise GuardianIntegrityError(
+                    f"Guardian snapshot cannot be read right now: {directory.name}"
+                ) from exc
             continue
         candidates.append((manifest.generation, snapshot))
     if not candidates:

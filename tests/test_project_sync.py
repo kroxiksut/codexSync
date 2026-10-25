@@ -112,6 +112,17 @@ class PublicationTests(unittest.TestCase):
         second = publication_from_state(state, "desktop", now=lambda: "2026-10-02T00:00:00Z")
         self.assertEqual(first.publication_id, second.publication_id)
 
+    def test_a_touched_updated_at_keeps_the_content_id(self) -> None:
+        """CS-445: only what the merge reads of a project is in its id."""
+        first = publication_from_state(_state([_project("a", "Alpha", "D:\\P\\alpha")]), "desk")
+        touched = _project("a", "Alpha", "D:\\P\\alpha")
+        touched["updatedAt"] = 99
+        second = publication_from_state(_state([touched]), "desk")
+        self.assertEqual(first.publication_id, second.publication_id)
+        self.assertEqual(second.projects["a"]["updatedAt"], 99, "the record itself is published whole")
+        renamed = publication_from_state(_state([_project("a", "Beta", "D:\\P\\alpha")]), "desk")
+        self.assertNotEqual(first.publication_id, renamed.publication_id)
+
     def test_projectless_chats_are_carried_beside_the_list_not_in_its_id(self) -> None:
         plain = _state([_project("a", "Alpha", "D:\\P\\alpha")])
         apart = _state([_project("a", "Alpha", "D:\\P\\alpha")], extra={"projectless-thread-ids": ["t2", "t1", 3]})
@@ -434,6 +445,26 @@ class BoundByFolderTests(unittest.TestCase):
             [("t1", "D:\\P\\alpha\\src")], {"D:\\P":"/home/u"},
         )
         self.assertEqual(plan.bound_by_folder, 0)
+        self.assertEqual(state["thread-project-assignments"], {})
+
+    def test_a_peer_binding_does_not_rebind_a_chat_made_projectless_here(self) -> None:
+        """CS-444: an explicit peer binding honours "no project" too."""
+        peer = publication_from_state(
+            _state([_project("a", "Alpha", "D:\\P\\alpha")], bindings={"t1": "a", "t2": "a"}), "desk",
+        )
+        plan, state = self._plan(
+            _state([], extra={"projectless-thread-ids": ["t1"]}), peer, [], {"D:\\P": "/home/u"},
+        )
+        self.assertEqual(state["thread-project-assignments"], {"t2": {"projectKind": "local", "projectId": "a"}})
+
+    def test_a_peer_binding_for_a_chat_projectless_there_is_skipped(self) -> None:
+        peer = publication_from_state(
+            _state(
+                [_project("a", "Alpha", "D:\\P\\alpha")], bindings={"t1": "a"},
+                extra={"projectless-thread-ids": ["t1"]},
+            ), "desk",
+        )
+        _, state = self._plan(_state([]), peer, [], {"D:\\P": "/home/u"})
         self.assertEqual(state["thread-project-assignments"], {})
 
     def test_a_collapsed_project_passes_on_no_chat(self) -> None:

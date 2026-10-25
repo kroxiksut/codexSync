@@ -20,6 +20,7 @@ import uuid
 
 from codexsync.semantic_transfer import (
     CATALOG_NAMES_OTHER_PART,
+    PAGE_OVERLAP,
     SAME_PATH_LAYOUT_ID,
     TransferAction,
     build_transfer_plan,
@@ -154,6 +155,49 @@ class PagePlanTests(_Sandbox):
         self.assertIn(HISTORY_PAGE, page.codes)
         self.assertEqual(page.target_relative_path, PAGE_REL)
         self.assertFalse(plan.blocked_items)
+
+    def test_a_first_file_continued_past_the_page_start_blocks_the_chain(self) -> None:
+        # CS-439: here the chat went on in a page from ordinal 6; the other
+        # machine went on in the first file to 10. Each part alone looks like a
+        # fast-forward, and applying both would leave two continuations of 6.
+        base_at = {"thread_id": CHAT, "end_ordinal_exclusive": 6, "end_byte_offset": 1}
+        self.write(self.local, BASE_REL, _base(5))
+        self.write(self.local, PAGE_REL, _page(3, base=base_at))
+        self.write(self.cloud, BASE_REL, _base(10))
+        plan = self.plan()
+        by_hash = {item.session_hash: item for item in plan.items}
+        for key in (CHAT, f"{CHAT}#page-6"):
+            item = by_hash[_hash(key)]
+            self.assertEqual(item.action, TransferAction.BLOCKED_INVALID_BRANCH, key)
+            self.assertIn(PAGE_OVERLAP, item.codes)
+            self.assertIsNone(item.target_relative_path)
+        self.assertIn(PAGE_OVERLAP, plan.codes)
+
+    def test_a_page_starting_after_the_first_file_ends_is_not_an_overlap(self) -> None:
+        base_at = {"thread_id": CHAT, "end_ordinal_exclusive": 6, "end_byte_offset": 1}
+        self.write(self.local, BASE_REL, _base(5))
+        self.write(self.local, PAGE_REL, _page(3, base=base_at))
+        self.write(self.cloud, BASE_REL, _base(5))
+        plan = self.plan()
+        self.assertNotIn(PAGE_OVERLAP, plan.codes)
+        page = next(item for item in plan.items if item.session_hash == _hash(f"{CHAT}#page-6"))
+        self.assertEqual(page.action, TransferAction.FAST_FORWARD_REMOTE)
+
+    def test_codex_own_tail_past_the_page_start_is_not_an_overlap(self) -> None:
+        # Observed on 2026-10-23 on all three paged chats here: the page forks
+        # at N and the first file keeps an abandoned turn past N, the same on
+        # both sides. Blocking that froze every long chat.
+        base_at = {"thread_id": CHAT, "end_ordinal_exclusive": 6, "end_byte_offset": 1}
+        for page_in_mirror in (False, True):
+            with self.subTest(page_in_mirror=page_in_mirror):
+                self.write(self.local, BASE_REL, _base(10))
+                self.write(self.local, PAGE_REL, _page(3, base=base_at))
+                self.write(self.cloud, BASE_REL, _base(10))
+                if page_in_mirror:
+                    self.write(self.cloud, PAGE_REL, _page(3, base=base_at))
+                plan = self.plan()
+                self.assertNotIn(PAGE_OVERLAP, plan.codes)
+                self.assertFalse(plan.blocked_items)
 
     def test_a_mirror_holding_only_the_page_receives_the_first_part(self) -> None:
         self.write(self.local, BASE_REL, _base(5))

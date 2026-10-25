@@ -824,6 +824,14 @@ client), the sync asks it to stop with Codex's own `codex app-server daemon
 stop`, run from the daemon's own program: observed answer 0, gone in 0.4 s,
 its pid file removed. Windows and macOS only get the sentence until seen.
 
+Amendment (2026-10-23, owner, CS-446): an unattended run never asks either.
+The sign-in task (`sync --apply --unattended`, D-016) inherited
+`close_codex`, so a Codex that starts with the session was closed at every
+sign-in with nobody watching, and a turn it had resumed was lost. With
+`--unattended` the closer is not called at any scope; a Codex open then makes
+the run a refusal (exit 3), as D-016 said. `close_codex` covers the syncs a
+person starts: the window's *Synchronise* and `codexsync sync`.
+
 
 ## D-030: On-disk formats are a compatibility promise from 0.2.0a1
 0.2 ships as a series of alphas, and the people running them keep real work in

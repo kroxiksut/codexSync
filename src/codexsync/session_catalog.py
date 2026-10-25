@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
@@ -115,6 +116,13 @@ class SessionDescriptor:
     #: For a page of a paginated chat (`HISTORY_PAGE`), where it carries on:
     #: ``page-<first ordinal>``. ``None`` for the file a chat begins in.
     page: str | None = None
+    #: The highest record `ordinal` in this file; ``None`` when none is numbered.
+    max_ordinal: int | None = None
+
+    @property
+    def page_start(self) -> int:
+        """The first ordinal this file carries: 0 for the file a chat begins in."""
+        return int(self.page.removeprefix("page-")) if self.page else 0
 
     @property
     def branch_key(self) -> str | None:
@@ -281,6 +289,7 @@ def _scan_jsonl(
     complete_tail = True
     numbered = unnumbered = 0
     last_record_at: str | None = None
+    max_ordinal: int | None = None
     try:
         # Every metric below is taken from the decompressed stream, so a branch
         # kept in a compressed container is the same branch as the plain one.
@@ -318,10 +327,12 @@ def _scan_jsonl(
                 ordinal = record.get("ordinal")
                 if isinstance(ordinal, int) and not isinstance(ordinal, bool):
                     numbered += 1
+                    if max_ordinal is None or ordinal > max_ordinal:
+                        max_ordinal = ordinal
                 else:
                     unnumbered += 1
                 stamp = record.get("timestamp")
-                if isinstance(stamp, str) and (last_record_at is None or stamp > last_record_at):
+                if isinstance(stamp, str) and (last_record_at is None or _later(stamp, last_record_at)):
                     last_record_at = stamp
                 if line_count == 1:
                     if record.get("type") != "session_meta" or not isinstance(record.get("payload"), dict):
@@ -390,7 +401,30 @@ def _scan_jsonl(
         record_format=_record_format(numbered, unnumbered),
         last_record_at=last_record_at,
         page=page,
+        max_ordinal=max_ordinal,
     )
+
+
+def _moment(value: str) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _later(stamp: str, current: str) -> bool:
+    """Whether ``stamp`` is a later moment than ``current`` (CS-466).
+
+    Compared as moments: as text `...:01Z` outranks `...:01.900Z`. A stamp that
+    is not a moment never displaces one that is; two that are not compare as text.
+    """
+    new, old = _moment(stamp), _moment(current)
+    if new is not None and old is not None:
+        return new > old
+    if new is None and old is None:
+        return stamp > current
+    return old is None
 
 
 def _unsupported_container(

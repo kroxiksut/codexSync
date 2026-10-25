@@ -71,6 +71,10 @@ the way.
 * `PROVEN_DETECTORS`: macOS process detection; writes refused there (Linux observed 2026-10-09, writes open)
 * `PROVEN_PROJECT_REGISTRY`: project delete/merge, SQLite project roots
 
+## Tests
+
+* Tests are written from a failure. A test names what can break and how — the other machine changing a file mid-sync, a partial copy, clocks that disagree between machines, a locked or full disk, a cloud client that renames files, Codex running when it should not — and asserts the promise to the user, not what the code does today. A test that breaks the code is fixed in the code; an expectation changes only when the owner changes the expectation, never to turn the suite green. A test that catches no breakage is deleted, not kept as coverage. A fix comes with its test written first, and that test is seen failing on the old code: a test that never failed proves nothing.
+
 ## Expected output
 
 * CLI first (Python 3.11+, zero runtime dependencies in core and CLI)

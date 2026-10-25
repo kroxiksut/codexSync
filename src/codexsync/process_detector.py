@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+import fnmatch
 import io
 import json
 import os
@@ -38,6 +39,10 @@ import sys
 
 
 DETECTOR_CONTRACT_VERSION = 1
+
+
+#: Upper bound for one process listing; past it the sample fails closed.
+CONSOLE_TOOL_TIMEOUT_SECONDS = 30
 
 
 def _run_console_tool(argv: list[str], *, encoding: str) -> subprocess.CompletedProcess[str]:
@@ -74,16 +79,22 @@ def _run_console_tool(argv: list[str], *, encoding: str) -> subprocess.Completed
         startupinfo.wShowWindow = subprocess.SW_HIDE
         kwargs["startupinfo"] = startupinfo
         kwargs["creationflags"] = no_window
-    return subprocess.run(
-        argv,
-        capture_output=True,
-        text=True,
-        encoding=encoding,
-        errors="ignore",
-        check=False,
-        stdin=subprocess.DEVNULL,
-        **kwargs,
-    )
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding=encoding,
+            errors="ignore",
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=CONSOLE_TOOL_TIMEOUT_SECONDS,
+            **kwargs,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A hung WMI/PowerShell must not hang the gate or the watcher (CS-471):
+        # a listing that did not finish is a failed sample, i.e. UNKNOWN.
+        raise RuntimeError(f"{argv[0]} did not finish within {CONSOLE_TOOL_TIMEOUT_SECONDS}s") from exc
 
 #: Platforms whose adapter has been run against a live Codex, mapping
 #: ``sys.platform`` to the observation that proved it (OS build and Codex
@@ -110,7 +121,9 @@ class ProcessInfo:
     command_line: str = ""
     parent_pid: int | None = None
     #: The program's own path, where the system says it exactly (`/proc` on
-    #: Linux); empty elsewhere, and then the command line's first word stands in.
+    #: Linux, CIM `ExecutablePath` on Windows); empty elsewhere or where the
+    #: system would not say, and then on POSIX the command line's first word
+    #: stands in.
     program: str = ""
 
 
@@ -176,17 +189,14 @@ class CodexProcessDetector:
         """Exact matches for these names in a complete native process listing.
 
         A name containing a separator is a path marker and is matched against
-        the command path instead: that is how `ChatGPT.app/Contents/MacOS/` is
-        told apart from the ChatGPT app of the same name.
+        the program's path instead: that is how `ChatGPT.app/Contents/MacOS/` is
+        told apart from the ChatGPT app of the same name, and how the Windows
+        desktop app (`ChatGPT.exe` from the `OpenAI.Codex_` package) is told
+        apart from the ordinary ChatGPT app and from the package's own
+        always-running service (CS-447).
         """
         if sys.platform.startswith("win"):
-            targets = {_normalize_windows_name(name) for name in process_names if name.strip()}
-            if not targets:
-                return []
-            return [
-                proc for proc in self._list_windows_all_complete()
-                if _normalize_windows_name(proc.name) in targets
-            ]
+            return _match_windows(self._list_windows_all_complete(), process_names)
         return _match_posix(self._list_posix_all(), process_names)
 
     def has_subprocess_marker(self, parent_process_names: list[str], marker_name: str) -> bool:
@@ -280,6 +290,7 @@ class CodexProcessDetector:
                 pid=proc.pid,
                 name=proc.name or existing.name,
                 parent_pid=proc.parent_pid if proc.parent_pid is not None else existing.parent_pid,
+                program=proc.program or existing.program,
             )
         return list(merged.values())
 
@@ -308,7 +319,7 @@ class CodexProcessDetector:
         script = (
             "$ErrorActionPreference='Stop'; "
             "Get-CimInstance Win32_Process | "
-            "Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress"
+            "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath | ConvertTo-Json -Compress"
         )
         result = _run_console_tool(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -342,7 +353,10 @@ class CodexProcessDetector:
             name = str(row.get("Name") or "").strip()
             if not name:
                 continue
-            processes.append(ProcessInfo(pid=pid, name=name, parent_pid=parent_pid))
+            # Null for a process this user may not open (a service running as
+            # SYSTEM): such a process is simply matched by name only.
+            program = str(row.get("ExecutablePath") or "").strip()
+            processes.append(ProcessInfo(pid=pid, name=name, parent_pid=parent_pid, program=program))
         return processes
 
     def _list_posix(self) -> list[ProcessInfo]:
@@ -412,9 +426,28 @@ def _parse_ps(output: str) -> dict[int, str]:
     return rows
 
 
-def _posix_path_marker(name: str) -> bool:
+def _path_marker(name: str) -> bool:
     """A configured entry that names a location rather than a process."""
-    return "/" in name
+    return "/" in name or "\\" in name
+
+
+def _path_matches(path: str, marker: str) -> bool:
+    """One path marker against one program path.
+
+    Both sides are compared lower-case, with `/` for every separator, and the
+    marker may sit anywhere in the path. A `*` in the marker stands for any run
+    of characters: that is how the Windows marker skips the version in the
+    package folder (`/OpenAI.Codex_*/app/ChatGPT.exe`) while naming one program
+    of that package and not the rest -- the same folder holds the sandbox
+    service, which runs from boot whether Codex is open or not (CS-264).
+    """
+    path = path.strip().lower().replace("\\", "/")
+    marker = marker.strip().lower().replace("\\", "/")
+    if not path or not marker:
+        return False
+    if "*" not in marker:
+        return marker in path
+    return fnmatch.fnmatchcase(path, f"*{marker}*")
 
 
 def _posix_name_matches(proc: ProcessInfo, target: str) -> bool:
@@ -441,15 +474,34 @@ def _posix_marker_matches(proc: ProcessInfo, marker: str) -> bool:
     The path is the name where `comm` is a full path (macOS), and the program
     `/proc` names (Linux), or else the command line's first word.
     """
-    marker = marker.strip().lower().replace("\\", "/")
     program = proc.program or (proc.command_line.split(maxsplit=1) or [""])[0]
-    haystacks = [proc.name.lower().replace("\\", "/"), program.lower().replace("\\", "/")]
-    return any(marker in value for value in haystacks if value)
+    return any(_path_matches(value, marker) for value in (proc.name, program) if value)
+
+
+def _windows_marker_matches(proc: ProcessInfo, marker: str) -> bool:
+    """A path marker against the program's path as Windows reports it, nothing else.
+
+    No command line stands in for a missing path: a process whose path the
+    system would not give is matched by name only, never by its arguments.
+    """
+    return _path_matches(proc.program, marker)
+
+
+def _match_windows(processes: list[ProcessInfo], wanted: list[str]) -> list[ProcessInfo]:
+    names = {_normalize_windows_name(name) for name in wanted if name.strip() and not _path_marker(name)}
+    markers = [name.strip() for name in wanted if name.strip() and _path_marker(name)]
+    if not names and not markers:
+        return []
+    return [
+        proc for proc in processes
+        if _normalize_windows_name(proc.name) in names
+        or any(_windows_marker_matches(proc, marker) for marker in markers)
+    ]
 
 
 def _match_posix(processes: list[ProcessInfo], wanted: list[str]) -> list[ProcessInfo]:
-    names = {name.strip().lower() for name in wanted if name.strip() and not _posix_path_marker(name)}
-    markers = [name.strip() for name in wanted if name.strip() and _posix_path_marker(name)]
+    names = {name.strip().lower() for name in wanted if name.strip() and not _path_marker(name)}
+    markers = [name.strip() for name in wanted if name.strip() and _path_marker(name)]
     found: list[ProcessInfo] = []
     for proc in processes:
         if any(_posix_name_matches(proc, name) for name in names):
@@ -467,6 +519,8 @@ def _normalize_windows_name(name: str) -> str:
 
 
 def _matches_marker(proc: ProcessInfo, marker: str) -> bool:
+    if _path_marker(marker):
+        return _windows_marker_matches(proc, marker)
     normalized_name = _normalize_windows_name(proc.name)
     if normalized_name == _normalize_windows_name(marker):
         return True

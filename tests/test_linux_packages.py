@@ -12,7 +12,9 @@ import configparser
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import unittest
+import uuid
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("linux_packages", REPO_ROOT / "scripts" / "linux_packages.py")
@@ -98,10 +100,28 @@ class PackageContentTests(unittest.TestCase):
         self.assertTrue(self.config["maintainer"].startswith(meta["author"] + " <"))
         self.assertNotIn("@", self.config["vendor"])
 
+    def test_nfpm_is_unpacked_into_a_folder_named_by_its_archive(self) -> None:
+        """CS-480: a moved pin must never reuse the binary of the old archive."""
+        folder = Path(__file__).resolve().parents[1] / "test-sandbox" / f"nfpm-{uuid.uuid4().hex[:8]}"
+        folder.mkdir(parents=True)
+        try:
+            one, two = folder / "a.tar.gz", folder / "b.tar.gz"
+            one.write_bytes(b"one")
+            two.write_bytes(b"two")
+            self.assertNotEqual(packages.nfpm_folder(folder, one), packages.nfpm_folder(folder, two))
+            self.assertEqual(packages.nfpm_folder(folder, one).parent, folder / "nfpm")
+        finally:
+            shutil.rmtree(folder)
+
     def test_both_families_declare_the_same_kinds_of_library(self) -> None:
         deb, rpm = self.config["overrides"]["deb"]["depends"], self.config["overrides"]["rpm"]["depends"]
         self.assertEqual(deb[0], "libc6 (>= 2.35)")
         self.assertEqual(rpm[0], "glibc >= 2.35")
+        # CS-451: ARM64 is built on Ubuntu 24.04, so its floor is that glibc.
+        arm = packages.nfpm_config(Path("/d"), "aarch64", packages.project_metadata())["overrides"]
+        self.assertEqual(arm["deb"]["depends"][0], "libc6 (>= 2.39)")
+        self.assertEqual(arm["rpm"]["depends"][0], "glibc >= 2.39")
+        self.assertEqual(arm["deb"]["depends"][1:], deb[1:])
         # The system half of Qt, named the way each family names it.
         for deb_name, rpm_name in (
             ("libgl1", "mesa-libGL"), ("libegl1", "mesa-libEGL"), ("libfontconfig1", "fontconfig"),

@@ -43,11 +43,24 @@ def prune_snapshots(
         return []
     entries: list[tuple[datetime, GuardianSnapshot]] = []
     decisions: set[str] = set()
+    unread = False
     for directory in snapshots_root.iterdir():
         if directory.is_symlink() or not directory.is_dir() or not (directory / GUARDIAN_COMMITTED_NAME).is_file():
             continue
         try:
             manifest = load_guardian_manifest(directory / "manifest.json")
+        except Exception:
+            # Its accept marks are unknown, so a baseline it protects could be
+            # pruned by mistake (D-014, CS-441): prune nothing this pass.
+            unread = True
+            continue
+        # Marks come from the manifest alone: a payload that fails to verify
+        # (or is locked right now) still names the baseline it overrode.
+        if ACCEPTED_MARKERS.intersection(manifest.validation_codes):
+            decisions.add(manifest.snapshot_id)
+            if manifest.previous_good_snapshot_id is not None:
+                decisions.add(manifest.previous_good_snapshot_id)
+        try:
             snapshot = GuardianSnapshot(root, machine_id, manifest.snapshot_id, manifest.generation)
             if snapshot.directory != directory:
                 continue
@@ -56,10 +69,8 @@ def prune_snapshots(
         except Exception:
             continue
         entries.append((created, snapshot))
-        if ACCEPTED_MARKERS.intersection(manifest.validation_codes):
-            decisions.add(manifest.snapshot_id)
-            if manifest.previous_good_snapshot_id is not None:
-                decisions.add(manifest.previous_good_snapshot_id)
+    if unread:
+        return []
     entries.sort(key=lambda item: item[1].generation, reverse=True)
     latest = resolve_or_restore_latest_good(root, machine_id)
     protected = ({latest.snapshot_id} if latest else set()) | decisions
@@ -196,6 +207,9 @@ def _prune_event_directories(base: Path, root: Path, cutoff: datetime, identifie
             continue
         try:
             raw = json.loads((directory / GUARDIAN_MANIFEST_NAME).read_text(encoding="utf-8"))
+            # A manifest of another shape is unreadable, not a crash (CS-478).
+            if not isinstance(raw, dict) or not isinstance(raw.get("created_at_utc"), str):
+                continue
             event_id = raw.get(identifier)
             created = datetime.fromisoformat(raw["created_at_utc"][:-1] + "+00:00")
             if not isinstance(event_id, str) or event_id != directory.name:
@@ -204,6 +218,6 @@ def _prune_event_directories(base: Path, root: Path, cutoff: datetime, identifie
             if created < cutoff:
                 shutil.rmtree(directory)
                 removed.append(event_id)
-        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ValueError):
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, ValueError, TypeError):
             continue
     return removed

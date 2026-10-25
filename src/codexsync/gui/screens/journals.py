@@ -52,6 +52,14 @@ class RecoveryModel(Model):
         #: The preview a rebuild request is confirmed against.
         self.rebuild_preview: Outcome | None = None
 
+    def reset_plans(self) -> None:
+        # A dry run proved the old rules; an apply must prove the new ones (CS-452).
+        self.checked = None
+        self.result = None
+        self.health = None
+        self.codex_result = None
+        self.rebuild_preview = None
+
 
 class RecoveryScreen(Screen):
     page = "recovery"

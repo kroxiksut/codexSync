@@ -1144,9 +1144,29 @@ class SyncTests(_WindowTestCase):
         screen.remember.setChecked(True)
         screen.decide_buttons["prefer_local"].click()
         names = [call[0] for call in controller.calls]
-        self.assertLess(names.index("remember_conflict_policy"), len(names) - 1)
+        last_run = len(names) - 1 - names[::-1].index("handoff_now")
+        self.assertLess(names.index("remember_conflict_policy"), last_run)
         self.assertIn(("remember_conflict_policy", "prefer_local"), controller.calls)
-        self.assertEqual(controller.calls[-1], ("handoff_now", "prefer_local"))
+        self.assertEqual(controller.calls[last_run], ("handoff_now", "prefer_local"))
+
+    def test_a_remembered_rule_is_a_config_save_for_every_page(self) -> None:
+        # CS-481: other pages kept the old file's sha and plans.
+        window, controller, screen = self._stopped()
+        generation = window._generation
+        window.model("overview").dry_run = Outcome(value="old plan")
+        screen.remember.setChecked(True)
+        screen.decide_buttons["prefer_local"].click()
+        self.assertEqual(window._generation, generation + 1)
+        self.assertIsNone(window.model("overview").dry_run)
+        self.assertIsNotNone(window.model("sync").result, "the run's own result stays")
+
+    def test_an_unchanged_rule_is_not_a_config_save(self) -> None:
+        window, controller, screen = self._stopped()
+        controller.outcomes["remember_conflict_policy"] = Outcome(value=False)
+        generation = window._generation
+        screen.remember.setChecked(True)
+        screen.decide_buttons["prefer_local"].click()
+        self.assertEqual(window._generation, generation)
 
     def test_a_rule_that_cannot_be_saved_stops_before_the_sync(self) -> None:
         window, controller, screen = self._stopped()
@@ -1682,6 +1702,22 @@ class RecoveryTests(_WindowTestCase):
         screen.act("rollback", dry_run=False)
         self.assertIn(("rollback", "op-1", "local", False), controller.calls)
 
+    def test_a_saved_config_forgets_the_rollback_dry_run(self) -> None:
+        # CS-452: the dry run proved the old rules; Roll back stayed enabled.
+        window, _ = self.make()
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        screen.target.setCurrentIndex(screen.target.findData("local"))
+        screen.act("rollback", dry_run=True)
+        self.assertTrue(screen.rollback_apply.isEnabled())
+        window.config_changed()
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        screen.target.setCurrentIndex(screen.target.findData("local"))
+        self.assertIsNone(window.model("recovery").checked)
+        self.assertFalse(screen.rollback_apply.isEnabled())
+
     def test_a_sync_stopped_by_an_open_journal_leads_to_that_journal(self) -> None:
         # 2026-10-06: the window said only "Something went wrong" and nothing
         # led to the journal that blocked the sync.
@@ -1974,6 +2010,20 @@ class SharedJobsTests(_WindowTestCase):
         self.assertEqual(sync.model.run_kind, "apply")
         self.assertIs(sync.model.result, automation.model.handoff_result)
         self.assertIn(window.catalog.text("sync.done.apply"), sync.result.text())
+
+    def test_a_page_that_only_waits_on_a_kind_is_redrawn_when_it_ends(self) -> None:
+        # CS-482: Overview greys its dry run during a full sync it does not offer.
+        controller = FakeController()
+        controller.outcomes["handoff_now"] = Outcome(value=_full_sync_result())
+        window, _, runner = self._window(controller)
+        window.go_to("automation")
+        window.screen("automation").run_handoff_now()
+        token = len(runner.pending)
+        window.go_to("overview")
+        overview = window.screen("overview")
+        self.assertFalse(overview.dry_run_button.isEnabled())
+        runner.finish(token)
+        self.assertTrue(overview.dry_run_button.isEnabled())
 
     def test_the_chat_list_is_read_once_for_projects_and_sessions(self) -> None:
         window, controller, runner = self._window()
@@ -2892,6 +2942,20 @@ class ConfigScreensTests(_WindowTestCase):
         history = list((self.root / "workspace" / "config-history").iterdir())
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].read_text(encoding="utf-8"), before)
+
+    def test_a_rebuild_during_the_check_still_saves_on_the_live_screen(self) -> None:
+        # CS-453: the confirmation ran on the deleted screen; Save stayed grey.
+        path = self._create()
+        window, _ = self.make(controller=Controller(path))
+        window.go_to("settings")
+        old = window.screen("settings")
+        old._widgets[("backup", "retention_days")].setValue(45)
+        old.check(save=True)
+        window.set_language("ru")
+        self.assertIsNot(window.screen("settings"), old)
+        self.pump(lambda: "retention_days = 45" in path.read_text(encoding="utf-8"))
+        self.assertIn("retention_days = 45", path.read_text(encoding="utf-8"))
+        self.assertFalse(window.model("settings").action_busy)
 
     def test_an_invalid_edit_is_refused_and_nothing_is_written(self) -> None:
         path = self._create()

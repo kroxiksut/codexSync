@@ -287,16 +287,29 @@ def pack(folders: list[Path], out: Path) -> list[Path]:
     return packed
 
 
+def _view(*args: str) -> str | None:
+    """`npm view`'s output, ``None`` only when npm says E404 (CS-479).
+
+    Any other failure (network, auth, registry down) stops the publish: read
+    as "not on npm", it would republish or move `latest` blindly.
+    """
+    result = subprocess.run([_npm(), "view", *args, "--json"], capture_output=True, text=True)
+    if result.returncode == 0:
+        return result.stdout
+    if "E404" in (result.stdout or "") + (result.stderr or ""):
+        return None
+    raise SystemExit(f"npm view {' '.join(args)} failed: {(result.stderr or result.stdout or '').strip()[:300]}")
+
+
 def _published(spec: str) -> bool:
-    result = subprocess.run([_npm(), "view", spec, "version", "--json"], capture_output=True, text=True)
-    return result.returncode == 0 and bool(result.stdout.strip())
+    return bool((_view(spec, "version") or "").strip())
 
 
 def _latest() -> str | None:
-    result = subprocess.run([_npm(), "view", NAME, "dist-tags", "--json"], capture_output=True, text=True)
-    if result.returncode != 0:
+    out = _view(NAME, "dist-tags")
+    if out is None:
         return None  # not on npm yet
-    return json.loads(result.stdout or "{}").get("latest")
+    return json.loads(out or "{}").get("latest")
 
 
 def publish(folder: Path, tag: str) -> int:

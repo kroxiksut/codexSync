@@ -149,7 +149,7 @@ class GuardianRunner:
         """
         try:
             outcome = step()
-        except (FailSafeError, OSError) as exc:
+        except (FailSafeError, OSError, SourceUnstableError) as exc:
             self._last_signature = None
             self.state = GuardianRunnerState.BACKOFF
             # Its own doubling: a successful source read resets the read
@@ -331,7 +331,12 @@ class GuardianRunner:
         )
 
     def _source_missing(self) -> GuardianRunOutcome:
-        self._last_signature = self.reader.signature()
+        try:
+            self._last_signature = self.reader.signature()
+        except SourceUnstableError as exc:
+            # Raised from inside an except it escaped the watch loop (CS-442).
+            self._last_signature = None
+            return self._backoff(str(exc))
         if self._missing_reported:
             self.state = GuardianRunnerState.BACKOFF
             return GuardianRunOutcome(GuardianResultStatus.UNCHANGED, self.state, "source remains missing")

@@ -269,6 +269,8 @@ def execute_restore_plan(
                     pre_commit_check=pre_commit,
                     before_replace_check=lambda: safety_gate.require(OperationKind.RESTORE, final=True),
                     after_backup=after_backup,
+                    # Staging writes siblings into the target: re-check first (CS-460).
+                    before_stage_check=lambda: safety_gate.require(OperationKind.RESTORE),
                 )
                 try:
                     engine.execute(plan, dry_run=False)

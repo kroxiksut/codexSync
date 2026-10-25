@@ -32,6 +32,9 @@ class OverviewModel(Model):
         self.journals: Outcome | None = None
         self.automation: Outcome | None = None
 
+    def reset_plans(self) -> None:
+        self.dry_run = None
+
     def receive(self, kind: str, outcome: Outcome) -> None:
         if kind == "dry_run":
             # Started on Synchronisation: the same dry run, shown here too.

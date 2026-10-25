@@ -420,3 +420,16 @@ class SyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrayItemSplitTests(unittest.TestCase):
+    """CS-472: GNOME and KDE register tray items in different shapes."""
+
+    def test_shapes(self) -> None:
+        from codexsync.codex_closer import _split_tray_item
+
+        self.assertEqual(_split_tray_item(":1.61@/org/ayatana/NotificationItem/x"),
+                         (":1.61", "/org/ayatana/NotificationItem/x"))
+        self.assertEqual(_split_tray_item(":1.61/StatusNotifierItem"), (":1.61", "/StatusNotifierItem"))
+        self.assertEqual(_split_tray_item("org.kde.StatusNotifierItem-123-1"),
+                         ("org.kde.StatusNotifierItem-123-1", "/StatusNotifierItem"))

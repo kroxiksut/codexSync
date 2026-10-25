@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import json
 import sys
@@ -90,7 +91,7 @@ from .app import (
 )
 from .chat_directory import Association, ChatDirectory, ChatEntry, search_chats
 from .chat_move import ChatMovePlan
-from .config import SYNC_SCOPES, load_config
+from .config import SYNC_SCOPES, _paths_overlap, codex_folder_holding, load_config, require_config_outside_codex
 from .program_file import frozen_program
 from .config_locations import (
     ConfigChoice,
@@ -103,6 +104,7 @@ from .exceptions import ConfigError, ConflictError, FailSafeError, SafetyPrecond
 from .exit_codes import ExitCode
 from .guardian_inventory import read_guardian_inventory
 from .logging_setup import configure_logging
+from .state_locator import locate_local_state_dir
 from .models import AppConfig, LoggingConfig
 from .recovery import resume_operation, rollback_operation
 from .app import _UNRESOLVED_TRANSFER_BLOCKS
@@ -1237,6 +1239,8 @@ def _run_full_sync(args: argparse.Namespace, config_path: Path) -> int:
     if not dry_run:
         _print_handoff_result(run_handoff(
             config_path, origin=origin, conflict_policy=args.conflict_policy, direction=args.direction,
+            # Nobody watches an unattended run: it never asks Codex to quit (CS-446, D-029).
+            close_codex=not args.unattended,
             on_wait=lambda late: print(
                 "Waiting for the cloud: " + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
             ),
@@ -1752,6 +1756,9 @@ _FINDING_TEXT = {
         "close Codex and check again."
     ),
     "CATALOGUE_UNREADABLE": "Codex's chat list could not be read; nothing about it was judged.",
+    "CATALOGUE_STATUS_MISSING": (
+        "Codex's chat list holds no rebuild status; Codex writes it itself. `codex repair` has nothing to do."
+    ),
     "CATALOGUE_MISSES_CHATS": (
         "Codex does not list {chats} chat file(s) that are in place. `sessions catalogue` asks it to "
         "rebuild its chat list."
@@ -2032,6 +2039,28 @@ def _print_project_files(items, *, limit: int | None, indent: str = "  ") -> Non
                 print(f"{indent}    ... and {len(paths) - limit} more {label}")
 
 
+def _configure_file_logging(cfg: AppConfig, *, verbose: bool) -> None:
+    """Log to the file only when it is outside the `.codex` a command would use (CS-456).
+
+    With `paths.local_state_dir` empty the locator falls back to CODEX_HOME or
+    ~/.codex, which validation never compared with `logging.file`; a log made
+    there would be a file a diagnostic created inside Codex's folder.
+    """
+    logging_cfg = cfg.logging
+    if logging_cfg.file:
+        log_file = Path(logging_cfg.file).resolve()
+        try:
+            state_dir: Path | None = locate_local_state_dir(cfg)
+        except Exception:
+            state_dir = None
+        inside = codex_folder_holding(log_file, cfg.paths.local_state_dir) is not None or (
+            state_dir is not None and _paths_overlap(state_dir.resolve(), log_file)
+        )
+        if inside:
+            logging_cfg = dataclasses.replace(logging_cfg, file=None)
+    configure_logging(logging_cfg, verbose=verbose)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -2075,7 +2104,7 @@ def main(argv: list[str] | None = None) -> int:
             # What a scheduled task runs, with nobody watching its console:
             # its log file is the only record it leaves (CS-318).
             try:
-                configure_logging(load_config(config_path).logging, verbose=args.verbose)
+                _configure_file_logging(load_config(config_path), verbose=args.verbose)
             except ConfigError:
                 pass  # Reported with its exit code by the command itself.
             except Exception as exc:
@@ -2083,7 +2112,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command in {"plan", "sync", "restore"}:
             try:
                 cfg_for_verbose = load_config(config_path)
-                configure_logging(cfg_for_verbose.logging, verbose=args.verbose)
+                _configure_file_logging(cfg_for_verbose, verbose=args.verbose)
                 _emit_verbose_process_snapshot(args.verbose, cfg_for_verbose)
             except ConfigError:
                 # Preserve existing behavior: detailed config errors are handled below.
@@ -2896,7 +2925,15 @@ def main(argv: list[str] | None = None) -> int:
             scope = args.scope or load_config(config_path).sync.scope
             if scope == "full":
                 return _run_full_sync(args, config_path)
-            if args.apply and close_codex_for_sync(config_path):
+            # Decided before the closer: `dry_run_default = false` writes without --apply (CS-459).
+            if args.apply:
+                dry_run = False
+            elif args.dry_run:
+                dry_run = True
+            else:
+                dry_run = load_config(config_path).sync.dry_run_default
+            # An unattended run never asks Codex to quit (CS-446, D-029).
+            if not dry_run and not args.unattended and close_codex_for_sync(config_path):
                 print("Codex was open and quit when asked ([sync] close_codex).")
             ctx = build_context(
                 config_path,
@@ -2904,11 +2941,6 @@ def main(argv: list[str] | None = None) -> int:
                 enforce_safety=True,
                 conflict_policy=args.conflict_policy, direction=args.direction,
             )
-            dry_run = ctx.config.sync.dry_run_default
-            if args.dry_run:
-                dry_run = True
-            if args.apply:
-                dry_run = False
             run_sync(ctx, dry_run=dry_run, origin="unattended" if args.unattended else "cli")
             print("Sync finished." if not dry_run else "Dry-run finished.")
             return int(ExitCode.OK)
@@ -2969,6 +3001,8 @@ def _print_standard_place_hint(created: Path) -> None:
 
 
 def init_config_template(output_path: Path, force: bool) -> Path:
+    # Before exists/--force: --force must never replace Codex's own config.toml (CS-433).
+    require_config_outside_codex(output_path)
     if output_path.exists() and not force:
         raise ConfigError(
             f"File already exists: {output_path}. Use --force to overwrite."

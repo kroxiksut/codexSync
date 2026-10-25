@@ -279,7 +279,17 @@ def resume_operation(config_path: Path, operation_id: str, *, dry_run: bool) -> 
             "Dry-run: the journal would be closed. " + detail,
         )
 
-    _close(JournalStore(cfg.paths.temp_dir), journal)
+    # Close under the machine's lock, as rollback does (CS-461): a run that
+    # still holds it may yet move this journal.
+    store = JournalStore(cfg.paths.temp_dir)
+    machine = cfg.identity.machine_id or platform.node()
+    with OperationLock(
+        cfg.paths.temp_dir, state_root=locate_local_state_dir(cfg), machine_id=machine,
+        family="recover", reentrant=True,
+    ):
+        if store.load(journal.operation_id) != journal:
+            raise FailSafeError(f"Operation {journal.operation_id} changed while the resume was prepared", code="STATE_CHANGED_RETRY")
+        _close(store, journal)
     return RecoveryOutcome(
         journal.operation_id, journal.family, journal.state.value,
         RecoveryAction.RETRY_ALLOWED, journal.backup_snapshot, 0, detail,

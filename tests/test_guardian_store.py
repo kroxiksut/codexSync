@@ -149,6 +149,68 @@ class GuardianStoreTests(unittest.TestCase):
             self.assertEqual(recovered, second.snapshot)
             self.assertIn(second.snapshot.snapshot_id, pointer.read_text(encoding="utf-8"))
 
+    def test_unreadable_latest_good_never_moves_pointer_back(self) -> None:
+        # CS-434: a payload locked for a moment is not a damaged one.
+        from unittest import mock
+
+        from codexsync.exceptions import GuardianIntegrityError
+
+        with self._store_case() as (root, store):
+            store.commit(self._observation(b'{"version":1}'), self._validation())
+            second = store.commit(self._observation(b'{"version":2}'), self._validation())
+            assert second.snapshot is not None
+            pointer = root / "latest-good" / "machine-a.json"
+            before = pointer.read_text(encoding="utf-8")
+            real = Path.read_bytes
+            locked = second.snapshot.payload_path
+
+            def read_bytes(path: Path) -> bytes:
+                if path == locked:
+                    raise PermissionError(13, "locked")
+                return real(path)
+
+            with mock.patch.object(Path, "read_bytes", read_bytes):
+                with self.assertRaises(GuardianIntegrityError):
+                    resolve_or_restore_latest_good(root, "machine-a")
+                self.assertEqual(pointer.read_text(encoding="utf-8"), before)
+                pointer.write_text("not-json", encoding="utf-8")
+                with self.assertRaises(GuardianIntegrityError):
+                    resolve_or_restore_latest_good(root, "machine-a")
+            pointer.write_text(before, encoding="utf-8")
+            self.assertEqual(resolve_or_restore_latest_good(root, "machine-a"), second.snapshot)
+
+    def test_corrupt_latest_good_falls_back_without_lowering_pointer(self) -> None:
+        with self._store_case() as (root, store):
+            first = store.commit(self._observation(b'{"version":1}'), self._validation())
+            second = store.commit(self._observation(b'{"version":2}'), self._validation())
+            assert first.snapshot is not None and second.snapshot is not None
+            pointer = root / "latest-good" / "machine-a.json"
+            before = pointer.read_text(encoding="utf-8")
+            second.snapshot.payload_path.write_bytes(b'{"version":X}')
+
+            self.assertEqual(resolve_or_restore_latest_good(root, "machine-a"), first.snapshot)
+            self.assertEqual(pointer.read_text(encoding="utf-8"), before)
+
+    def test_quarantine_prune_skips_manifest_of_another_shape(self) -> None:
+        # CS-478: a list or a non-string date crashed the watcher.
+        from datetime import datetime, timedelta, timezone
+
+        from codexsync.guardian_retention import prune_quarantine
+
+        with self._store_case() as (root, _store):
+            base = root / GUARDIAN_QUARANTINE_DIR_NAME / "machine-a"
+            for name, body in (("a", "[1, 2]"), ("b", '{"event_id": "b", "created_at_utc": 5}')):
+                (base / name).mkdir(parents=True)
+                (base / name / "manifest.json").write_text(body, encoding="utf-8")
+
+            removed = prune_quarantine(
+                root, "machine-a", retention_days=1, now=datetime.now(timezone.utc) + timedelta(days=400)
+            )
+
+            self.assertEqual(removed, [])
+            self.assertTrue((base / "a").is_dir())
+            self.assertTrue((base / "b").is_dir())
+
     def test_same_bytes_with_different_metadata_returns_unchanged(self) -> None:
         with self._store_case() as (_root, store):
             first = store.commit(self._observation(b"{}"), self._validation())

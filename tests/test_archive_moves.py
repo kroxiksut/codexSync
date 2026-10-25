@@ -168,7 +168,7 @@ class ArchiveMoveApplyTests(_Machine):
         (item,) = plan.items
         self.assertEqual(item.action, TransferAction.ARCHIVE_TRANSITION, item.codes)
         self.assertIn(MOVES_BRANCH, item.codes)
-        self.assertEqual(self.apply(plan), 2, "one copy and one removal")
+        self.assertEqual(self.apply(plan), 1, "one chat: the old file's removal is part of the move")
         self.assertEqual((self.local_dir / Path(*ARCHIVED_PATH.split("/"))).read_bytes(), remote.read_bytes())
         self.assertFalse(packed.exists())
 
@@ -189,7 +189,7 @@ class ArchiveMoveApplyTests(_Machine):
         self.assertEqual(item.target_relative_path, ARCHIVED_PATH)
         self.assertEqual(transfer_direction(item), "local")
 
-        self.assertEqual(self.apply(plan), 2, "one copy and one removal")
+        self.assertEqual(self.apply(plan), 1, "one chat: the old file's removal is part of the move")
         moved = self.local_dir / Path(*ARCHIVED_PATH.split("/"))
         self.assertEqual(moved.read_bytes(), before)
         self.assertFalse(here.exists(), "the active copy is gone: one file for one chat")
@@ -219,7 +219,7 @@ class ArchiveMoveApplyTests(_Machine):
         self.assertEqual(transfer_direction(item), "mirror")
         self.assertEqual(item.target_relative_path, ARCHIVED_PATH)
 
-        self.assertEqual(self.apply(plan), 2)
+        self.assertEqual(self.apply(plan), 1, "one chat: the old file's removal is part of the move")
         self.assertFalse(mirror.exists())
         self.assertTrue((self.cloud_dir / Path(*ARCHIVED_PATH.split("/"))).is_file())
         self.assertTrue((self.local_dir / Path(*ARCHIVED_PATH.split("/"))).is_file(), "this side untouched")

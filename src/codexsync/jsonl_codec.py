@@ -130,6 +130,9 @@ def codec_of(name: str | Path) -> JsonlCodec | None:
 #: first seen 2026-10-15 on Codex 0.163 for every chat not touched for a
 #: while, while its catalogue still names the plain `.jsonl` (CS-394).
 _UNSUPPORTED_CONTAINER = re.compile(r"\.jsonl\.([a-z0-9]{1,10})$", re.IGNORECASE)
+#: Only a compression suffix is a container: `x.jsonl.bak` or `.old` is a
+#: user's copy, not a branch, and must not block the chat for good (CS-467).
+KNOWN_CONTAINERS: frozenset[str] = frozenset({"zst", "bz2", "lz4", "br"})
 
 
 def unsupported_container(name: str | Path) -> str | None:
@@ -144,7 +147,9 @@ def unsupported_container(name: str | Path) -> str | None:
     if text.startswith(".") or codec_of(text) is not None:
         return None
     match = _UNSUPPORTED_CONTAINER.search(text)
-    return match.group(1).lower() if match else None
+    if match is None or match.group(1).lower() not in KNOWN_CONTAINERS:
+        return None
+    return match.group(1).lower()
 
 
 def is_branch_file(name: str | Path) -> bool:

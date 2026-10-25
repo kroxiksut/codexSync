@@ -65,8 +65,11 @@ ARCHES = {
 #: Qt -- OpenGL/EGL, fonts, input, D-Bus and the X11/Wayland client libraries
 #: the platform plugins load. Names differ between the two families; the
 #: release workflow proves each list on a clean system with `ldd`.
+#: The C library each build needs: x64 is built on Ubuntu 22.04, ARM64 on
+#: 24.04 (PySide6's floor there), so one shared floor lied for ARM64 (CS-451).
+GLIBC_FLOOR = {"x86_64": "2.35", "aarch64": "2.39"}
+
 DEB_DEPENDS = (
-    "libc6 (>= 2.35)",
     "libgl1",
     "libegl1",
     "libfontconfig1",
@@ -91,7 +94,6 @@ DEB_DEPENDS = (
     "libwayland-egl1",
 )
 RPM_DEPENDS = (
-    "glibc >= 2.35",
     "mesa-libGL",
     "mesa-libEGL",
     "fontconfig",
@@ -185,8 +187,8 @@ def nfpm_config(dist: Path, arch: str, meta: dict) -> dict:
         "contents": contents,
         # No scripts on purpose: a package touches nothing outside its own files.
         "overrides": {
-            "deb": {"depends": list(DEB_DEPENDS)},
-            "rpm": {"depends": list(RPM_DEPENDS)},
+            "deb": {"depends": [f"libc6 (>= {GLIBC_FLOOR[arch]})", *DEB_DEPENDS]},
+            "rpm": {"depends": [f"glibc >= {GLIBC_FLOOR[arch]}", *RPM_DEPENDS]},
         },
     }
 
@@ -259,11 +261,20 @@ def build_appimage(dist: Path, out: Path, tag: str, arch: str, tools: Path) -> P
     return target
 
 
+def nfpm_folder(tools: Path, archive: Path) -> Path:
+    """Where the verified archive is unpacked: named by its SHA-256 (CS-480).
+
+    A plain `nfpm/` was reused after the pin moved, so the old binary built
+    the packages while the new archive sat beside it, verified and unused.
+    """
+    return tools / "nfpm" / hashlib.sha256(archive.read_bytes()).hexdigest()[:16]
+
+
 def build_packages(
     dist: Path, out: Path, tag: str, arch: str, tools: Path, meta: dict, packagers: tuple[str, ...] = ("deb", "rpm"),
 ) -> list[Path]:
     archive = fetch_tool("nfpm", arch, tools)
-    nfpm_dir = tools / "nfpm"
+    nfpm_dir = nfpm_folder(tools, archive)
     if not (nfpm_dir / "nfpm").exists():
         nfpm_dir.mkdir(parents=True, exist_ok=True)
         with tarfile.open(archive) as bundle:

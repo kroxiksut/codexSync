@@ -939,5 +939,24 @@ class PlanFileTests(ProjectMoveTestCase):
             load_project_move_plan(truncated)
 
 
+
+class CwdUnderTests(unittest.TestCase):
+    """CS-465: a POSIX cwd never counts as under a Windows root."""
+
+    def test_a_posix_cwd_is_not_read_as_a_path_on_the_current_drive(self) -> None:
+        old_root = "D:\\home\\u"
+        norm_old = "d:\\home\\u"
+        # Python <= 3.12 on Windows: isabs("/home/u/x") is true, abspath adds the drive.
+        with patch.object(project_move.os.path, "isabs", return_value=True), patch.object(
+            project_move, "_norm", side_effect=lambda value: "d:\\home\\u\\x"
+        ), patch.object(project_move, "_contains", return_value=True):
+            self.assertFalse(project_move._cwd_under("/home/u/x", old_root, norm_old))
+
+    def test_a_cwd_written_the_roots_way_still_matches_across_separators(self) -> None:
+        old_root = "C:\\proj"
+        if os.name != "nt":
+            self.skipTest("separator folding is Windows host normalisation")
+        self.assertTrue(project_move._cwd_under("C:/proj/sub", old_root, project_move._norm(old_root)))
+
 if __name__ == "__main__":
     unittest.main()

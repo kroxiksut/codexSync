@@ -61,6 +61,26 @@ class OperationLockTests(unittest.TestCase):
                 with self._lock():
                     self.fail("two mutations may never own one state root")
 
+    def test_a_lock_file_that_cannot_be_opened_is_busy(self) -> None:
+        """CS-462: a cloud client holding the file is exit 5, not exit 1."""
+        from unittest import mock
+
+        lock = self._lock()
+        with mock.patch.object(Path, "open", side_effect=PermissionError(13, "held")):
+            with self.assertRaises(OperationBusyError):
+                with lock:
+                    self.fail("an unopenable lock file is not a lock")
+        with self._lock():
+            pass
+
+    def test_the_lock_file_does_not_grow_per_acquisition(self) -> None:
+        """CS-462: append mode once added a byte on every acquisition."""
+        lock = self._lock()
+        for _ in range(3):
+            with self._lock():
+                pass
+        self.assertLessEqual(lock.path.stat().st_size, 1)
+
     def test_being_busy_is_a_fail_safe_error_so_it_exits_five(self) -> None:
         """The exit code is driven by the exception type, not by a return value."""
         self.assertTrue(issubclass(OperationBusyError, FailSafeError))

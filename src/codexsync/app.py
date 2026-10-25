@@ -287,6 +287,7 @@ from .handoff import (
     HandoffError,
     HandoffRecord,
     STATE_WORKING,
+    awaiting_delivery,
     delivery,
     machine_key,
     mark_working,
@@ -799,8 +800,12 @@ def commit_global_state(
     machine = cfg.identity.machine_id or platform.node()
     with OperationLock(cfg.paths.temp_dir, state_root=state_root, machine_id=machine, family=family):
         journals = JournalStore(cfg.paths.temp_dir)
+        # Retention follows [backup], as for every other family (CS-431).
         manager = BackupManager(
-            cfg.paths.backup_dir, machine, compression="none", journal_root=cfg.paths.temp_dir
+            cfg.paths.backup_dir, machine,
+            retention_days=cfg.backup.retention_days,
+            max_backups=cfg.backup.max_backups,
+            compression="none", journal_root=cfg.paths.temp_dir,
         )
         journal = journals.begin(
             family, plan_id, action_count, backup_snapshot=manager.snapshot_name,
@@ -1655,7 +1660,11 @@ def _own_catalogue_backup(cfg: AppConfig, config_path: Path, database: str | Non
         if not info.backup_snapshot or not info.backup_snapshot_present:
             return None
         copy = cfg.paths.backup_dir / info.backup_snapshot / Path(database)
-        row = read_snapshot_backfill_row(copy) if copy.is_file() else None
+        row = (
+            read_snapshot_backfill_row(copy, cfg.paths.temp_dir / "backfill-read")
+            if copy.is_file()
+            else None
+        )
         return (info.backup_snapshot, row) if row is not None else None
     return None
 
@@ -2168,8 +2177,12 @@ def _write_codex_catalogue(
     relative = database.relative_to(local_dir).as_posix()
     with OperationLock(cfg.paths.temp_dir, state_root=local_dir, machine_id=machine, family=family):
         journals = JournalStore(cfg.paths.temp_dir)
+        # Retention follows [backup], as for every other family (CS-431).
         manager = BackupManager(
-            cfg.paths.backup_dir, machine, compression="none", journal_root=cfg.paths.temp_dir
+            cfg.paths.backup_dir, machine,
+            retention_days=cfg.backup.retention_days,
+            max_backups=cfg.backup.max_backups,
+            compression="none", journal_root=cfg.paths.temp_dir,
         )
         journal = journals.begin(
             family, plan_id, action_count, backup_snapshot=manager.snapshot_name,
@@ -2550,6 +2563,10 @@ def apply_session_transfer(
     unproven layout or a SQLite-held binding does not, because neither is a
     decision anyone can take today, and treating them as one would mean the
     cloud mirror can never be rebuilt while a single such session exists.
+
+    Returns the number of branches written. The removal of a file a branch
+    left behind (an archive move, a `.zst` continued as plain JSONL) is part
+    of writing that branch, not one more chat.
     """
     cfg = load_config(config_path)
     _require_mutation_compatible_config(cfg)
@@ -2625,7 +2642,7 @@ def apply_session_transfer(
             backup_before_overwrite=True,
             fail_on_unknown=True,
         ).execute(copies, dry_run=True)
-        return copies.action_count
+        return _branches_written(copies)
 
     machine = cfg.identity.machine_id or platform.node()
     with OperationLock(cfg.paths.temp_dir, state_root=local_dir, machine_id=machine, family="sessions"):
@@ -2653,6 +2670,8 @@ def apply_session_transfer(
             pre_commit_check=pre_commit,
             before_replace_check=lambda: gate.require(OperationKind.SESSION_APPLY, final=True),
             after_backup=after_backup,
+            # Staging writes siblings into .codex: re-check first (CS-460).
+            before_stage_check=lambda: gate.require(OperationKind.SESSION_APPLY),
             progress=progress,
         )
         try:
@@ -2672,7 +2691,14 @@ def apply_session_transfer(
             except Exception:
                 LOG.exception("Could not persist terminal session transfer journal state")
             raise
-    return copies.action_count
+    return _branches_written(copies)
+
+
+def _branches_written(copies: SyncPlan) -> int:
+    # A session plan deletes only a file its own branch replaces, so every
+    # deletion belongs to a copy already counted (laptop, 2026-10-23: one chat
+    # continued from `.zst` was reported as two).
+    return len(copies.to_local) + len(copies.to_cloud)
 
 
 def _rebuild_transfer_plan(
@@ -3070,8 +3096,16 @@ def run_sync(
                 local_idx, cloud_idx, ctx.config.state.data_version,
                 previous=previous, skipped=ctx.plan.skipped,
             )
-            save_manifest(manifest, ctx.config.state.manifest_file)
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
+            # Saved only after COMMITTED (CS-440): a rollback of an unfinished
+            # run restores the files, not the manifest, and a baseline naming
+            # the rolled-back content would push old files over new ones. A
+            # stale baseline is safe: equal sides are skipped and a one-sided
+            # change against it reads as a conflict.
+            try:
+                save_manifest(manifest, ctx.config.state.manifest_file)
+            except Exception:
+                LOG.exception("sync manifest not saved; the next run records it")
             mgr.prune()
         except Exception as exc:
             failure = (
@@ -3092,6 +3126,8 @@ def run_sync(
 HANDOFF_DELIVERY_POLL_SECONDS = 15.0
 #: How often the watcher asks whether Codex is running.
 HANDOFF_WATCH_POLL_SECONDS = 10.0
+# A retried load waits 1, 2, 4 ... polls, never more than this (CS-449).
+HANDOFF_WATCH_MAX_BACKOFF_POLLS = 60
 
 
 #: Blocked actions that leave a newer chat in the mirror and not in `.codex`.
@@ -3221,6 +3257,23 @@ def _handoff_machine(cfg: AppConfig) -> str:
         raise ConfigError(str(exc)) from exc
 
 
+def _handoff_owed_marker(cfg: AppConfig, machine: str) -> Path:
+    """Where this machine notes cloud writes it has not announced yet (CS-464).
+
+    In `temp_dir`, which is this machine's, named by machine all the same in
+    case a config shares it.
+    """
+    return cfg.paths.temp_dir / "handoff" / f"owed-{machine}"
+
+
+def _remember_handoff_owed(marker: Path) -> None:
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(files_now_utc() + "\n", encoding="utf-8")
+    except OSError:
+        LOG.exception("could not note the handoff still owed; the next sync that writes to the cloud makes it")
+
+
 def handoff_status(config_path: Path, *, check_delivery: bool = False) -> HandoffStatus:
     """Every machine's handoff as this machine sees it. Reads only.
 
@@ -3235,7 +3288,7 @@ def handoff_status(config_path: Path, *, check_delivery: bool = False) -> Handof
     deliveries: tuple[Delivery, ...] = ()
     if check_delivery and pending:
         current = Fingerprinter().files(cfg)
-        deliveries = tuple(delivery(record, current) for record in pending)
+        deliveries = tuple(delivery(record, current) for record in awaiting_delivery(pending))
     return HandoffStatus(
         machine=machine,
         root=root,
@@ -3260,11 +3313,15 @@ def _wait_for_delivery(
     sleep: Callable[[float], None],
     on_wait: Callable[[Sequence[Delivery]], None] | None,
 ) -> float:
-    """Return once every pending handoff is in the cloud copy; the seconds waited."""
+    """Return once every pending handoff is in the cloud copy; the seconds waited.
+
+    A handoff a later pending one already carries is not waited for (CS-438).
+    """
+    waiting = awaiting_delivery(pending)
     started = monotonic()
     while True:
         current = fingerprints.files(cfg)
-        late = [item for item in (delivery(record, current) for record in pending) if not item.delivered]
+        late = [item for item in (delivery(record, current) for record in waiting) if not item.delivered]
         waited = monotonic() - started
         if not late:
             return waited
@@ -3510,11 +3567,26 @@ def run_handoff(
         1 for item in plan.items if transfer_direction(item) == "mirror"
     )
     # A run that wrote nothing to the cloud hands nothing off: a new id would
-    # make every other machine wait for a "delivery" of what it already has.
-    handed_off = to_cloud > 0
+    # make every other machine wait for a "delivery" of what it already has --
+    # unless an earlier run wrote and could not announce it (CS-464).
+    owed = _handoff_owed_marker(cfg, machine)
+    handed_off = to_cloud > 0 or owed.is_file()
+    own_files: dict = {}
+    if handed_off:
+        try:
+            own_files = fingerprints.files(cfg, strict=True)
+        except HandoffError as exc:
+            # A fingerprint missing a file would let another machine count this
+            # handoff delivered without it: keep the previous id, and remember
+            # that what this run wrote is still to be announced (CS-464).
+            LOG.error("nothing handed off: %s; the next sync hands it off", exc)
+            handed_off = False
+            _remember_handoff_owed(owed)
     record = record_handoff(
-        root, machine, files=fingerprints.files(cfg), taken=pending, new_handoff=handed_off,
+        root, machine, files=own_files, taken=pending, new_handoff=handed_off,
     )
+    if handed_off:
+        owed.unlink(missing_ok=True)
     LOG.info(
         "handoff finished: %d file(s) and %d chat(s) written; took %s; %s",
         ctx.plan.action_count, session_actions,
@@ -3703,7 +3775,8 @@ def preview_full_sync(
         projects = None
     current = Fingerprinter().files(cfg) if pending else {}
     waiting = tuple(
-        item.machine for item in (delivery(record, current) for record in pending) if not item.delivered
+        item.machine for item in (delivery(record, current) for record in awaiting_delivery(pending))
+        if not item.delivered
     )
     return FullSyncPreview(machine, source, files, chats, projects, waiting)
 
@@ -3787,23 +3860,33 @@ def watch_handoff(
     # start a Codex that is open is the person's, not a sync's (D-029).
     act = handoff if handoff is not None else (lambda path: run_handoff(path, close_codex=False))
 
-    def attempt(closing: bool) -> None:
+    def attempt(closing: bool, retry: bool = False) -> bool:
+        """Run once; True when nothing is left to retry while Codex stays closed.
+
+        A retry that fails again only logs: the person was told the first time.
+        """
+        say = (lambda *a, **k: None) if retry else notify
         try:
             result = act(config_path)
         except HandoffNotDelivered as exc:
             LOG.warning("%s", exc)
             late = exc.deliveries[0]
-            notify("notify.not_delivered", machine=late.machine, arrived=late.arrived, total=late.total)
+            say("notify.not_delivered", machine=late.machine, arrived=late.arrived, total=late.total)
+            return False
         except SafetyPreconditionError:
             LOG.info("Codex is open; the handoff waits for it to close")
             if not closing:
-                notify("notify.codex_open")
+                say("notify.codex_open")
+            return False
         except ConflictError as exc:
+            # A conflict needs a person; retrying would only repeat it.
             LOG.warning("handoff stopped: %s", exc)
-            notify("notify.conflict")
+            say("notify.conflict")
+            return True
         except Exception as exc:  # noqa: BLE001 - the watcher outlives any one run
             LOG.exception("handoff failed")
-            notify("notify.failed", reason=type(exc).__name__)
+            say("notify.failed", reason=type(exc).__name__)
+            return False
         else:
             if result.taken and result.chats_not_loaded:
                 notify(
@@ -3813,6 +3896,7 @@ def watch_handoff(
                 notify("notify.loaded", machine=", ".join(result.taken))
             elif closing and result.handed_off:
                 notify("notify.handed_off")
+            return True
 
     def codex_started() -> None:
         try:
@@ -3827,22 +3911,56 @@ def watch_handoff(
             if record.state != STATE_WORKING:
                 notify("notify.not_taken", machine=record.machine, since=record.handed_off_at_utc)
 
-    last = sample()
+    def observe() -> ProcessState:
+        # A config the cloud client holds for a moment, or a half-saved edit,
+        # must not end the watcher: such a sample is simply undetermined (CS-435).
+        try:
+            return sample()
+        except Exception:  # noqa: BLE001 - the watcher outlives any one sample
+            LOG.warning("could not tell whether Codex is running; trying again", exc_info=True)
+            return ProcessState.UNKNOWN
+
+    # A load that has not happened or did not finish is retried while Codex
+    # stays closed, with a growing pause counted in polls (CS-449); waiting
+    # for Codex to be started and closed would ask for the very thing the
+    # "nothing loaded" notification forbids.
+    pending: bool | None = True  # None: nothing to retry; else the `closing` flag
+    wait_polls = 0
+    backoff = 1
+
+    def run(closing: bool, retry: bool) -> None:
+        nonlocal pending, wait_polls, backoff
+        if attempt(closing=closing, retry=retry):
+            pending, backoff = None, 1
+        else:
+            pending, wait_polls = closing, backoff
+            backoff = min(backoff * 2, HANDOFF_WATCH_MAX_BACKOFF_POLLS)
+
+    last: ProcessState | None = observe()
     if last is ProcessState.STOPPED:
-        attempt(closing=False)
+        run(closing=False, retry=False)
     elif last is ProcessState.RUNNING:
+        pending = None
         codex_started()
     else:
         last = None
     while not should_stop():
         sleep(poll_seconds)
-        state = sample()
+        state = observe()
         if state is ProcessState.UNKNOWN:
             continue
         if state is ProcessState.RUNNING and last is not ProcessState.RUNNING:
+            pending, backoff = None, 1
             codex_started()
         elif state is ProcessState.STOPPED and last is ProcessState.RUNNING:
-            attempt(closing=True)
+            run(closing=True, retry=False)
+        elif state is ProcessState.STOPPED and last is None:
+            # The first sure sample: the load the start would have made.
+            run(closing=False, retry=False)
+        elif state is ProcessState.STOPPED and pending is not None:
+            wait_polls -= 1
+            if wait_polls <= 0:
+                run(closing=pending, retry=True)
         last = state
 
 

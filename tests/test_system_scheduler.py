@@ -7,6 +7,7 @@ instead of a task registered on the developer's machine.
 """
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 import itertools
@@ -41,6 +42,8 @@ from codexsync.system_scheduler import (
 
 SANDBOX_ROOT = Path(__file__).resolve().parent.parent / "test-sandbox"
 USER_ID = "DESKTOP" + chr(92) + "krox"
+#: A program path with characters no OEM code page holds (CS-475).
+OUTSIDE_OEM_PROGRAM = "C:\\Users\\Zo\u00eb\u2713\\codexsync.exe"
 #: One task per account since CS-257; the shared name is only ever read.
 TASK_NAME = ss.task_name_for(USER_ID)
 LEGACY_TASK_NAME = ss.LEGACY_TASK_NAME
@@ -198,6 +201,14 @@ class JobCommandTests(SandboxCase):
     def test_frozen_build_is_its_own_cli(self) -> None:
         exe = self.root / "codexsync.exe"
         self.assertEqual(job_command(exe, frozen=True, platform="win32"), [str(exe)])
+
+    def test_frozen_console_build_prefers_the_windowed_sibling(self) -> None:
+        """CS-474: the console exe would flash (or hold) a console window."""
+        exe = self.root / "codexsync.exe"
+        windowed = self.root / "codexsync-gui.exe"
+        windowed.write_bytes(b"MZ")
+        self.assertEqual(job_command(exe, frozen=True, platform="win32"), [str(windowed)])
+        self.assertEqual(job_command(exe, frozen=True, platform="linux"), [str(exe)])
 
     def test_windows_prefers_pythonw_next_to_the_interpreter(self) -> None:
         bin_dir = self.root / "venv" / "Scripts"
@@ -491,12 +502,14 @@ class WindowsAdapterTests(WindowsRenderTests):
         adapter = self.adapter(run)
         self.assertTrue(adapter.remove())
         self.assertEqual(run.calls[0], ["schtasks.exe", "/Query", "/TN", TASK_NAME, "/XML"])
-        self.assertEqual(run.calls[1], ["schtasks.exe", "/Delete", "/TN", TASK_NAME, "/F"])
-        self.assertEqual(run.calls[2], ["schtasks.exe", "/Query", "/TN", LEGACY_TASK_NAME, "/XML"])
+        # CS-448: a running instance is ended before the task is deleted.
+        self.assertEqual(run.calls[1], ["schtasks.exe", "/End", "/TN", TASK_NAME])
+        self.assertEqual(run.calls[2], ["schtasks.exe", "/Delete", "/TN", TASK_NAME, "/F"])
+        self.assertEqual(run.calls[3], ["schtasks.exe", "/Query", "/TN", LEGACY_TASK_NAME, "/XML"])
         # Then the folder install created, and only if nothing else lives in it.
-        self.assertEqual(run.calls[3], adapter._remove_empty_folder_argv())
-        self.assertIn("-eq 0", run.calls[3][-1])
-        self.assertEqual(len(run.calls), 4)
+        self.assertEqual(run.calls[4], adapter._remove_empty_folder_argv())
+        self.assertIn("-eq 0", run.calls[4][-1])
+        self.assertEqual(len(run.calls), 5)
 
         run = FakeRun(lambda argv: FakeResult(1, "", "ОШИБКА: Не удается найти указанный файл."))
         self.assertFalse(self.adapter(run).remove())
@@ -522,6 +535,40 @@ class WindowsAdapterTests(WindowsRenderTests):
                 ["schtasks.exe", "/Query", "/TN", LEGACY_TASK_NAME, "/XML"],
             ],
         )
+
+    def _com_case(self, com_answers: bool) -> ss.SchedulerStatus:
+        program = OUTSIDE_OEM_PROGRAM
+        definition = self.definition(ScheduledJob("guardian_snapshot", 120, False, 0, 15))
+        stored = re.sub(
+            r"<Command>[^<]*</Command>", lambda _m: f"<Command>{program}</Command>",
+            ss.render_task_xml(definition, user_id="DESKTOP\\krox", now=self.NOW),
+        )
+        # What the OEM console pipe makes of it on a Russian Windows.
+        piped = stored.encode("cp866", errors="replace").decode("cp866")
+        self.assertNotIn(program, piped)
+
+        def responder(argv):
+            if argv[0] == "schtasks.exe":
+                return FakeResult(0, piped)
+            if "Schedule.Service" in argv[-1] and "GetTask" in argv[-1]:
+                if not com_answers:
+                    return FakeResult(1, "", "COM is locked down here")
+                return FakeResult(0, base64.b64encode(stored.encode("utf-8")).decode("ascii") + "\r\n")
+            return FakeResult(1, "", "not in this test")
+
+        status = self.adapter(FakeRun(responder)).status(definition)
+        self.assertTrue(status.installed)
+        return status
+
+    def test_status_reads_the_definition_through_com_not_the_oem_pipe(self) -> None:
+        """A path outside the OEM code page is read as stored (CS-475)."""
+        status = self._com_case(com_answers=True)
+        self.assertEqual(status.installed_command[0], OUTSIDE_OEM_PROGRAM)
+
+    def test_status_falls_back_to_schtasks_when_com_cannot_answer(self) -> None:
+        status = self._com_case(com_answers=False)
+        self.assertNotEqual(status.installed_command[0], OUTSIDE_OEM_PROGRAM)
+        self.assertTrue(status.installed_command[0].endswith("codexsync.exe"))
 
     def installed_responder(self, xml_text: str, info: FakeResult):
         def responder(argv):
@@ -823,6 +870,9 @@ class SystemdTests(SandboxCase):
         self.assertTrue(adapter.remove())
         self.assertEqual(run.calls, [
             ["systemctl", "--user", "disable", "--now", "codexsync-job.timer"],
+            ["systemctl", "--user", "stop", "codexsync-job.service"],  # CS-448
+            # A stopped oneshot is recorded as failed; the removed unit must not stay listed so.
+            ["systemctl", "--user", "reset-failed", "codexsync-job.service"],
             ["systemctl", "--user", "daemon-reload"],
         ])
         self.assertEqual(list(self.unit_dir().iterdir()), [])
@@ -1133,6 +1183,15 @@ class LoginSyncWindowsTests(WindowsRenderTests):
         self.assertNotIn(LEGACY_TASK_NAME, queried)
 
 
+    def test_removing_the_sign_in_task_never_ends_a_running_sync(self) -> None:
+        # CS-448 ends a running watcher; the sign-in sync ends by itself, and
+        # /End would kill it half way through a write.
+        run = FakeRun(lambda argv: FakeResult(0, "<Task/>") if "/Query" in argv else FakeResult(0))
+        self.assertTrue(self.login_adapter(run).remove())
+        self.assertEqual([argv for argv in run.calls if "/End" in argv], [])
+        self.assertTrue([argv for argv in run.calls if "/Delete" in argv])
+
+
 class LoginSyncLaunchdTests(SandboxCase):
     def adapter(self, run) -> LaunchdScheduler:
         return LaunchdScheduler(run=run, home=self.root / "home", uid=501,
@@ -1166,6 +1225,16 @@ class LoginSyncSystemdTests(SandboxCase):
         self.assertNotIn("OnActiveSec", timer, "counting from activation would sync at install time")
         self.assertIn(f"Unit={ss.SYSTEMD_LOGIN_SYNC_SERVICE}", timer)
         self.assertNotIn(ss.SYSTEMD_TIMER, files)
+
+
+    def test_removing_it_never_stops_a_running_sync(self) -> None:
+        run = FakeRun()
+        adapter = self.adapter(run)
+        adapter.unit_dir.mkdir(parents=True, exist_ok=True)
+        for name in (adapter.timer, adapter.service):
+            (adapter.unit_dir / name).write_text("[Unit]\n", encoding="utf-8")
+        self.assertTrue(adapter.remove())
+        self.assertNotIn(["systemctl", "--user", "stop", adapter.service], run.calls)
 
 
 def backup_job(interval: int | None = None, at_login: bool = True, delay: int = 0) -> ScheduledJob:
@@ -1250,6 +1319,14 @@ class StateBackupJobTests(SandboxCase):
         files = adapter.render(self.definition(backup_job(3600, True)))
         self.assertEqual(set(files), {ss.SYSTEMD_STATE_BACKUP_SERVICE, ss.SYSTEMD_STATE_BACKUP_TIMER})
         self.assertIn("TimeoutStartSec=1440min", files[ss.SYSTEMD_STATE_BACKUP_SERVICE].decode("utf-8"))
+
+    def test_sign_in_sync_has_no_os_time_limit(self) -> None:
+        """CS-436: a full sync waits for delivery first; an OS limit killed it mid-write."""
+        job = login_job()
+        root = ss.parse_task_xml(ss.render_task_xml(self.definition(job), user_id=USER_ID,
+                                                    now=datetime(2026, 9, 25, 9, 0)))
+        self.assertEqual(ss._child_text(root.find("Settings"), "ExecutionTimeLimit"), "PT0S")
+        self.assertEqual(ss._systemd_time_limit(job), "infinity")
 
     def test_systemd_arms_a_sign_in_copy_for_the_next_sign_in_not_for_now(self) -> None:
         """CS-282: OnActiveSec fires after the install's restart; OnStartupSec does not."""

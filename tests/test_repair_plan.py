@@ -235,6 +235,41 @@ class RepairPlanTests(unittest.TestCase):
         self.assertEqual(bindings, {"n1"}, "the nested project's chat stays where it is")
         self.assertIn("REMAP_SESSION_BOUND_ELSEWHERE", plan.codes)
 
+    def test_a_monorepo_package_keeps_its_own_chats(self) -> None:
+        """CS-437: a nested project without its own .git is not folded into the parent."""
+        old_root, new_root, rule, catalog = self._moved_case()
+        package = new_root / "packages" / "b"
+        package.mkdir(parents=True)
+        nested_old = old_root + os.sep + "packages" + os.sep + "b"
+        nested_chat = SessionDescriptor(
+            "thread-n", SessionState.ACTIVE, "sessions/n.jsonl", "c" * 64, 1, 1, cwd=nested_old,
+        )
+        catalog = SessionCatalog(list(catalog.descriptors) + [nested_chat], {})
+        plan = build_repair_plan(
+            catalog, self._two_project_state(old_root, nested_old),
+            source_machine="source", target_machine="target", rules=[rule], volatile=False,
+        )
+        bindings = {
+            a.project_id for a in plan.actions
+            if a.session_id == "thread-n"
+            and a.kind in {RepairActionKind.ADD_BINDING, RepairActionKind.KEEP_BINDING}
+        }
+        self.assertEqual(bindings, {"n1"})
+        remapped = {a.project_id for a in plan.actions if a.kind is RepairActionKind.REMAP_ROOT}
+        self.assertEqual(remapped, {"p1", "n1"})
+        self.assertNotIn("REMAP_CONTAINS_PROJECT", plan.codes)
+
+    def test_a_remap_leaving_a_nested_project_behind_is_refused(self) -> None:
+        """CS-437: a parent remap whose old root holds a project that stays is refused."""
+        old_root, new_root, rule, catalog = self._moved_case()
+        nested_old = old_root + os.sep + "packages" + os.sep + "b"
+        plan = build_repair_plan(
+            catalog, self._two_project_state(old_root, nested_old),
+            source_machine="source", target_machine="target", rules=[rule], volatile=False,
+        )
+        self.assertIn(RepairActionKind.REMAP_ROOT, {a.kind for a in plan.actions})
+        self.assertIn("REMAP_CONTAINS_PROJECT", plan.codes)
+
     def test_a_remap_does_not_take_a_chat_assigned_to_another_project(self) -> None:
         old_root, new_root, rule, catalog = self._moved_case()
         nested = new_root / "nested"

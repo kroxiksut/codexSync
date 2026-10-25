@@ -28,8 +28,12 @@ else {
 Push-Location $ProjectDir
 try {
     Add-Content -Path $LogFile -Value ("[{0}] Starting task mode={1}" -f (Get-Date -Format "s"), $Mode)
-    & $PythonExe @cmdArgs *>> $LogFile
+    # Under "Stop" the first stderr line of a native program is a terminating
+    # NativeCommandError that ends the run mid-write; take stderr as text.
+    $ErrorActionPreference = "Continue"
+    & $PythonExe @cmdArgs 2>&1 | ForEach-Object { "$_" } | Out-File -FilePath $LogFile -Append -Encoding utf8
     $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
     Add-Content -Path $LogFile -Value ("[{0}] Finished task exit_code={1}" -f (Get-Date -Format "s"), $exitCode)
     exit $exitCode
 }

@@ -167,6 +167,30 @@ class EnvelopeAndListingTests(_Store):
         self.assertEqual(self.store.load(stuck).failure, ABANDONED)
         self.assertEqual(self.store.non_terminal(), [])
 
+    def test_a_state_write_prunes_backups_by_the_configured_retention(self) -> None:
+        # CS-431: the envelope pruned at the 30-day default whatever [backup] said.
+        import dataclasses
+        import os
+        import time
+        self.cfg = dataclasses.replace(
+            self.cfg, backup=dataclasses.replace(self.cfg.backup, retention_days=0, max_backups=0)
+        )
+        old = self.cfg.paths.backup_dir / "machine-a-20250101T000000Z-0123456789ab"
+        old.mkdir(parents=True)
+        (old / "manifest.json").write_text("{}", encoding="utf-8")
+        stamp = time.time() - 400 * 24 * 60 * 60
+        os.utime(old, (stamp, stamp))
+        state_file = self.local / ".codex-global-state.json"
+        original = _state(self.root.as_posix())
+        state_file.write_bytes(original)
+        commit_global_state(
+            self.cfg, _StoppedGate(), OperationKind.CHAT_MOVE,
+            family="chats", plan_id="c" * 64, action_count=1, state_root=self.local,
+            source=state_file, original=original,
+            candidate=_state(self.root.as_posix(), order=["p-beta", "p-alpha"]),
+        )
+        self.assertTrue(old.is_dir())
+
     def test_listing_says_which_journal_closes_itself(self) -> None:
         own = self._stuck(JournalState.PREPARED, machine="machine-a", snapshot=OWN_SNAPSHOT)
         peer = self._stuck(JournalState.PREPARED, machine="krox-nout", snapshot=PEER_SNAPSHOT)

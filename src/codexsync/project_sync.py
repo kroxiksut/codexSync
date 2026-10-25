@@ -172,8 +172,17 @@ class Publication:
 
     @property
     def publication_id(self) -> str:
-        """Content id: equal for equal project lists, whoever wrote them when."""
-        return _digest(self.content)
+        """Content id: equal for equal project lists, whoever wrote them when.
+
+        A project counts by what the merge reads of it (id, name, roots):
+        Codex bumps `updatedAt` on its own, and hashing it made a peer's order
+        and pins win again on every such touch (CS-445).
+        """
+        content = self.content
+        content["projects"] = {
+            key: _identity_fields(entry) for key, entry in content["projects"].items()
+        }
+        return _digest(content)
 
     def to_json(self) -> dict[str, Any]:
         body = {
@@ -275,6 +284,13 @@ class ProjectMergePlan:
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _identity_fields(entry: Any) -> Any:
+    """The part of a project record the merge consumes (CS-445)."""
+    if not isinstance(entry, dict):
+        return entry
+    return {key: entry[key] for key in ("id", "name", "rootPaths") if key in entry}
 
 
 def _digest(body: Any) -> str:
@@ -554,6 +570,8 @@ def build_project_merge(
         if peer.machine not in pending_machines and peer.machine != machine
     ]
     translations: list[tuple[Publication, dict[str, str]]] = []
+    # Chats a person took out of every project here (CS-444).
+    apart_here = frozenset(_projectless(state))
     # Every root another machine publishes, with the ids it has there: a root
     # carried as it is names the same folder as that machine's project.
     published: dict[str, set[str]] = {}
@@ -610,6 +628,10 @@ def build_project_merge(
         for thread_id, peer_project in sorted(peer.bindings.items()):
             local_project = translate.get(peer_project)
             if local_project is None:
+                continue
+            # A chat kept out of every project, here or there, is never bound
+            # again by a peer's list (CS-444; CS-406 for the folder rule).
+            if thread_id in apart_here or thread_id in peer.projectless:
                 continue
             current = _legacy_binding(bindings.get(thread_id), reverse)
             if current == local_project:

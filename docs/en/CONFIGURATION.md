@@ -104,7 +104,7 @@ process_names = ["codex.exe", "codex", "codex-app-server"]
 grace_period_seconds = 2
 
 [process_detection.background_process_names]
-windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-command-runner"]
+windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-command-runner", "/OpenAI.Codex_*/app/ChatGPT.exe"]
 macos = ["ChatGPT.app/Contents/MacOS/", "codex-app-server", "codex-execve-wrapper", "codex-code-mode-host"]
 linux = ["/usr/lib/chatgpt/", "codex-app-server", "codex-linux-sandbox", "codex-execve-wrapper", "codex-code-mode-host"]
 ```
@@ -119,7 +119,12 @@ states, so it does not make detection stricter -- it makes the safety gate say
 Names are matched as whole process names, never as substrings. An entry
 containing `/` is a path marker matched against the process path: the macOS
 desktop build is called `ChatGPT`, and a bare `ChatGPT` would also match the
-ordinary ChatGPT app.
+ordinary ChatGPT app. On Windows the app is `ChatGPT.exe` from the
+`OpenAI.Codex_` package; a `*` in a marker stands for any run of characters,
+here the package version. The marker names that one program rather than the
+package folder, because the folder also holds the always-running sandbox
+service. Closing the Codex window leaves the app running in the tray, so
+codexSync reads Codex as running until you choose *Quit* from the tray icon.
 
 The keys `allow_terminate_if_running` and the other `terminate_*` keys are left
 from 0.1. codexSync never terminates Codex by force, and
@@ -204,17 +209,18 @@ codexsync -c config.toml automation run      # run the configured job once, now
   says — everything (settings, chats, projects) by default, or settings files
   only — and goes through the same checks as a manual sync: a conflict is
   decided by `conflict.policy` as in any run, and one the policy leaves open
-  stops it before any write (exit 2). If Codex is open it is refused (exit 3),
-  unless Codex may be closed for a sync (next point). The window shows the
-  task's last run and what its result meant.
+  stops it before any write (exit 2). If Codex is open it is refused (exit 3);
+  it never asks Codex to quit, even with `close_codex` on (next point), since
+  nobody is there to see a turn interrupted. The window shows the task's last
+  run and what its result meant.
 - **Closing Codex for a sync** (`[sync] close_codex = true`, the *Close Codex
   when a sync starts while it is open* checkbox on the Automation page; off by
-  default). Any sync that finds Codex — the ChatGPT app — open asks it to quit
+  default). A sync you start — *Synchronise* or `codexsync sync` — that finds Codex, the ChatGPT app, open asks it to quit
   first, the way Windows closes an app for an update (on Linux, with *Quit* in its tray menu, as you would), and waits up to a minute
   for it to be gone. It is never forced: if Codex declines or stays, nothing is
   written and the sync says why. A running agent turn is interrupted, so leave
   Codex idle; a Codex CLI running in a terminal is never closed; the handoff
-  watcher and dry runs never ask. Proven on Windows and on Linux (there through the tray icon's menu; without a tray icon the window is asked to close, which a signed-in Codex answers by hiding); on macOS it stays off until it has been seen to work on a Mac.
+  watcher, the sign-in task and dry runs never ask. Proven on Windows and on Linux (there through the tray icon's menu; without a tray icon the window is asked to close, which a signed-in Codex answers by hiding); on macOS it stays off until it has been seen to work on a Mac.
 - It is a user-level task — Task Scheduler on Windows, a LaunchAgent on macOS,
   `systemd --user` on Linux — never a service.
 - `automation run` exits like the job would: `0` on success or when another

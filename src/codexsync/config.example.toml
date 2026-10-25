@@ -178,6 +178,8 @@ terminate_timeout_seconds = 20
 # instead of its name: the macOS desktop build is called ChatGPT since
 # 2026-07-09 (bundle id com.openai.codex), and a bare "ChatGPT" would also
 # match the ordinary ChatGPT app, which has nothing to do with Codex.
+# On Windows the app is ChatGPT.exe from the OpenAI.Codex_ package; "*" in a
+# marker stands for any run of characters (here: the package version).
 # A name here must disappear when Codex closes. "codex-windows-sandbox-service"
 # is deliberately absent: on Windows it is the always-running service
 # CodexSandboxService.OpenAI.Codex, so listing it blocked every mutation.
@@ -185,6 +187,7 @@ windows = [
   "codex-windows-sandbox",
   "codex-windows-sandbox-setup",
   "codex-command-runner",
+  "/OpenAI.Codex_*/app/ChatGPT.exe",
 ]
 macos = [
   "ChatGPT.app/Contents/MacOS/",

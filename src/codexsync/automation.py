@@ -184,7 +184,7 @@ def automation_status(
         login_status = _scheduler(cfg, login_scheduler, slot=LOGIN_SYNC_SLOT).status(
             expected=login_definition
         )
-    except SchedulerError as exc:
+    except (SchedulerError, ValueError) as exc:  # CS-476: one slot, not the view
         login_error = str(exc)
     backup_definition = state_backup_definition(cfg, config_path)
     backup_status: SchedulerStatus | None = None
@@ -193,7 +193,7 @@ def automation_status(
         backup_status = _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT).status(
             expected=backup_definition
         )
-    except SchedulerError as exc:
+    except (SchedulerError, ValueError) as exc:
         backup_error = str(exc)
     watcher_definition = handoff_definition(cfg, config_path)
     watcher_status: SchedulerStatus | None = None
@@ -202,7 +202,7 @@ def automation_status(
         watcher_status = _scheduler(cfg, handoff_scheduler, slot=HANDOFF_SLOT).status(
             expected=watcher_definition
         )
-    except SchedulerError as exc:
+    except (SchedulerError, ValueError) as exc:
         watcher_error = str(exc)
     definition = job_definition(cfg, config_path)
     adapter = _scheduler(cfg, scheduler)
@@ -210,7 +210,7 @@ def automation_status(
     error: str | None = None
     try:
         status = adapter.status(expected=definition)
-    except SchedulerError as exc:
+    except (SchedulerError, ValueError) as exc:
         error = str(exc)
     settings = cfg.scheduler
     return AutomationView(

@@ -56,6 +56,7 @@ from .guardian_schema import (
     supports_root_remap,
     validate_global_state_references,
 )
+from .path_mapping import path_flavor
 from .repair_plan import _under
 from .fs_replace import replace_with_retry
 
@@ -1108,7 +1109,14 @@ def _cwd_under(cwd: str, old_root: str, norm_old: str) -> bool:
     so the two readings are united rather than one picked: ``_under`` alone
     misses ``C:/proj`` against ``C:\\proj\\sub``.
     """
-    return _under(cwd, old_root) or (os.path.isabs(cwd) and _contains(norm_old, _norm(cwd)))
+    if _under(cwd, old_root):
+        return True
+    # On Windows before 3.13 abspath reads `/home/u/x` as `D:\home\u\x`,
+    # so only a path written the root's own way is normalised (CS-465).
+    flavor = path_flavor(cwd)
+    if flavor is None or flavor != path_flavor(old_root):
+        return False
+    return os.path.isabs(cwd) and _contains(norm_old, _norm(cwd))
 
 
 def _parse_state(payload: bytes) -> dict[str, Any] | None:

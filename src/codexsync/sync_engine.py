@@ -128,8 +128,10 @@ class SyncEngine:
             # Each entry names its side, so a rollback puts it back into the
             # root it came from (CS-293).
             to_local = {id(action) for action in plan.to_local}
+            backed_up: set[int] = set()
             for action, _ in staged:
                 if action.dst.exists():
+                    backed_up.add(id(action))
                     backup_path = self._backup_manager.backup_file(
                         action.dst, action.relative_path,
                         side="local" if id(action) in to_local else "cloud",
@@ -158,6 +160,13 @@ class SyncEngine:
             for action, staged_path in staged:
                 if self._before_replace_check is not None:
                     self._before_replace_check()
+                if id(action) not in backed_up and os.path.lexists(action.dst):
+                    # A cloud client delivered a file after the backup phase:
+                    # it has no backup, so overwriting it would lose it (CS-463).
+                    raise FailSafeError(
+                        f"{action.relative_path} appeared after the backup was taken; "
+                        "it was not overwritten; run the sync again"
+                    )
                 self._replace_staged(action, staged_path)
             for index, deletion in enumerate(deletions, start=1):
                 if self._before_replace_check is not None:

@@ -70,6 +70,9 @@ CATALOGUE_REBUILD_PENDING = "CATALOGUE_REBUILD_PENDING"
 CATALOGUE_REBUILDING = "CATALOGUE_REBUILDING"
 #: A rebuild is marked, and whether Codex is running could not be determined.
 CATALOGUE_REBUILD_UNDETERMINED = "CATALOGUE_REBUILD_UNDETERMINED"
+#: The catalogue has no rebuild-status row. `codex repair` settles only a
+#: `pending`/`running` row and never writes one, so this offers no fix (CS-473).
+CATALOGUE_STATUS_MISSING = "CATALOGUE_STATUS_MISSING"
 #: The catalogue exists and could not be read.
 CATALOGUE_UNREADABLE = "CATALOGUE_UNREADABLE"
 #: Chat files Codex's list does not lead to; `sessions catalogue` asks for a rebuild.
@@ -101,6 +104,7 @@ FINDING_CODES = (
     CATALOGUE_UNREADABLE,
     CATALOGUE_MISSES_CHATS,
     CATALOGUE_STATUS_UNKNOWN,
+    CATALOGUE_STATUS_MISSING,
     GLOBAL_STATE_MISSING,
     GLOBAL_STATE_INVALID,
     GLOBAL_STATE_UNRECOGNISED,
@@ -174,6 +178,8 @@ def diagnose_catalogue(
         if unnamed:
             return [Finding(CATALOGUE_MISSES_CHATS, Severity.NOTE, {"chats": unnamed}, command="sessions catalogue")]
         return []
+    if status is None:
+        return [Finding(CATALOGUE_STATUS_MISSING, Severity.NOTE)]
     if process is ProcessState.RUNNING:
         return [Finding(CATALOGUE_REBUILDING, Severity.NOTE, sizes)]
     if process is not ProcessState.STOPPED:

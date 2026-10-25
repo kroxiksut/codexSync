@@ -122,6 +122,12 @@ class RecordFormatCatalogTests(_Sandbox):
         self._write(self.local_dir, "s1.jsonl", _legacy("s1", turns))
         self.assertEqual(self._only(self.local_dir).last_record_at, "2026-03-11T12:09:00.000Z")
 
+    def test_the_latest_record_time_is_a_moment_not_the_longest_string(self) -> None:
+        # CS-466: as text "...:01Z" > "...:01.900Z", though it is earlier.
+        turns = [("2026-03-11T12:09:01.900Z", "later"), ("2026-03-11T12:09:01Z", "earlier")]
+        self._write(self.local_dir, "s1.jsonl", _legacy("s1", turns))
+        self.assertEqual(self._only(self.local_dir).last_record_at, "2026-03-11T12:09:01.900Z")
+
     def test_a_compressed_mirror_copy_is_read_through_its_container(self) -> None:
         self._write(self.cloud_dir, "s1.jsonl", _legacy("s1", TURNS), xz=True)
         self.assertEqual(self._only(self.cloud_dir).record_format, RECORD_FORMAT_LEGACY)

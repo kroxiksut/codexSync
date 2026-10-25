@@ -210,6 +210,22 @@ class StageTests(_Sandbox):
 
 
 class PublishTests(_Sandbox):
+    def test_only_e404_means_not_on_npm(self) -> None:
+        """CS-479: a network or auth error must stop the publish, not read as absent."""
+        def fake(code: int, out: str = "", err: str = ""):
+            return subprocess.CompletedProcess([], code, stdout=out, stderr=err)
+        with mock.patch.object(npm, "_npm", return_value="npm"):
+            with mock.patch.object(npm.subprocess, "run", return_value=fake(1, "", "npm error code E404")):
+                self.assertFalse(npm._published("codexsync@1.0.0"))
+                self.assertIsNone(npm._latest())
+            with mock.patch.object(npm.subprocess, "run", return_value=fake(0, '"1.0.0"')):
+                self.assertTrue(npm._published("codexsync@1.0.0"))
+            with mock.patch.object(npm.subprocess, "run", return_value=fake(1, "", "npm error code ETIMEDOUT")):
+                with self.assertRaises(SystemExit):
+                    npm._published("codexsync@1.0.0")
+                with self.assertRaises(SystemExit):
+                    npm._latest()
+
     def test_platforms_go_first_and_a_published_version_is_skipped(self) -> None:
         version = "0.2.0-alpha.2"
         for key in npm.PLATFORMS:

@@ -459,14 +459,21 @@ class ConfigFormScreen(Screen):
             return Outcome(value=rendered.value)
 
         host = self.host
-        page = self
+        page_id = self.page
+
+        def confirm_on_live_screen(model: ConfigFormModel, text: str) -> None:
+            # A rebuild (language, theme, config) may have replaced this screen
+            # since the check started: continue on the one shown now (CS-453).
+            if host.model(page_id) is not model:
+                return
+            host.screen(page_id)._confirm_save(host, base, text, then_apply)
 
         def apply(model: ConfigFormModel, outcome: Outcome) -> None:
             model.action_busy = False
             model.result = outcome
             if outcome.ok and save:
                 # Confirmation happens on the UI thread, after the text is proven valid.
-                QTimer.singleShot(0, lambda: page._confirm_save(host, base, outcome.value, then_apply))
+                QTimer.singleShot(0, lambda: confirm_on_live_screen(model, outcome.value))
 
         self.read(go, apply)
 

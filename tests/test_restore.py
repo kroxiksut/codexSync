@@ -360,5 +360,82 @@ class BackupSnapshotListingTests(unittest.TestCase):
         self.assertFalse(self.temp_root.exists())
 
 
+class _CodexStartsAfterFirstCheckGate:
+    """Passes the opening check, then reports Codex started (CS-460)."""
+
+    def __init__(self) -> None:
+        self.plain_checks = 0
+
+    def require(self, _operation, *, final: bool = False):
+        if final:
+            return None
+        self.plain_checks += 1
+        if self.plain_checks > 1:
+            from codexsync.exceptions import SafetyPreconditionError
+
+            raise SafetyPreconditionError("Codex started")
+        return None
+
+
+class RestoreRechecksBeforeStagingTests(unittest.TestCase):
+    def test_restore_rechecks_the_gate_before_staging_into_the_target(self) -> None:
+        from codexsync.exceptions import SafetyPreconditionError
+
+        root = Path.cwd() / "test-sandbox" / f"restore-stage-{uuid.uuid4().hex}"
+        local_state = root / "local-state"
+        backup_root = root / "backups"
+        for folder in (local_state, root / "cloud", backup_root, root / ".tmp"):
+            folder.mkdir(parents=True, exist_ok=True)
+        snapshot = backup_root / "machine-a-20260101T000100Z"
+        (snapshot / "data").mkdir(parents=True)
+        (snapshot / "data" / "a.txt").write_text("new", encoding="utf-8")
+        config_path = root / "config.toml"
+        config_path.write_text(
+            textwrap.dedent(
+                f"""
+                [identity]
+                machine_id = "machine-a"
+
+                [sync]
+                mode = "cold"
+                direction = "bidirectional"
+                compare = "mtime"
+                delete_policy = "never"
+
+                [safety]
+                require_codex_stopped = false
+                fail_on_unknown = true
+
+                [paths]
+                workspace_root_dir = "{root.as_posix()}"
+                local_state_dir = "{local_state.as_posix()}"
+                cloud_root_dir = "{(root / 'cloud').as_posix()}"
+                backup_dir = "{backup_root.as_posix()}"
+                temp_dir = "{(root / '.tmp').as_posix()}"
+
+                [targets]
+                include_roots = ["data"]
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        try:
+            gate = _CodexStartsAfterFirstCheckGate()
+            with patch("codexsync.restore._make_safety_gate", return_value=gate):
+                with self.assertRaises(SafetyPreconditionError):
+                    restore_from_backup(
+                        config_path=config_path,
+                        snapshot_name=snapshot.name,
+                        target="local",
+                        dry_run=False,
+                        allow_legacy_snapshot=True,
+                    )
+            data = local_state / "data"
+            self.assertEqual(list(data.iterdir()) if data.exists() else [], [])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

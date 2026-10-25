@@ -128,6 +128,63 @@ class RecoveryTests(unittest.TestCase):
             run_sync(ctx, dry_run=False)
         self.assertEqual(self.cloud_file.read_text(encoding="utf-8"), "new")
 
+    def test_manifest_is_not_saved_when_the_commit_is_not_recorded(self) -> None:
+        # CS-440: a manifest saved in COMMITTING survived a rollback of the files.
+        from codexsync.config import load_config
+        from codexsync.mutation_journal import JournalStore
+
+        manifest_file = load_config(self.config_path).state.manifest_file
+        self.local_file.write_text("new", encoding="utf-8")
+        self.cloud_file.write_text("old", encoding="utf-8")
+        now_ns = time.time_ns()
+        os.utime(self.cloud_file, ns=(now_ns - 2_000_000_000, now_ns - 2_000_000_000))
+        os.utime(self.local_file, ns=(now_ns - 1_000_000_000, now_ns - 1_000_000_000))
+        real = JournalStore.transition
+
+        def transition(store, journal, state, **kwargs):
+            if state is JournalState.COMMITTED:
+                raise OSError("journal write refused")
+            return real(store, journal, state, **kwargs)
+
+        with patch("codexsync.app._make_safety_gate", return_value=_StoppedGate()):
+            ctx = build_context(self.config_path, enforce_safety=True)
+            # build_context writes an empty manifest on a first run; compare with that.
+            before = manifest_file.read_bytes() if manifest_file.exists() else None
+            with patch.object(JournalStore, "transition", transition):
+                with self.assertRaises(OSError):
+                    run_sync(ctx, dry_run=False)
+        after = manifest_file.read_bytes() if manifest_file.exists() else None
+        self.assertEqual(after, before)
+
+    def test_resume_waits_for_the_machine_lock(self) -> None:
+        # CS-461: resume closed the journal while another run held the lock.
+        import threading
+        from codexsync.config import load_config
+        from codexsync.operation_lock import OperationLock
+        from codexsync.state_locator import locate_local_state_dir
+
+        operation_id = self._interrupt_sync_during_commit()
+        cfg = load_config(self.config_path)
+        errors: list[BaseException] = []
+
+        def resume() -> None:
+            try:
+                with patch("codexsync.recovery._make_safety_gate", return_value=_StoppedGate()):
+                    resume_operation(self.config_path, operation_id, dry_run=False)
+            except BaseException as exc:  # noqa: BLE001 - reported below
+                errors.append(exc)
+
+        with OperationLock(
+            cfg.paths.temp_dir, state_root=locate_local_state_dir(cfg),
+            machine_id=cfg.identity.machine_id, family="sync",
+        ):
+            worker = threading.Thread(target=resume)
+            worker.start()
+            worker.join()
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], FailSafeError)
+        self.assertEqual(self.journals.load(operation_id).state, JournalState.RECOVERY_REQUIRED)
+
     def test_resume_dry_run_changes_nothing(self) -> None:
         operation_id = self._interrupt_sync_during_commit()
         with patch("codexsync.recovery._make_safety_gate", return_value=_StoppedGate()):

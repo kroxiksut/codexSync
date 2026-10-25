@@ -111,6 +111,14 @@ class ContainerNameTests(_Roots):
         for known in (NAME, NAME + ".xz", NAME + ".gz", "notes.txt", "." + NAME + ".br", NAME + ".br.tmp"):
             self.assertIsNone(unsupported_container(known), known)
 
+    def test_a_user_copy_beside_a_chat_is_not_a_container(self) -> None:
+        # CS-467: `x.jsonl.bak` is not a branch and must not block the chat.
+        for name in (NAME + ".bak", NAME + ".old", NAME + ".1"):
+            self.assertIsNone(unsupported_container(name), name)
+        self.put(self.local, f"{DAY}/{NAME}.bak", PACKED)
+        self.assertEqual(list(scan_sessions(self.local).descriptors), [])
+        self.assertFalse(held_in_any_container(self.local / DAY / NAME))
+
     def test_a_file_named_plain_is_held_when_only_its_compressed_copy_exists(self) -> None:
         self.put(self.local, f"{DAY}/{NAME}.br", PACKED)
         self.assertTrue(held_in_any_container(self.local / DAY / NAME))

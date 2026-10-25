@@ -369,6 +369,12 @@ IN_PLACE_DECOMPRESSED = "IN_PLACE_DECOMPRESSED"
 #: `thread_history_*.sqlite`; Codex keeps showing the stale projection and its
 #: byte offset no longer points into this file (CS-426, observed 2026-10-19).
 IN_PLACE_PROJECTED_REWRITE = "IN_PLACE_PROJECTED_REWRITE"
+#: The branches share a prefix only canonically (raw bytes differ), so a
+#: fast-forward rewrites those bytes and counts as a replacement (CS-443).
+CANONICAL_PREFIX_REWRITE = "CANONICAL_PREFIX_REWRITE"
+#: An earlier part of a paged chat runs past where a later page starts, on
+#: either side: two continuations of one ordinal, so the chain is blocked (CS-439).
+PAGE_OVERLAP = "PAGE_OVERLAP"
 #: That history store exists but could not be read, so whether a replacement
 #: would be shown is unknown.
 IN_PLACE_HISTORY_UNKNOWN = "IN_PLACE_HISTORY_UNKNOWN"
@@ -791,6 +797,23 @@ def build_transfer_plan(
         if not one_sided:
             codes.extend(item.codes)
 
+    overlapping = _page_overlaps(local_catalog, remote_catalog)
+    if overlapping:
+        blocked_keys = {
+            hashlib.sha256(key.encode("utf-8")).hexdigest()
+            for key in set(local_groups) | set(remote_groups)
+            if key.split("#", 1)[0] in overlapping
+        }
+        items = [
+            replace(
+                item, action=TransferAction.BLOCKED_INVALID_BRANCH, target_relative_path=None,
+                codes=tuple(dict.fromkeys((*item.codes, PAGE_OVERLAP))),
+            )
+            if item.session_hash in blocked_keys else item
+            for item in items
+        ]
+        codes.append(PAGE_OVERLAP)
+
     scope_matches_nothing = False
     if scope is not None:
         scope = set(scope)
@@ -987,6 +1010,11 @@ def _decide(
         )
 
     def write(action: TransferAction, **kwargs) -> TransferItem:
+        if comparison.canonical_only_matches > 0:
+            # The shared prefix agrees only canonically: the write changes its
+            # bytes, so it is a rewrite, not an append (CS-443). Being a code,
+            # it is in the plan id, and absent (ids unchanged) when zero.
+            kwargs["extra"] = kwargs.get("extra", ()) + (CANONICAL_PREFIX_REWRITE,)
         return _gate_write(
             make, action, session_id, local, remote,
             placements=placements, layout_id=layout_id, mirror_codec=mirror_codec,
@@ -1211,7 +1239,7 @@ def _gate_write(
                 )
         else:
             refusal = _in_place_refusal(
-                placements, session_id, local, source, moving=True, chain=chain, replacing=conflict is not None,
+                placements, session_id, local, source, moving=True, chain=chain, replacing=conflict is not None or CANONICAL_PREFIX_REWRITE in extra,
             )
             if refusal is not None:
                 return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra + refusal)
@@ -1240,7 +1268,7 @@ def _gate_write(
             # experiment is for (CS-330b).
             return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra)
         refusal = _in_place_refusal(
-            placements, session_id, local, source, chain=chain, replacing=conflict is not None,
+            placements, session_id, local, source, chain=chain, replacing=conflict is not None or CANONICAL_PREFIX_REWRITE in extra,
         )
         if refusal is not None:
             return make(TransferAction.BLOCKED_UNPROVEN_LAYOUT, conflict=conflict, extra=extra + refusal)
@@ -1349,7 +1377,8 @@ def _in_place_refusal(
     if replacing:
         if placements.history is PlacementStatus.INDETERMINATE:
             return (IN_PLACE_HISTORY_UNKNOWN,)
-        if session_id in placements.projected or chain & placements.projected:
+        # `projected` holds thread ids, and every part of a chain is one thread (CS-469).
+        if session_id in placements.projected:
             return (IN_PLACE_PROJECTED_REWRITE,)
     return None
 
@@ -1621,6 +1650,50 @@ def descriptors_by_session_hash(catalog: SessionCatalog) -> dict[str, SessionDes
         hashlib.sha256(key.encode("utf-8")).hexdigest(): descriptor
         for key, descriptor in _by_branch_key(catalog).items()
     }
+
+
+def _page_overlaps(local_catalog: SessionCatalog, remote_catalog: SessionCatalog) -> set[str]:
+    """Session ids continued past a page start on the other side (CS-439).
+
+    A page starting at N forks the history at N, and Codex keeps the tail of
+    the earlier file past N: on 2026-10-23 all three paged chats here had one
+    (6, 7 and 15 records -- an aborted or compacted turn), identical on both
+    sides. So a tail is not a divergence. One is: a page here at N while the
+    other side's copy of the earlier part goes further past N than this side's
+    -- that machine continued in the earlier file, and applying each part on
+    its own would leave two continuations of N side by side. The whole chain
+    is blocked instead of merged. A side without a readable copy of the
+    earlier part proves nothing either way.
+    """
+    sides: tuple[dict[str, list[SessionDescriptor]], dict[str, list[SessionDescriptor]]] = ({}, {})
+    for parts, catalog in zip(sides, (local_catalog, remote_catalog)):
+        for descriptor in catalog.descriptors:
+            if descriptor.session_id:
+                parts.setdefault(descriptor.session_id, []).append(descriptor)
+    overlapping: set[str] = set()
+    for session_id in set(sides[0]) | set(sides[1]):
+        for here, there in ((sides[0], sides[1]), (sides[1], sides[0])):
+            mine = here.get(session_id, [])
+            theirs = there.get(session_id, [])
+            for page in mine:
+                if page.page is None:
+                    continue
+                start = page.page_start
+                before_here = _part_before(mine, start)
+                before_there = _part_before(theirs, start)
+                if before_here is None or before_there is None:
+                    continue
+                if before_here.max_ordinal is None or before_there.max_ordinal is None:
+                    continue
+                if before_there.max_ordinal >= start and before_there.max_ordinal > before_here.max_ordinal:
+                    overlapping.add(session_id)
+    return overlapping
+
+
+def _part_before(parts: list[SessionDescriptor], start: int) -> SessionDescriptor | None:
+    """The part a page starting at ``start`` continues: the latest one before it."""
+    earlier = [part for part in parts if part.page_start < start]
+    return max(earlier, key=lambda part: part.page_start) if earlier else None
 
 
 def _groups_by_branch(catalog: SessionCatalog) -> dict[str, tuple[SessionDescriptor, ...]]:

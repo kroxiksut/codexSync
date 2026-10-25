@@ -99,3 +99,29 @@ class BackgroundMarkerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConsoleToolTimeoutTests(unittest.TestCase):
+    """CS-471: a hung listing fails the sample instead of hanging the gate."""
+
+    def test_a_timeout_is_passed_and_expiry_raises(self) -> None:
+        from codexsync import process_detector
+
+        def hang(argv, **kwargs):
+            self.assertEqual(kwargs["timeout"], process_detector.CONSOLE_TOOL_TIMEOUT_SECONDS)
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        with patch("codexsync.process_detector.subprocess.run", side_effect=hang):
+            with self.assertRaises(RuntimeError):
+                _run_console_tool(["powershell"], encoding="utf-8")
+
+    def test_a_hung_cim_listing_fails_the_sample(self) -> None:
+        from codexsync import process_detector
+
+        def hang(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, 30)
+
+        detector = process_detector.CodexProcessDetector(["codex.exe"])
+        with patch("codexsync.process_detector.subprocess.run", side_effect=hang):
+            with self.assertRaises(RuntimeError):
+                detector._list_windows_cim()

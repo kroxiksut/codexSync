@@ -234,6 +234,11 @@ process check.
   refuses. A chat under the old root that already belongs to *another* project
   (a nested project, or one you moved it to) is not taken over: the plan reports
   `REMAP_SESSION_BOUND_ELSEWHERE` and refuses until you decide where it belongs.
+- **A project inside another project's folder** (a package of a monorepo with no
+  `.git` of its own) keeps its chats: a chat goes to the deepest project whose
+  folder holds it. A remap that would move the outer project while the inner one
+  stays at the old folder is reported as `REMAP_CONTAINS_PROJECT`, and the apply
+  refuses until the inner project moves too.
 - **A chat whose folder is no project here** is listed as `SKIP_NO_PROJECT` and
   left alone. The desktop build's project entries carry fields codexSync does not
   invent, so it never creates a project there: create it in Codex and scan again.

@@ -38,8 +38,9 @@ import json
 import logging
 import os
 from pathlib import Path
+import time
 import uuid
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 from .filters import PathFilter
 from .guardian_models import normalize_machine_id
@@ -333,10 +334,15 @@ class Fingerprinter:
     not moved since the last look is not read again.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, sleep: Callable[[float], None] | None = None) -> None:
         self._cache: dict[str, tuple[int, int, str]] = {}
+        self._sleep = sleep
 
-    def files(self, cfg: AppConfig) -> dict[str, FileMark]:
+    def files(self, cfg: AppConfig, *, strict: bool = False) -> dict[str, FileMark]:
+        """``strict`` is for this machine's own handoff: a file that cannot be
+        read is retried briefly and then raises ``HandoffError`` -- skipping it
+        would let another machine count the handoff delivered without it (CS-464).
+        """
         cloud = cfg.paths.cloud_root_dir
         roots = list(dict.fromkeys([*cfg.targets.include_roots, *_SEMANTIC_ROOTS]))
         path_filter = PathFilter([*cfg.filters.exclude_globs, *_STAGING_GLOBS])
@@ -350,14 +356,31 @@ class Fingerprinter:
                 digest = cached[2]
             else:
                 try:
-                    digest = _sha256(meta.abs_path)
-                except OSError:
+                    digest = self._hash(meta.abs_path, strict)
+                except OSError as exc:
+                    if strict:
+                        raise HandoffError(f"could not read {relative} for the handoff: {exc}") from exc
                     # Being written by the cloud client right now: absent for
                     # this look, which is the conservative reading.
                     continue
                 self._cache[relative] = (meta.size, meta.mtime_ns, digest)
             marks[path_key(relative)] = FileMark(meta.size, digest)
         return marks
+
+    def _hash(self, path: Path, strict: bool) -> str:
+        if not strict:
+            return _sha256(path)
+        sleep = self._sleep if self._sleep is not None else time.sleep
+        for pause in STRICT_READ_PAUSES:
+            try:
+                return _sha256(path)
+            except OSError:
+                sleep(pause)
+        return _sha256(path)
+
+
+#: Pauses before re-reading a file a cloud client holds for a moment.
+STRICT_READ_PAUSES = (0.2, 0.5, 1.0)
 
 
 def _sha256(path: Path) -> str:
@@ -366,6 +389,32 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def superseded_by(record: HandoffRecord, pending: Iterable[HandoffRecord]) -> HandoffRecord | None:
+    """A later pending handoff that already carries ``record``'s work, or None.
+
+    Machine B took A's handoff (B's ``accepted`` names A's id) and then
+    handed off itself; every file A named that B's fingerprint names too is
+    B's to deliver, and a file B changed can never again match A's hash.
+    Waiting for A would then wait forever (CS-438). Only a fingerprint that
+    names every path A's did counts, so nothing A handed off goes unwaited.
+    """
+    for other in pending:
+        if other.machine == record.machine or not other.handoff_id:
+            continue
+        if other.accepted.get(record.machine) == record.handoff_id and set(record.files) <= set(other.files):
+            return other
+    return None
+
+
+def awaiting_delivery(pending: Sequence[HandoffRecord]) -> list[HandoffRecord]:
+    """The pending handoffs whose own fingerprint must be in the cloud copy.
+
+    A superseded one is still taken (the caller marks every pending record
+    accepted); only the wait for its fingerprint is dropped.
+    """
+    return [record for record in pending if superseded_by(record, pending) is None]
 
 
 def delivery(record: HandoffRecord, current: dict[str, FileMark]) -> Delivery:
@@ -395,9 +444,11 @@ __all__ = [
     "HandoffRecord",
     "STATE_HANDED_OFF",
     "STATE_WORKING",
+    "awaiting_delivery",
     "delivery",
     "machine_key",
     "mark_working",
+    "superseded_by",
     "now_utc",
     "path_key",
     "read_board",

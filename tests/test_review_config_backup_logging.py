@@ -265,5 +265,25 @@ class MigrationClampTests(unittest.TestCase):
         self.assertEqual(tomllib.loads(migrated)["scheduler"]["interval_seconds"], MAX_SCHEDULER_INTERVAL_SECONDS)
 
 
+class BackupSamePathTwiceTests(unittest.TestCase):
+    """CS-454: a second copy of one path was stored renamed, which the
+    manifest does not name, so the snapshot failed verification."""
+
+    def test_a_second_copy_of_one_path_is_refused(self) -> None:
+        from codexsync.exceptions import FailSafeError
+
+        root = Path.cwd() / "test-sandbox" / f"backup-twice-{uuid.uuid4().hex}"
+        root.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, root, True)
+        source = root / "a.txt"
+        source.write_text("x", encoding="utf-8")
+        for compression in ("none", "zip"):
+            with self.subTest(compression=compression):
+                manager = BackupManager(root / f"backups-{compression}", "machine-a", compression=compression)
+                manager.backup_file(source, "data/a.txt", side="local")
+                with self.assertRaises(FailSafeError):
+                    manager.backup_file(source, "data/a.txt", side="cloud")
+
+
 if __name__ == "__main__":
     unittest.main()

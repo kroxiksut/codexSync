@@ -409,8 +409,7 @@ class _BusctlTray(TrayMenus):  # pragma: no cover - needs a session bus
             return []  # no tray host on this desktop
         found = []
         for item in items or []:
-            name, _, path = str(item).partition("@")
-            path = path or "/StatusNotifierItem"
+            name, path = _split_tray_item(str(item))
             try:
                 pid = int(self._busctl(
                     "call", "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
@@ -676,3 +675,20 @@ def _restart_manager_shutdown(roots: Sequence[WindowsProcess]) -> int:  # pragma
         return rstrtmgr.RmShutdown(session, 0, None)
     finally:
         rstrtmgr.RmEndSession(session)
+
+
+def _split_tray_item(item: str) -> tuple[str, str]:
+    """Bus name and object path of a registered StatusNotifierItem.
+
+    GNOME's AppIndicator registers ``:1.61@/org/ayatana/...``; KDE registers
+    ``:1.61/StatusNotifierItem`` (CS-472), where the path starts at the first
+    ``/``. A bare bus name means the default path.
+    """
+    if "@" in item:
+        name, _, path = item.partition("@")
+    elif "/" in item:
+        cut = item.index("/")
+        name, path = item[:cut], item[cut:]
+    else:
+        name, path = item, ""
+    return name, path or "/StatusNotifierItem"

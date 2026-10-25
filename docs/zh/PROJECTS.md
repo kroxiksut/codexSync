@@ -183,6 +183,9 @@ codexsync -c config.toml repair-projects apply --plan repair-plan.json --confirm
   如果还有这样的对话没被覆盖到，计划会报告 `REMAP_ORPHANS_SESSIONS`，并且拒绝执行。
   旧根目录之下已经属于*另一个*项目的对话（嵌套项目，或是你把它移过去的项目）不会被抢走：
   计划会报告 `REMAP_SESSION_BOUND_ELSEWHERE`，在你决定它的归属之前拒绝执行。
+- **位于另一个项目文件夹内的项目**（没有自己 `.git` 的 monorepo 子包）保留自己的对话：
+  对话归属于包含它的最深一层项目。如果重新指定根目录会把外层项目移走、而内层项目仍留在旧
+  文件夹，计划会报告 `REMAP_CONTAINS_PROJECT`，在内层项目也搬走之前拒绝执行。
 - **文件夹在本机不属于任何项目的对话**会列为 `SKIP_NO_PROJECT`，保持原样。桌面版的项目
   条目带有 codexSync 不会凭空编造的字段，所以它从不在那里创建项目：请在 Codex 中创建
   项目后重新扫描。这样的对话不再阻塞计划的其余部分。

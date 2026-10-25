@@ -192,6 +192,40 @@ class HandoffRecordTests(_Workspace):
         ))
         self.assertEqual(read_board(self.handoff_root).pending("laptop"), [])
 
+    def test_a_handoff_a_later_one_carries_is_not_waited_for_on_a_third_machine(self) -> None:
+        from codexsync.handoff import awaiting_delivery, delivery
+
+        # A hands off config.toml = h1; B takes it, edits it to h2, hands off (CS-438).
+        a = HandoffRecord("a", STATE_HANDED_OFF, "t", "a1", files={"k": FileMark(1, "h1"), "j": FileMark(1, "x")})
+        b = HandoffRecord(
+            "b", STATE_HANDED_OFF, "t", "b1", accepted={"a": "a1"},
+            files={"k": FileMark(1, "h2"), "j": FileMark(1, "x")},
+        )
+        current = {"k": FileMark(1, "h2"), "j": FileMark(1, "x")}
+        self.assertFalse(delivery(a, current).delivered, "A's own fingerprint can never match again")
+        self.assertEqual(awaiting_delivery([a, b]), [b])
+        self.assertTrue(all(delivery(record, current).delivered for record in awaiting_delivery([a, b])))
+        # B took an older handoff of A's: A's latest is still waited for.
+        older = HandoffRecord("b", STATE_HANDED_OFF, "t", "b1", accepted={"a": "a0"}, files=dict(b.files))
+        self.assertEqual(awaiting_delivery([a, older]), [a, older])
+        # B's fingerprint does not name a file A handed off: still waited for.
+        partial = HandoffRecord("b", STATE_HANDED_OFF, "t", "b1", accepted={"a": "a1"}, files={"k": FileMark(1, "h2")})
+        self.assertEqual(awaiting_delivery([a, partial]), [a, partial])
+
+    def test_the_wait_returns_when_only_a_superseded_handoff_differs(self) -> None:
+        from codexsync.app import _wait_for_delivery
+
+        a = HandoffRecord("a", STATE_HANDED_OFF, "t", "a1", files={"k": FileMark(1, "h1")})
+        b = HandoffRecord("b", STATE_HANDED_OFF, "t", "b1", accepted={"a": "a1"}, files={"k": FileMark(1, "h2")})
+        prints = mock.Mock()
+        prints.files.return_value = {"k": FileMark(1, "h2")}
+        clock = iter([0.0, 0.0])
+        waited = _wait_for_delivery(
+            None, [a, b], prints, wait_seconds=60.0, poll_seconds=1.0,
+            monotonic=lambda: next(clock), sleep=lambda seconds: self.fail("must not wait"), on_wait=None,
+        )
+        self.assertEqual(waited, 0.0)
+
     def test_a_run_that_handed_nothing_off_keeps_the_previous_handoff(self) -> None:
         first = record_handoff(self.handoff_root, "laptop", files={"k": FileMark(1, "a")}, taken=())
         again = record_handoff(self.handoff_root, "laptop", files={"k": FileMark(2, "b")}, taken=(), new_handoff=False)
@@ -225,6 +259,32 @@ class DeliveryTests(_Workspace):
         (self.cloud / "skills" / "a.md").unlink()
         self.assertEqual(delivery(record, fingerprints.files(cfg)).missing, 1)
 
+    def test_this_machines_own_fingerprint_never_skips_an_unreadable_file(self) -> None:
+        from codexsync import handoff as handoff_module
+        from codexsync.handoff import HandoffError
+
+        config, _ = self.machine("laptop")
+        cfg = load_config(config)
+        self.write(self.cloud / "skills" / "a.md", "one")
+        real = handoff_module._sha256
+        failures = [2]
+
+        def flaky(path):
+            if failures[0] > 0:
+                failures[0] -= 1
+                raise PermissionError(32, "held by the cloud client")
+            return real(path)
+
+        pauses: list[float] = []
+        with mock.patch.object(handoff_module, "_sha256", flaky):
+            marks = Fingerprinter(sleep=pauses.append).files(cfg, strict=True)
+        self.assertEqual(len(marks), 1, "a brief lock is waited out")
+        self.assertEqual(len(pauses), 2)
+        with mock.patch.object(handoff_module, "_sha256", side_effect=PermissionError(32, "held")):
+            with self.assertRaises(HandoffError):
+                Fingerprinter(sleep=lambda seconds: None).files(cfg, strict=True)
+            self.assertEqual(Fingerprinter().files(cfg), {}, "a look at others' handoffs stays lenient")
+
     def test_secrets_and_staging_files_are_never_fingerprinted(self) -> None:
         config, _ = self.machine("laptop")
         cfg = load_config(config)
@@ -241,6 +301,34 @@ class DeliveryTests(_Workspace):
 
 
 class RunHandoffTests(_Workspace):
+    def test_an_unreadable_file_keeps_the_previous_handoff_id(self) -> None:
+        from codexsync.handoff import HandoffError
+
+        desktop, desktop_codex = self.machine("desktop")
+        self.write(desktop_codex / "skills" / "tool.md", "one")
+        first = run_handoff(desktop)
+        self.write(desktop_codex / "skills" / "tool.md", "two")
+        real = Fingerprinter.files
+
+        def files(self_, cfg, *, strict=False):
+            if strict:
+                raise HandoffError("could not read skills/tool.md")
+            return real(self_, cfg)
+
+        with mock.patch.object(Fingerprinter, "files", files), self.assertLogs("codexsync.app", level="ERROR"):
+            second = run_handoff(desktop)
+        self.assertFalse(second.handed_off)
+        self.assertEqual(second.record.handoff_id, first.record.handoff_id, "CS-464: no id without a full fingerprint")
+
+        # The next run writes nothing to the cloud, but "two" is there and was
+        # never announced: it hands it off now, once.
+        third = run_handoff(desktop)
+        self.assertTrue(third.handed_off, "the handoff owed by the failed run is made")
+        self.assertNotEqual(third.record.handoff_id, first.record.handoff_id)
+        fourth = run_handoff(desktop)
+        self.assertFalse(fourth.handed_off, "and only once")
+        self.assertEqual(fourth.record.handoff_id, third.record.handoff_id)
+
     def test_one_machine_hands_off_and_the_next_loads_it(self) -> None:
         desktop, desktop_codex = self.machine("desktop")
         laptop, laptop_codex = self.machine("laptop")
@@ -756,8 +844,68 @@ class WatchTests(_Workspace):
     def test_an_undetermined_state_is_neither_a_start_nor_a_close(self) -> None:
         calls, _ = self._watch([ProcessState.RUNNING, ProcessState.UNKNOWN, ProcessState.UNKNOWN])
         self.assertEqual(calls, [])
-        calls, _ = self._watch([ProcessState.UNKNOWN, ProcessState.STOPPED])
-        self.assertEqual(calls, [], "a close is only a close after a start that was seen")
+        calls, notes = self._watch([ProcessState.UNKNOWN, ProcessState.STOPPED])
+        # Not a close (nothing says "handed off"), but the start's load, late (CS-449).
+        self.assertEqual(calls, ["handoff"])
+        self.assertNotIn("notify.handed_off", [key for key, _ in notes])
+
+    def test_a_sample_that_fails_does_not_end_the_watcher(self) -> None:
+        config, _ = self.machine("laptop")
+        samples = iter([ProcessState.RUNNING, OSError("config.toml is locked"), ProcessState.STOPPED])
+        calls: list[str] = []
+        remaining = [2]
+
+        def probe():
+            value = next(samples)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        def stop() -> bool:
+            remaining[0] -= 1
+            return remaining[0] < 0
+
+        with self.assertLogs("codexsync.app", level="WARNING"):
+            watch_handoff(
+                config, probe=probe,
+                handoff=lambda path: calls.append("handoff") or HandoffResult(
+                    "laptop", (), 0, 0, True, HandoffRecord("laptop", STATE_HANDED_OFF, "t"),
+                ),
+                notifier=lambda key, **values: None, sleep=lambda seconds: None, should_stop=stop,
+            )
+        self.assertEqual(calls, ["handoff"], "the close after the failed sample still hands off")
+
+    def test_an_undelivered_load_is_retried_while_codex_stays_closed(self) -> None:
+        from codexsync.handoff import Delivery
+
+        config, _ = self.machine("laptop")
+        outcomes = [HandoffNotDelivered([Delivery("desktop", "d1", 3, 1, 0)])] * 2 + [
+            HandoffResult("laptop", ("desktop",), 0, 0, False, HandoffRecord("laptop", STATE_HANDED_OFF, "t")),
+        ]
+        calls: list[int] = []
+        notes: list[str] = []
+        polls = [0]
+
+        def act(path):
+            calls.append(polls[0])
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        def stop() -> bool:
+            polls[0] += 1
+            return polls[0] > 10
+
+        with self.assertLogs("codexsync.app", level="INFO"):
+            watch_handoff(
+                config, probe=lambda: ProcessState.STOPPED, handoff=act,
+                notifier=lambda key, **values: notes.append(key),
+                sleep=lambda seconds: None, should_stop=stop,
+            )
+        # At start, then after 1 poll, then after 2 more: the pause grows.
+        self.assertEqual(calls, [0, 1, 3])
+        self.assertEqual(notes, ["notify.not_delivered", "notify.loaded"], "a failed retry says nothing new")
 
     def test_starting_codex_warns_about_work_not_handed_off_elsewhere(self) -> None:
         write_record(self.handoff_root, HandoffRecord("desktop", STATE_WORKING, "2026-09-27T08:00:00Z", "d1"))

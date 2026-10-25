@@ -291,14 +291,39 @@ def read_backfill_row(database: Path) -> BackfillRow | None:
     return tuple(row) if row is not None else None  # type: ignore[return-value]
 
 
-def read_snapshot_backfill_row(database: Path) -> BackfillRow | None:
-    """The row a backup copy of the catalogue holds, opened immutable.
+def read_snapshot_backfill_row(database: Path, scratch_dir: Path | None = None) -> BackfillRow | None:
+    """The row a backup copy of the catalogue holds, WAL included.
 
-    The copy lives in codexSync's own backup folder and is never written; a
-    copy that cannot be read is no evidence, so ``None``.
+    The copy lives in codexSync's own backup folder and is never written: its
+    files are hash-verified. ``immutable=1`` would ignore the copied ``-wal``
+    and return the main file's older row (CS-470), so the database and its log
+    are copied into a scratch folder and read there through a plain read-only
+    connection, which applies the log. A copy that cannot be read is no
+    evidence, so ``None``.
     """
+    import shutil
+    import tempfile
+
+    if scratch_dir is not None:
+        try:
+            scratch_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
     try:
-        connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro&immutable=1", uri=True, timeout=2.0)
+        with tempfile.TemporaryDirectory(dir=scratch_dir, prefix="backfill-row-") as folder:
+            target = Path(folder) / database.name
+            shutil.copyfile(database, target)
+            wal = database.with_name(database.name + "-wal")
+            if wal.is_file():
+                shutil.copyfile(wal, target.with_name(target.name + "-wal"))
+            return _read_backfill_row(target)
+    except OSError:
+        return None
+
+
+def _read_backfill_row(database: Path) -> BackfillRow | None:
+    try:
+        connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
     except sqlite3.Error:
         return None
     try:

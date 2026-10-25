@@ -123,6 +123,13 @@ class AutomationTests(unittest.TestCase):
         self.assertIsNone(view.status)
         self.assertIn("schtasks", view.status_error)
 
+    def test_a_task_the_os_cannot_render_is_one_slots_error(self) -> None:
+        """CS-476: a ValueError from rendering (e.g. `%X%` in a path) cost the whole view."""
+        self.login.status = mock.Mock(side_effect=ValueError("percent in path"))  # type: ignore[method-assign]
+        view = automation_status(self.config, scheduler=FakeScheduler(), login_scheduler=self.login, backup_scheduler=self.backup, handoff_scheduler=self.handoff)
+        self.assertIsNotNone(view.status)
+        self.assertIn("percent", view.login_status_error)
+
     def test_ignored_settings_are_reported(self) -> None:
         self._set(run_at_login=True, jitter_seconds=30)
         self.assertEqual(automation_status(self.config, scheduler=FakeScheduler(), login_scheduler=self.login, backup_scheduler=self.backup, handoff_scheduler=self.handoff).ignored, ("jitter_seconds",))

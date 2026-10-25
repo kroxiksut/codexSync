@@ -23,6 +23,8 @@ rather than its name -- `process_detector` decides that, and this module only
 records which markers are of that shape. It is how `ChatGPT.app/Contents/MacOS/`
 is told apart from the ordinary ChatGPT app: the macOS desktop build was
 renamed `ChatGPT` in July 2026 while keeping the bundle id `com.openai.codex`.
+On Windows the app is `ChatGPT.exe` from the `OpenAI.Codex_` package, and a
+`*` in a marker skips the package version (`/OpenAI.Codex_*/app/ChatGPT.exe`).
 """
 from __future__ import annotations
 
@@ -51,11 +53,19 @@ PROCESS_NAMES: tuple[str, ...] = ("codex.exe", "codex", "codex-app-server")
 #: It is also the wrong *kind* of thing to look for. The service hosts sandboxes;
 #: a sandbox still running is evidence that Codex has work in flight, the host
 #: being up is not.
+#:
+#: The Windows path marker names one program of the package, not the package
+#: folder: that folder also holds the sandbox service above. Observed on
+#: 2026-10-25 (Windows 10 19045, Codex 26.1021.3705.0): with the window open,
+#: and after its close button (the app stays in the tray), 10-17 `ChatGPT.exe`
+#: matched; after *Quit* from the tray none did and only the service remained
+#: (CS-447). Until then the app was seen only through its `codex.exe` children.
 BACKGROUND_PROCESS_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "windows": (
         "codex-windows-sandbox",
         "codex-windows-sandbox-setup",
         "codex-command-runner",
+        "/OpenAI.Codex_*/app/ChatGPT.exe",
     ),
     "macos": (
         "ChatGPT.app/Contents/MacOS/",

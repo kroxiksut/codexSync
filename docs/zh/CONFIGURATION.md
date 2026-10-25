@@ -95,7 +95,7 @@ process_names = ["codex.exe", "codex", "codex-app-server"]
 grace_period_seconds = 2
 
 [process_detection.background_process_names]
-windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-command-runner"]
+windows = ["codex-windows-sandbox", "codex-windows-sandbox-setup", "codex-command-runner", "/OpenAI.Codex_*/app/ChatGPT.exe"]
 macos = ["ChatGPT.app/Contents/MacOS/", "codex-app-server", "codex-execve-wrapper", "codex-code-mode-host"]
 linux = ["/usr/lib/chatgpt/", "codex-app-server", "codex-linux-sandbox", "codex-execve-wrapper", "codex-code-mode-host"]
 ```
@@ -108,7 +108,10 @@ linux = ["/usr/lib/chatgpt/", "codex-app-server", "codex-linux-sandbox", "codex-
 
 名称按完整进程名匹配，绝不按子串匹配。含有 `/` 的条目是路径标记，用来与进程路径匹配：
 macOS 上的桌面版构建就叫 `ChatGPT`，而单写一个 `ChatGPT` 会把普通的 ChatGPT 应用也
-匹配进来。
+匹配进来。在 Windows 上，该应用是 `OpenAI.Codex_` 包中的 `ChatGPT.exe`；标记中的 `*`
+表示任意一串字符，这里指包的版本号。标记只指向这一个程序，而不是整个包文件夹，因为
+该文件夹中还有始终运行的沙盒服务。关闭 Codex 窗口后，应用仍在托盘中运行，因此在你从
+托盘图标菜单中选择"退出"之前，codexSync 都会认为 Codex 正在运行。
 
 `allow_terminate_if_running` 以及其他 `terminate_*` 键是 0.1 遗留下来的。codexSync
 从不强制结束 Codex，`allow_terminate_if_running = true` 会被拒绝。若要让同步请求 Codex 退出，
@@ -183,14 +186,14 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
   `sync --apply --unattended`，之后不再重复。它同步 `[sync] scope` 所指定的内容——默认是
   全部（设置、对话、项目），或只有设置文件——并经过与手动同步相同的检查：冲突与任何一次
   运行一样由 `conflict.policy` 裁决，策略未能裁决的冲突会在写入前停止它（退出码 2）。
-  Codex 开着时会被拒绝（退出码 3）——除非允许为同步关闭 Codex（见下一条）。窗口会显示该
-  任务的上次运行及其结果含义。
+  Codex 开着时会被拒绝（退出码 3）；即使开启了 `close_codex`（见下一条），它也从不请求
+  Codex 退出，因为没有人在场看到被中断的智能体回合。窗口会显示该任务的上次运行及其结果含义。
 - **为同步关闭 Codex**（`[sync] close_codex = true`，即“自动化”页面上的「同步开始时若
-  Codex 开着，则关闭它」复选框；默认关闭）。任何一次同步如果发现 Codex（ChatGPT 应用）
+  Codex 开着，则关闭它」复选框；默认关闭）。由您启动的同步（“同步”按钮或 `codexsync sync`）如果发现 Codex（ChatGPT 应用）
   开着，会先像 Windows 为更新关闭程序那样（在 Linux 上则像你自己那样，点击托盘图标菜单中的 *Quit*）请求它退出，并最多等待一分钟直到它消失。绝不
   强制：如果 Codex 拒绝或仍在运行，什么都不写入，同步会说明原因。正在进行的智能体回合会被
-  中断，所以请让 Codex 处于空闲；终端中运行的 Codex CLI 从不会被关闭；交接监视器和试运行
-  从不请求关闭。已在 Windows 和 Linux 上验证（Linux 上通过托盘图标的菜单；没有托盘图标时会请求窗口关闭，而已登录的 Codex 对此只会隐藏）；在 macOS 上保持关闭，直到在 Mac 上验证可用。
+  中断，所以请让 Codex 处于空闲；终端中运行的 Codex CLI 从不会被关闭；交接监视器、登录
+  任务和试运行从不请求关闭。已在 Windows 和 Linux 上验证（Linux 上通过托盘图标的菜单；没有托盘图标时会请求窗口关闭，而已登录的 Codex 对此只会隐藏）；在 macOS 上保持关闭，直到在 Mac 上验证可用。
 - 它是用户级任务 —— Windows 上是任务计划程序，macOS 上是 LaunchAgent，Linux 上是
   `systemd --user` —— 绝不是系统服务。
 - `automation run` 的退出码与该作业本身一致：成功、或者已有另一个守护在运行时为 `0`，

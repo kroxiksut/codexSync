@@ -83,6 +83,9 @@ def build_repair_plan(
         raise ValueError("UNKNOWN_SCHEMA")
     projects = _existing_project_roots(state, schema_id)
     assignments = state.get("thread-project-assignments", {})
+    known_roots = _known_project_roots(
+        projects, source_machine=source_machine, target_machine=target_machine, rules=rules
+    )
     actions: list[RepairAction] = []
     codes: list[str] = []
     # One file per chat: a chat continued in pages carries one cwd and needs
@@ -98,7 +101,7 @@ def build_repair_plan(
             mapped = apply_path_mapping(
                 session.cwd, source_machine=source_machine, target_machine=target_machine, rules=rules
             )
-            target_root = _candidate_root(Path(mapped.target_path))
+            target_root = _candidate_root(Path(mapped.target_path), known_roots)
         except (PathMappingError, OSError):
             actions.append(RepairAction(RepairActionKind.SKIP_UNMAPPED, session_hash, None, None, session_id=session.session_id))
             continue
@@ -144,7 +147,7 @@ def build_repair_plan(
         binding_kind = RepairActionKind.KEEP_BINDING if assigned == project_id else RepairActionKind.ADD_BINDING
         actions.append(RepairAction(binding_kind, session_hash, root_hash, project_id, mapped.rule_id, root_text, session.session_id))
     actions.extend(_bind_sessions_left_behind_by_a_remap(catalog, actions, assignments, schema_id))
-    codes.extend(_remap_orphan_codes(catalog, actions, assignments, schema_id))
+    codes.extend(_remap_orphan_codes(catalog, actions, assignments, schema_id, projects))
     plan_material = {
         "version": 1,
         "source_machine": source_machine,
@@ -375,6 +378,7 @@ def _remap_orphan_codes(
     actions: list[RepairAction],
     assignments: dict,
     schema_id: str,
+    projects: dict[str, tuple[str, ...]] | None = None,
 ) -> list[str]:
     """Refuse a remap that would still leave a session behind.
 
@@ -400,9 +404,23 @@ def _remap_orphan_codes(
         for action in actions
         if action.kind in {RepairActionKind.ADD_BINDING, RepairActionKind.KEEP_BINDING}
     }
+    remapped = {
+        action.project_id for action in actions
+        if action.kind is RepairActionKind.REMAP_ROOT and action.project_id
+    }
     for action in actions:
         if action.kind is not RepairActionKind.REMAP_ROOT or not action.project_id:
             continue
+        # A nested project left at the old root would be cut off from its
+        # parent's folder, and its chats pinned to the parent (CS-437).
+        for other_id, roots in (projects or {}).items():
+            if other_id == action.project_id or other_id in remapped:
+                continue
+            if any(
+                _under(root, action.source_root) and not _same_host_path(root, action.source_root or "")
+                for root in roots
+            ):
+                codes.append("REMAP_CONTAINS_PROJECT")
         for session in one_per_chat(catalog.valid):
             if not session.session_id or not _under(session.cwd, action.source_root):
                 continue
@@ -462,10 +480,41 @@ def _moved_projects(
     return moved
 
 
-def _candidate_root(path: Path) -> Path:
+def _known_project_roots(
+    projects: dict[str, tuple[str, ...]],
+    *,
+    source_machine: str,
+    target_machine: str,
+    rules: list[PathMappingRule],
+) -> tuple[str, ...]:
+    """Every project root as recorded and as the session mapping names it here."""
+    found: dict[str, None] = {}
+    for roots in projects.values():
+        for root in roots:
+            found[root] = None
+            try:
+                mapped = apply_path_mapping(
+                    root, source_machine=source_machine, target_machine=target_machine, rules=rules
+                )
+            except PathMappingError:
+                continue
+            found[mapped.target_path] = None
+    return tuple(found)
+
+
+def _candidate_root(path: Path, known_roots: tuple[str, ...] = ()) -> Path:
     candidate = path
     if not candidate.exists():
         raise OSError("mapped path is unavailable")
+    # The deepest project root holding the folder wins over the enclosing
+    # repository: a monorepo package is its own project without its own .git
+    # (CS-437), and climbing to .git handed its chats to the parent.
+    containing = [
+        root for root in known_roots
+        if _under(str(path), root) and Path(root).is_dir()
+    ]
+    if containing:
+        return Path(max(containing, key=lambda root: len(root.rstrip("/\\"))))
     candidate = candidate.resolve()
     for current in (candidate, *candidate.parents):
         if (current / ".git").exists():

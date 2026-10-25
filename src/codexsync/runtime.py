@@ -279,7 +279,8 @@ def _is_semantic_owned(relative_path: str) -> bool:
         or rel.startswith("sessions/")
         or rel.startswith("archived_sessions/")
         or rel.startswith("sqlite/")
-        or (name.startswith("state_") and any(name.endswith(suffix) for suffix in (".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal")))
+        # Codex 0.163's chat projection (CS-426) is a catalogue too (CS-468).
+        or (name.startswith(("state_", "thread_history_")) and any(name.endswith(suffix) for suffix in (".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal")))
     )
 
 def _apply_session_mode(

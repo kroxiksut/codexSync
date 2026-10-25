@@ -197,34 +197,18 @@ class BackupManager:
         )
 
     def _deduplicate_zip_entry(self, arcname: str) -> str:
-        if arcname not in self._zip_entries:
-            self._zip_entries.add(arcname)
-            return arcname
-
-        candidate = arcname
-        stem, dot, suffix = candidate.rpartition(".")
-        if not dot:
-            stem, suffix = candidate, ""
-        idx = 1
-        while candidate in self._zip_entries:
-            if suffix:
-                candidate = f"{stem}.{idx}.{suffix}"
-            else:
-                candidate = f"{stem}.{idx}"
-            idx += 1
-        self._zip_entries.add(candidate)
-        return candidate
+        # A renamed copy would not match the manifest, which names one file per
+        # path: the snapshot would fail verification and rollback (CS-454).
+        if arcname in self._zip_entries:
+            raise FailSafeError(f"Backup already holds {arcname}; refusing a second copy under another name")
+        self._zip_entries.add(arcname)
+        return arcname
 
     @staticmethod
     def _deduplicate_path(path: Path) -> Path:
-        if not path.exists():
-            return path
-        idx = 1
-        candidate = path
-        while candidate.exists():
-            candidate = path.with_name(f"{path.stem}.{idx}{path.suffix}")
-            idx += 1
-        return candidate
+        if path.exists():
+            raise FailSafeError(f"Backup already holds {path.name}; refusing a second copy under another name")
+        return path
 
 
 def _is_snapshot_zip(path: Path) -> bool:

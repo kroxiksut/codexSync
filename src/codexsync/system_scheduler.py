@@ -46,6 +46,8 @@ of date with config.toml" without the user comparing XML by eye.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Callable, Iterable, Sequence
 import codecs
 from dataclasses import dataclass, replace
@@ -197,6 +199,10 @@ def job_arguments(mode: str, config_path: Path) -> list[str]:
     return ["-c", str(config), *_JOB_SUBCOMMANDS[mode]]
 
 
+#: The windowed Windows build; given a subcommand it runs the CLI.
+WINDOWED_PROGRAM = "codexsync-gui.exe"
+
+
 def job_command(
     executable: Path | None = None,
     *,
@@ -222,6 +228,17 @@ def job_command(
     if not str(exe) or str(exe) == ".":
         raise ValueError("Cannot determine the interpreter that runs codexSync")
     if is_frozen:
+        if _platform_key(platform) == "windows" and exe.name.lower() == "codexsync.exe":
+            # The console build flashes a window per run and the watcher would
+            # hold one open; the windowed build runs the CLI too (CS-474).
+            windowed = exe.with_name(WINDOWED_PROGRAM)
+            if windowed.is_file():
+                return [str(windowed)]
+            print(
+                f"warning: {WINDOWED_PROGRAM} is not beside {exe.name}; "
+                "the scheduled task will open a console window",
+                file=sys.stderr,
+            )
         return [str(exe)]
     if _platform_key(platform) == "windows":
         windowless = exe.with_name("pythonw.exe")
@@ -408,7 +425,8 @@ def _default_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
     when detached, cp866 under ``CREATE_NO_WINDOW`` on a Russian Windows), and
     ``CREATE_NO_WINDOW`` gives it a fresh console on the OEM code page. The
     ANSI default of ``text=True`` would mangle every Cyrillic path. A
-    character outside the OEM code page cannot survive that pipe at all.
+    character outside the OEM code page cannot survive that pipe at all, which
+    is why a task's definition is read through COM as base64 (CS-475).
     """
     kwargs: dict[str, Any] = {"encoding": "utf-8"}
     if sys.platform == "win32":
@@ -545,9 +563,14 @@ def _time_limit_seconds(job: ScheduledJob) -> int:
     The copy waits for Codex to close -- up to 23 hours, after which it gives
     up by itself and says so -- so its limit is a day. Everything else is a
     short job that must never pile up.
+
+    The sign-in sync is a full handoff (`D-028`) that first waits up to
+    ``delivery_wait_minutes`` (as long as a day) for the cloud copy; an OS
+    limit would kill it mid-write and leave RECOVERY_REQUIRED, so like the
+    watcher it has none -- it ends by itself (CS-436).
     """
-    if job.mode == HANDOFF_MODE:
-        return 0  # no limit: the watcher runs until sign-out
+    if job.mode in (HANDOFF_MODE, LOGIN_SYNC_MODE):
+        return 0  # no limit: the watcher runs until sign-out, the sync ends itself
     return 24 * 3600 if job.mode == STATE_BACKUP_MODE else 600
 
 
@@ -1152,6 +1175,12 @@ class WindowsTaskScheduler:
         return removed
 
     def _remove_one(self, name: str) -> bool:
+        # /Delete leaves a running instance alive (the watcher would keep
+        # going); /End first, and "not running"/"not found" are fine (CS-448).
+        # Not the sign-in sync: it ends by itself, and /End would kill a write
+        # half way through.
+        if self._slot != LOGIN_SYNC_SLOT:
+            _invoke(self._run, [self.schtasks, "/End", "/TN", name])
         result = _invoke(self._run, [self.schtasks, "/Delete", "/TN", name, "/F"])
         if result.returncode == 0:
             return True
@@ -1204,6 +1233,38 @@ class WindowsTaskScheduler:
         )
         return result.returncode == 0, result
 
+    def _definition_argv(self, name: str) -> list[str]:
+        quoted = name.replace("'", "''")
+        script = (
+            "$ErrorActionPreference = 'Stop'; try { "
+            "$s = New-Object -ComObject Schedule.Service; $s.Connect(); "
+            f"$t = $s.GetFolder('\\').GetTask('{quoted}'); "
+            "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t.Xml)) "
+            "} catch { exit 1 }"
+        )
+        return [self.powershell, "-NoProfile", "-NonInteractive", "-Command", script]
+
+    def _read_definition(self, name: str) -> str | None:
+        """The task's XML exactly as stored, or None when it cannot be read.
+
+        ``schtasks /Query /XML`` writes through the console's OEM code page,
+        so a character of a path outside it arrives as ``?`` (or a best-fit
+        look-alike) and the task read as ``EXECUTABLE_MISSING`` for good, which
+        ``apply`` could not cure (CS-475). Task Scheduler's COM interface hands
+        over the stored text; base64 is ASCII and survives any code page.
+        """
+        try:
+            result = _invoke(self._run, self._definition_argv(name))
+        except SchedulerError:
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            text = base64.b64decode((result.stdout or "").strip(), validate=True).decode("utf-8")
+        except (binascii.Error, ValueError):
+            return None
+        return text or None
+
     def _task_info_argv(self, name: str | None = None) -> list[str]:
         leaf = (name or self.task_name).rsplit("\\", 1)[-1].replace("'", "''")
         script = (
@@ -1233,7 +1294,7 @@ class WindowsTaskScheduler:
         owned: bool | None = None
         command: tuple[str, ...] | None = None
         try:
-            root = parse_task_xml(query.stdout or "")
+            root = parse_task_xml(self._read_definition(name) or query.stdout or "")
         except ElementTree.ParseError as exc:
             notes.append(f"task definition unreadable: {exc}")
         else:
@@ -1642,6 +1703,16 @@ class SystemdUserScheduler:
         if not existed:
             return False
         _invoke(self._run, self._ctl("disable", "--now", self.timer))
+        # Stopping the timer leaves a running oneshot service (the watcher has
+        # no time limit) going; stop it too, "not loaded" is fine (CS-448).
+        # Not the sign-in sync: it ends by itself, and a stop would cut a write
+        # half way through.
+        if self._slot != LOGIN_SYNC_SLOT:
+            _invoke(self._run, self._ctl("stop", self.service))
+        # A stopped watcher ends on SIGTERM, which systemd records as failed,
+        # and the removed unit then stays in `systemctl --user --failed`
+        # (laptop, 2026-10-23). Clearing that record stops nothing.
+        _invoke(self._run, self._ctl("reset-failed", self.service))
         for path in paths:
             path.unlink(missing_ok=True)
         _require_success(_invoke(self._run, self._ctl("daemon-reload")), "Reloading systemd user units")

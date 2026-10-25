@@ -307,7 +307,7 @@ class MainWindow(QMainWindow):
                     # A page that reads on arrival reads again now.
                     screen.activated()
             if current:
-                self._render_pages(sharing_pages(kind, page))
+                self._render_pages(self._watching(kind, page))
             self._update_activity()
 
         def report(phase: str, count: int, total: int) -> None:
@@ -323,7 +323,7 @@ class MainWindow(QMainWindow):
                 self._jobs_book.retoken(key[0], token)
                 key[0] = token
             # The other pages offering this work are busy from now on.
-            self._render_pages(sharing_pages(kind, page))
+            self._render_pages(self._watching(kind, page))
             self._update_activity()
 
     def busy(self, kind: str) -> bool:
@@ -333,6 +333,22 @@ class MainWindow(QMainWindow):
     def jobs(self) -> JobBook:
         """What runs and what ended lately; the task list draws it."""
         return self._jobs_book
+
+    def _watching(self, kind: str | None, page: str) -> tuple[str, ...]:
+        """Pages to redraw when a job of ``kind`` starts or ends.
+
+        A page may grey a button while another kind runs (`shared_busy`)
+        without offering it: the page shown now is redrawn too, and a hidden
+        one is redrawn when it is shown (CS-482).
+        """
+        pages = sharing_pages(kind, page)
+        if kind is None:
+            return pages
+        shown = self._stack.currentWidget()
+        for name, screen in self._screens.items():
+            if screen is shown and name != page and name not in pages:
+                return (*pages, name)
+        return pages
 
     def _render_pages(self, pages) -> None:
         for name in pages:
@@ -795,7 +811,10 @@ class MainWindow(QMainWindow):
         if 0 <= index < len(PAGES):
             self._stack.setCurrentIndex(index)
             self._store(SETTING_PAGE, PAGES[index])
-            self._screens[PAGES[index]].activated()
+            screen = self._screens[PAGES[index]]
+            # Busy states of other pages' jobs may have changed while hidden (CS-482).
+            screen.render()
+            screen.activated()
 
     def _update_status_bar(self) -> None:
         bar = self.statusBar()

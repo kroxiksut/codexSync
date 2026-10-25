@@ -28,10 +28,11 @@ from .process_detector import (
     ProcessInfo,
     _normalize_windows_name,
     _parse_ps,
+    _path_marker,
     _posix_marker_matches,
     _posix_name_matches,
-    _posix_path_marker,
     _run_ps,
+    _windows_marker_matches,
 )
 
 __all__ = ["ProcessMatch", "ProcessReport", "build_process_report", "os_key"]
@@ -169,7 +170,7 @@ def _posix_parents() -> dict[int, int]:
 
 def _posix_rule(proc: ProcessInfo, entries: tuple[str, ...]) -> tuple[str, str] | None:
     for entry in entries:
-        if _posix_path_marker(entry):
+        if _path_marker(entry):
             if _posix_marker_matches(proc, entry):
                 return entry, "path_marker"
         elif _posix_name_matches(proc, entry.lower()):
@@ -184,8 +185,12 @@ def _windows_matches(detector: CodexProcessDetector, names: tuple[str, ...], mar
     for entry in names:
         by_name.setdefault(_normalize_windows_name(entry), entry)
     by_marker: dict[str, str] = {}
+    path_markers: list[str] = []
     for entry in markers:
-        by_marker.setdefault(_normalize_windows_name(entry), entry)
+        if _path_marker(entry):
+            path_markers.append(entry)
+        else:
+            by_marker.setdefault(_normalize_windows_name(entry), entry)
     roots: dict[int, str] = {}
     for proc in processes:
         entry = by_name.get(_normalize_windows_name(proc.name))
@@ -212,3 +217,7 @@ def _windows_matches(detector: CodexProcessDetector, names: tuple[str, ...], mar
         entry = by_marker.get(_normalize_windows_name(proc.name))
         if entry is not None:
             yield ProcessMatch(BACKGROUND, proc.pid, proc.parent_pid, _short(proc.name), entry, "name")
+            continue
+        entry = next((marker for marker in path_markers if _windows_marker_matches(proc, marker)), None)
+        if entry is not None:
+            yield ProcessMatch(BACKGROUND, proc.pid, proc.parent_pid, _short(proc.name), entry, "path_marker")

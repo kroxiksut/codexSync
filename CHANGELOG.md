@@ -68,6 +68,10 @@ All notable changes to this project are documented in this file.
   extension in an IDE are in `~/.codex` and travel with the rest.
 
 ### Changed
+- The sign-in sync (`sync_at_login`) never asks Codex to quit, even with
+  `[sync] close_codex` on: nobody is watching, so a Codex open at sign-in makes
+  it a refusal (exit 3), as before `close_codex` existed. The setting now
+  covers the syncs you start — *Synchronise* and `codexsync sync`.
 - A project folder without git no longer publishes the SHA-256 of files that
   look like secrets (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, SSH
   private keys, the credential files codexSync never copies) into the shared
@@ -108,6 +112,37 @@ All notable changes to this project are documented in this file.
   licence with nothing extra to sign.
 
 ### Fixed
+- Windows: the Codex desktop app itself (`ChatGPT.exe` from the
+  `OpenAI.Codex_` package) now reads as "Codex is running", found by its
+  program path (new `background_process_names.windows` entry
+  `/OpenAI.Codex_*/app/ChatGPT.exe`; `*` in a path marker matches any run of
+  characters). Until now the app was seen only through its `codex.exe`
+  children, so a moment without them read as stopped while the app could
+  still write its state on exit. Closing the window leaves the app in the
+  tray: choose *Quit* there before a sync. An older config is offered the new
+  entry by the config upgrade.
+- A sync's "chats written" (and `sessions apply`'s `branches=`) counts chats,
+  not file operations: a chat moved into the archive, or a compressed chat
+  continued as plain JSONL, was counted twice because its old file's removal
+  was counted too.
+- Linux: turning off the handoff watcher no longer leaves
+  `codexsync-handoff.service` listed as failed in `systemctl --user --failed`;
+  removing a task clears the failed record its stopped service leaves behind.
+- Another machine's project order, pins and chat bindings no longer win again
+  each time Codex touches a project there: a published project list is now
+  identified only by what the merge reads of each project (id, name, folders),
+  not by the `updatedAt` Codex bumps on its own. The first sync after updating
+  sees every other machine's list as new once, so its order and pins win once.
+- `repair-projects` no longer pins the chats of a project nested inside
+  another one's folder (a monorepo package without its own `.git`) to the outer
+  project: a chat goes to the deepest project whose folder holds it, and a
+  remap that would move the outer project while the inner one stays at the old
+  folder is refused (`REMAP_CONTAINS_PROJECT`).
+- On Windows, a scheduled task whose program or config path has a character
+  outside the console's code page no longer reads as broken for good
+  (`EXECUTABLE_MISSING`, `CONFIG_PATH_MISSING`) after `automation apply`: its
+  definition is now read through Task Scheduler itself, not through
+  `schtasks`'s console output.
 - A resolved conflict is no longer written over a chat Codex 0.163 has already
   opened: Codex keeps such a chat in its own history store and, after the
   file's content was replaced, kept showing the old turns. The chosen branch
@@ -159,6 +194,108 @@ All notable changes to this project are documented in this file.
   (`CATALOGUE_STATUS_UNKNOWN`); `recover rollback` does not write an old global
   state over projects in an unknown shape. `doctor` gives Codex's version and
   one answer, `codex_compat`: every format known, or which writes are off.
+
+Found in a full code review before 0.2.0:
+
+- Backups and recovery:
+  - Writing Codex's global state or its chat list (project merge, chat move,
+    names, archive, repair, Guardian restore) pruned this machine's backups
+    older than 30 days whatever `[backup] retention_days` and `max_backups`
+    said. Every pruning now follows the config.
+  - After `recover rollback` of an unfinished sync, the next sync no longer
+    pushes the restored older file over the newer cloud copy: the sync
+    manifest is saved only once the run is committed.
+  - A backup never stores a file under a changed name (`a.1.txt`), which left
+    a snapshot that could be neither verified nor rolled back; a clash of
+    names refuses the backup instead.
+  - A file that appears at a destination after the backup was taken (a cloud
+    client delivered it) is no longer overwritten without a backup: the sync
+    stops and asks to be run again.
+  - Restore and `sessions apply` check that Codex is closed again before
+    staging files into `.codex`, not only before the final replace.
+  - `recover resume` takes the operation lock. A lock file a cloud client
+    holds for a moment reads as "another operation is running" (exit 5)
+    instead of a crash (exit 1), and the lock file no longer grows on every run.
+- Settings sync and config:
+  - The settings sync no longer follows a junction or symbolic link inside an
+    included folder (`.codex/skills` holds junctions): their targets went to
+    the cloud copy, and writes came back through the link outside `.codex`.
+  - `init-config` refuses Codex's own folder: `--output` naming Codex's
+    `config.toml` with `--force` replaced Codex's config with codexSync's
+    template.
+  - No log file is created inside the `.codex` a command finds through
+    `CODEX_HOME` or `~/.codex`; such a run logs to the console only.
+  - The config refuses a `[semantic] root_dir` inside the cloud copy, and a
+    log file inside the cloud copy or a copy of `.codex`.
+  - A value of the wrong type in `sync.direction`, `sync.delete_policy`,
+    `sync.mode` or `conflict.policy`, and `config unset` / `config mapping` on
+    a config that does not parse, are a config error (exit 4), not a crash.
+  - `sync` at `scope = "settings"` with `dry_run_default = false` and no
+    `--apply` writes, so it now asks Codex to quit when `close_codex` is on.
+- Guardian:
+  - A latest-good snapshot that cannot be read for a moment (a cloud client or
+    antivirus holding it) no longer moves the pointer back to an older
+    snapshot for good. That silently undid `guardian accept`, and could make
+    a real loss of projects look like no loss against the older baseline.
+  - Retention never deletes the baseline an accepted snapshot overrode, even
+    when that snapshot cannot be read.
+  - `guardian watch` keeps running when the state file vanishes and cannot be
+    read for a moment, and when a quarantine record is damaged.
+  - Two different losses with the same counts no longer share one
+    `guardian accept` plan id (`NOT_EXPLAINED` when nothing could be told
+    apart).
+- Handing work between machines and automation:
+  - With three or more machines, a handoff that a later one already carries
+    is no longer waited for forever, which made every sync on the third
+    machine wait the whole `delivery_wait_minutes` and refuse.
+  - The handoff watcher no longer exits when `config.toml` cannot be read for
+    a moment, and retries a load it could not finish (the delivery came late,
+    or the first reading was undetermined) while Codex stays closed, with a
+    growing pause, instead of waiting for Codex to be opened and closed.
+  - Turning the watcher off stops the one running, on Windows and Linux.
+  - The sign-in sync has no operating-system time limit: the 10 minutes it
+    had were shorter than the wait for the cloud copy, and ending it mid-write
+    left a journal needing recovery.
+  - A file that could not be read for a handoff's fingerprint is no longer
+    left out silently, which let another machine count the handoff delivered
+    without it: the handoff is announced by the next run that can read it.
+  - `automation apply` run from the console `codexsync.exe` installs the tasks
+    with `codexsync-gui.exe` beside it, so no console window opens or stays
+    open; it warns when that program is missing.
+  - One task with an unusable path no longer breaks the whole automation
+    status.
+  - A task installed by the old `install-task.ps1` is no longer ended by the
+    first line codexSync writes to standard error.
+- Chats:
+  - A long chat whose next page starts where the other machine's copy of the
+    earlier part already went further is blocked (`PAGE_OVERLAP`) instead of
+    both continuations being written side by side.
+  - A continuation that matches only after normalising the JSON (key order,
+    spaces, line ends) counts as a rewrite, so a chat Codex has opened is not
+    rewritten under its history store.
+  - A chat taken out of every project here is no longer put back into one by
+    another machine's project list.
+  - The `newer` conflict rule compares the last records' times as moments:
+    `…T10:00:01Z` no longer counts as later than `…T10:00:01.900Z`.
+  - A stray `rollout-….jsonl.bak` or `.old` beside a chat no longer blocks the
+    chat for good; only Codex's own compressed containers do.
+  - `codex repair` reads the chat-list row from its own backup together with
+    that backup's write-ahead log, and `codex check` no longer offers a repair
+    `codex repair` does not make.
+  - Codex's chat-history store (`thread_history_*.sqlite`) is never copied by
+    the settings sync, whatever `include_roots` says.
+- Process check: a process listing that hangs (WMI, PowerShell) no longer
+  hangs the safety gate or the watcher; after 30 seconds the state is
+  undetermined.
+- Window:
+  - Saving the config drops a Recovery dry run, so *Resume* and *Rollback*
+    need a new dry run under the new settings.
+  - Changing the language, the theme or the config while a save is being
+    checked no longer leaves *Check* and *Save* disabled until restart.
+  - *Always do this* in a conflict decision updates Settings and Automation,
+    so the next save is not refused as "changed on disk".
+  - Overview's and Sessions' buttons no longer stay disabled after a dry run
+    or sync started on another page has ended.
 
 ## [0.2.0a1] - 2026-10-11
 

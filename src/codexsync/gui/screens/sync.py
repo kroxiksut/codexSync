@@ -362,12 +362,16 @@ class SyncScreen(Screen):
         self.model.result = None
         self.render()
         controller = self.host.controller
+        host = self.host
+        #: Did `remember_conflict_policy` write the file (CS-481)?
+        written = [False]
 
         def go(progress=None) -> Outcome:
             if remember:
                 saved = controller.remember_conflict_policy(policy)
                 if not saved.ok:
                     return saved
+                written[0] = saved.value is True
             return controller.handoff_now(
                 progress=progress, conflict_policy=policy, direction=self.model.run_direction or None,
             )
@@ -378,6 +382,12 @@ class SyncScreen(Screen):
             model.history = None
             if outcome.ok:
                 model.preview = None
+            if written[0]:
+                # The file changed as a Settings save changes it: same path,
+                # then the run's own result is shown again (CS-481).
+                host.config_changed()
+                model.result = outcome
+                model.run_kind = "apply"
 
         self.host.run(self.page, go, apply, progress=True, kind="full_sync")
 

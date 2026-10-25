@@ -62,13 +62,16 @@ class OperationLock:
             self._nested = True
             return self
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._handle = self.path.open("a+b")
+        # Opening is inside the try: a lock file a cloud client holds open is
+        # a busy lock (exit 5), not an unexpected error (CS-462).
         try:
+            self._handle = self.path.open("a+b")
             if os.name == "nt":
                 import msvcrt
 
-                self._handle.seek(0)
-                if self._handle.tell() == 0:
+                # `tell()` after `seek(0)` is always 0 in append mode, which
+                # grew the file by a byte per acquisition; ask the size.
+                if os.fstat(self._handle.fileno()).st_size == 0:
                     self._handle.write(b"0")
                     self._handle.flush()
                 self._handle.seek(0)
@@ -78,7 +81,8 @@ class OperationLock:
 
                 fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            self._handle.close()
+            if self._handle is not None:
+                self._handle.close()
             self._handle = None
             raise OperationBusyError(
                 f"Another mutation operation already owns this Codex state root ({self.family} refused)"

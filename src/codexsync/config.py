@@ -710,6 +710,16 @@ def _validate_scheduler(scheduler: SchedulerConfig) -> None:
 
 
 def _validate_config(cfg: AppConfig) -> None:
+    # A list or table here would fail `in {...}` as unhashable -- exit 1, not 4 (CS-457).
+    for name, value in (
+        ("sync.mode", cfg.sync.mode),
+        ("sync.direction", cfg.sync.direction),
+        ("sync.delete_policy", cfg.sync.delete_policy),
+        ("conflict.policy", cfg.conflict.policy),
+    ):
+        if not isinstance(value, str):
+            raise ConfigError(f"{name} must be a string")
+
     if cfg.sync.mode != "cold":
         raise ConfigError("Only cold sync mode is supported")
 
@@ -829,7 +839,13 @@ def _validate_config(cfg: AppConfig) -> None:
     semantic_root = cfg.semantic.root_dir.resolve()
     if cfg.paths.local_state_dir and _paths_overlap(semantic_root, cfg.paths.local_state_dir.resolve()):
         raise ConfigError("semantic.root_dir must be outside paths.local_state_dir")
-    for field_name, protected in (("paths.backup_dir", cfg.paths.backup_dir), ("paths.temp_dir", cfg.paths.temp_dir), ("guardian.root_dir", cfg.guardian.root_dir)):
+    for field_name, protected in (
+        # The mirror is synchronised file by file; the semantic store has its own owner (CS-455).
+        ("paths.cloud_root_dir", cfg.paths.cloud_root_dir),
+        ("paths.backup_dir", cfg.paths.backup_dir),
+        ("paths.temp_dir", cfg.paths.temp_dir),
+        ("guardian.root_dir", cfg.guardian.root_dir),
+    ):
         if _paths_overlap(semantic_root, protected.resolve()):
             raise ConfigError(f"semantic.root_dir must not overlap {field_name}")
 
@@ -849,10 +865,17 @@ def _validate_owned_paths_apart(cfg: AppConfig) -> None:
     ]
     if cfg.state.manifest_file:
         owned.append(("state.manifest_file", cfg.state.manifest_file))
+    if cfg.logging.file:
+        # A log in the mirror or a copy is uploaded or pruned with it (CS-455).
+        owned.append(("logging.file", cfg.logging.file))
     for index, (first_name, first) in enumerate(owned):
         for second_name, second in owned[index + 1:]:
             if _paths_overlap(first.resolve(), second.resolve()):
                 raise ConfigError(f"{first_name} and {second_name} must not overlap")
+    if cfg.logging.file and cfg.state_backup.root_dir and _paths_overlap(
+        cfg.logging.file.resolve(), cfg.state_backup.root_dir.resolve()
+    ):
+        raise ConfigError("logging.file and state_backup.root_dir must not overlap")
 
 
 def _validate_include_roots(include_roots: list[str], *, listed: bool) -> None:
