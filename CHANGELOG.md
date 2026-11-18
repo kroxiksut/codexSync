@@ -2,7 +2,63 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [0.2.0a2] - 2026-11-17
+
+**codexSync 0.2.0a2.** This second alpha hands your Codex work between machines as one
+guarded step — settings, chats, chat names and the project list — and comes
+with a window next to the command line. Every write goes through the lock,
+journal and verified backup, and none happens while Codex is open.
+
+**Since 0.2.0a1, in short**
+- Linux packages — `.deb`, `.rpm`, AppImage and `tar.gz`, for x64 and ARM64 —
+  and npm packages for Windows and Linux (`npm install -g @kroxut/codexsync`).
+- Chats Codex 0.163 keeps compressed (`.jsonl.zst`) are read by the release
+  builds, and one continued on the other machine is written back as the plain
+  file Codex expects; a chat Codex has already drawn is never rewritten under it.
+- `[sync] close_codex` works on Linux too, and Codex CLI's background server is
+  named and asked to stop.
+- *Overview* and `doctor` find project folders Codex's Windows sandbox cannot
+  protect — the cause of Codex refusing every command in a project — and give
+  the command that fixes each; codexSync itself changes no permission.
+- A standard place for the config, `doctor --report` for issues, a Tasks list
+  in the status bar, the window's checks and refusals in its own language.
+- A project removed in Codex on one machine stays removed: the next sync asks
+  whether on purpose (then the other machines remove it too) or by mistake
+  (then it comes back) — `[sync] removed_projects`.
+- Two full code reviews' fixes: backups follow retention, a rollback-safe
+  manifest, three-machine handoffs, a rollback that refuses another machine's
+  backup, and more — see *Fixed* below.
+
+**Install**
+- `python -m pip install --upgrade "codexsync[gui]"` — the same command
+  installs it fresh or replaces 0.1 or the alpha.
+- Windows builds, no Python needed: `codexsync-gui-<tag>-windows-amd64.zip` or
+  `-arm64.zip` (the window, which also runs every command) and
+  `codexsync-<tag>-windows-amd64|arm64.zip` (the command line only).
+- Linux: the packages on this page, or pipx — every way in
+  [installing on Linux](https://github.com/kroxiksut/codexSync/blob/main/docs/en/README.md#on-linux).
+- Needs Windows 10 (1809) or later on x64 or ARM64; with pip, Python 3.11+.
+
+**Upgrading.** Everything 0.2.0a1 wrote into the workspace stays readable
+(`D-030`). A 0.1 config is recognised, and `config check` / `config upgrade`
+(or the window) shows each change before making it. A machine that has synced
+with 0.2 should stay on 0.2.
+
+**Known limits.** On macOS the code and CI run, but every write is refused
+until the process detector has been observed against a live Codex. Linux is
+experimental, as Codex for Linux is itself a preview (`D-031`). Some Codex
+behaviours are deliberately left unused until an experiment records them:
+[what is not proven yet](https://github.com/kroxiksut/codexSync/blob/main/docs/en/README.md#what-is-not-proven-yet).
+
+**Validation.** On Windows, 2026-10-25, Codex 26.1021: with Codex open every
+write is refused and nothing changes; with Codex closed a sync writes after a
+verified backup and its journal ends committed; an interrupted write is
+recovered from the console and from the Recovery page.
+
+**Please tell us** what happened on your machines in an
+[issue](https://github.com/kroxiksut/codexSync/issues/new/choose). Never attach
+real chats, `auth.json`, databases or your `config.toml` — see
+[SECURITY.md](https://github.com/kroxiksut/codexSync/blob/main/SECURITY.md).
 
 ### Added
 - A standard place for the config, per machine and never roaming
@@ -59,15 +115,41 @@ All notable changes to this project are documented in this file.
   `[sync] close_codex` on and no CLI open, a sync asks it to stop with that
   command.
 - npm packages for Windows and Linux, x64 and ARM64: `npm install -g
-  codexsync` installs both programs, laid out like Codex CLI's own package —
+  @kroxut/codexsync` installs both programs, laid out like Codex CLI's own package —
   a launcher plus the release build for your system as an optional package,
   with nothing run at install time. Each is installed and checked on its
   system before a release is published.
+- `doctor` checks whether Codex can run commands in each project (Windows,
+  `codex_sandbox`): a `.codex`, `.agents` or `.git` its sandbox cannot protect —
+  owned by the sandbox account after a command inside the sandbox created it,
+  or by Administrators — is named with its owner, confirmed from Codex's own
+  sandbox log when it says the same, and given the `icacls` line that hands it
+  back (owner only; `.git` recursively, the others not, since `.agents` holds
+  links other agents share). *Overview* shows a banner with **Copy commands**.
+  codexSync changes no permission; `doctor --report` carries counts only.
 - README: one line on what travels and what does not — a project's code goes
   by git, a secret file in it is never opened, and the chats of the Codex
   extension in an IDE are in `~/.codex` and travel with the rest.
+- A project removed in Codex on one machine is no longer brought back by the
+  next sync (`D-039`). `[sync] removed_projects` (Settings → Sync) says what a
+  removal means: `ask` (default) keeps it removed here and asks whether on
+  purpose — then the other machines remove it too, once — or by mistake — then
+  it comes back; `remove` and `bring_back` answer without asking.
+  `codexsync projects removed` and *Projects → Projects removed in Codex* list
+  and answer them. Folders and chats are never deleted.
+- `doctor --report` says whether the build reads `.jsonl.zst` chats and which
+  SQLite it uses; the release checks the built programs read them.
+- `automation apply|remove --replace-other-config` (window: *Use this config*)
+  takes over tasks another existing config installed; without it they are
+  refused.
 
 ### Changed
+- Another machine's unfinished operation no longer blocks changes to this
+  machine's own Codex state (`D-040`): moving a chat, the project list,
+  `repair-projects`, a Guardian restore, a project move, chat names, the chat
+  catalogue and `codex repair` go ahead with a warning in the log. Sync, chat
+  transfer and restore still wait for it, and so does everything while this
+  machine's own operation is unfinished.
 - The sign-in sync (`sync_at_login`) never asks Codex to quit, even with
   `[sync] close_codex` on: nobody is watching, so a Codex open at sign-in makes
   it a refusal (exit 3), as before `close_codex` existed. The setting now
@@ -105,6 +187,27 @@ All notable changes to this project are documented in this file.
   preview, files changed on both machines, chats waiting for a decision, the
   config changed on disk, and the backup and copy refusals. The command line
   prints the English text as before.
+- `identity.machine_id` must be usable as written in file names: an id that
+  would be stored as another (`My PC` → `My-PC`), that is empty once cleaned,
+  or that differs from another machine's only in case is refused (exit 4) with
+  the form to write, instead of silently sharing that machine's records.
+- `doctor --report` exits like `doctor`: `5` when a check failed.
+- `recover rollback` refuses another machine's journal: its backup holds that
+  machine's files. *Recovery* and `recover list` say to roll it back there.
+- `restore` without `--from` takes only this machine's newest backup of the
+  target side.
+- Turning the handoff watcher off or removing its task no longer ends a sync
+  it is running: the watcher is asked to stop and ends once idle; on Linux and
+  macOS a SIGTERM waits for the running sync too.
+- A send-only sync (`direction = to_cloud`) no longer marks other machines'
+  work as loaded; chats and files held back by the working set or the
+  direction are counted as not loaded.
+- `chats move` takes a chat off Codex's "no project" list in the same write.
+- The `icacls` lines of the `codex_sandbox` check are PowerShell literals: a
+  `$`, `(` or backtick in a folder name can no longer run code in the elevated
+  shell; with no known user no command is offered.
+- PyPI classifier `Development Status :: 4 - Beta`; building needs setuptools
+  77 (licence expression, PEP 639).
 
 ### Removed
 - The commercial licence and the contributor licence agreement: codexSync is
@@ -112,6 +215,23 @@ All notable changes to this project are documented in this file.
   licence with nothing extra to sign.
 
 ### Fixed
+- Large chat transfers no longer leave the Tasks window looking stuck at 999:
+  preparation, application and deletion have separate progress, the journal
+  records the safe reason and exact failed item, and the Tasks window can
+  filter applied, waiting, blocked and failed chats and open Recovery.
+- A normal file sync now binds every destination to the identity seen while
+  building its plan. If a cloud client creates or replaces that file before
+  backup, the sync stops safely instead of overwriting the newly arrived copy.
+- *Recovery*: the actions card no longer cuts its text when the banner and the
+  journal's evidence wrap onto two lines (a long backup name); its height now
+  follows the wrapped text.
+- *Recovery* says a result only in the window's language — the core's English
+  line no longer follows the translated one — and a closed journal whose backup
+  is not on disk reads "not needed, or removed after the retention period"
+  rather than "missing", which is kept for an open journal. Clearer Russian for
+  the confirmations and a closed journal.
+- A refusal from `codex repair`, `sessions catalogue`, chat names or archive
+  moves names its operation `codex_catalogue`, not `session_apply`.
 - Windows: the Codex desktop app itself (`ChatGPT.exe` from the
   `OpenAI.Codex_` package) now reads as "Codex is running", found by its
   program path (new `background_process_names.windows` entry
@@ -296,6 +416,64 @@ Found in a full code review before 0.2.0:
     so the next save is not refused as "changed on disk".
   - Overview's and Sessions' buttons no longer stay disabled after a dry run
     or sync started on another page has ended.
+- Second full code review (CS-486..558):
+  - Safety and rollback: a rollback keeps the interrupted journal open until it
+    has finished, restores every file its backup holds (even outside today's
+    `include_roots`), and says only what core checked; a sync never overwrites
+    or deletes a file that changed after it was backed up; a cloud client's
+    copy of a journal file no longer blocks every write; a failure after a
+    committed sync or chat transfer is logged instead of reported as failed.
+  - Chats: a working set whose projects or chats no longer exist covers
+    nothing instead of carrying every chat into `.codex`, and names what it
+    could not find; compressed chats show their titles and a compressed
+    spawned thread is not listed as a chat; a chat that changed in the mirror
+    after the plan was confirmed is not written; a `.jsonl.zst` copy in the
+    mirror is rewritten in the configured compression instead of stopping
+    every apply; a held-back resolution writes no conflict bundle; plans,
+    decisions and working sets are written atomically; a new page of a chat
+    whose first part Codex compressed arrives; a lone surrogate no longer
+    blocks a chat for good.
+  - Guardian: losing every project is a shrink it holds back, not a "schema
+    change" — `guardian accept` no longer offers it as a new format and
+    `guardian restore` can put the projects back; `accept` works when
+    latest-good names a snapshot that is gone; `doctor` warns when latest-good
+    is frozen by states held back for their format; `guardian list` and the
+    window no longer fail while a cloud client holds a snapshot; on Windows
+    the state is opened shared for deletion.
+  - Codex's SQLite: a catalogue write whose read-back fails needs recovery
+    instead of staying committing; a reading during which `-wal`/`-shm`
+    appeared is never used; `codex repair` handles an unexpected value type
+    and `codex check` leaves no scratch folder; `codex_sandbox` checks folders
+    past 260 characters and warns about folders it could not check.
+  - Handoff: another machine's handoff is no longer "not delivered" forever
+    because this machine's roots or filters differ; a moment's failure to read
+    this machine's handoff file no longer erases which handoffs it had taken;
+    work written to the cloud by a sync that then failed is handed off by the
+    next one; the warning about a 0.1 task says it runs a full sync.
+  - Projects: a project kept under another system's root no longer stops the
+    project-folder check; a binding of a kind not carried (a remote project)
+    stays a binding; an answer about folders is refused rather than replacing
+    every earlier one when this machine's file cannot be read; a chat that
+    arrives after its section was taken joins that section; a dead save of a
+    repair plan no longer blocks the next.
+  - Schedulers: an editor's AppImage is no longer written into the menu entry
+    and tasks; *Run now* of a sync dry run follows `[sync] scope`; automation
+    warns when codexsync is not installed for the Python it runs; an icon
+    codexSync did not write is never overwritten; macOS no longer unloads the
+    watcher on re-apply; the deprecated `guardian scheduler` templates work.
+  - Config and console: a `machine_id` that is not text is a config error;
+    `config set` accepts a fraction where the loader does; `config roots`
+    lists only inside the Codex folder and never a secret folder; macOS path
+    overlap checks ignore case; `config history` shows only this machine's
+    versions.
+  - Window: a dry run still running when the config was saved unlocks
+    nothing; another pair of machines on Sessions clears the old pair's table;
+    a refused place answer no longer leaves "Reading…"; Guardian forgets its
+    preview on save and says store problems in the window's language.
+  - Build: the Linux package check finds the libraries the build carries and
+    runs a real command in every format; a dropped tool download is retried;
+    Linux install steps name the release files correctly; stale prerelease
+    references were removed before this second alpha was prepared.
 
 ## [0.2.0a1] - 2026-10-11
 

@@ -21,7 +21,7 @@ import shutil
 import unittest
 import uuid
 
-from codexsync.app import commit_global_state
+from codexsync.app import _write_codex_catalogue, commit_global_state
 from codexsync.cli import main
 from codexsync.config import load_config
 from codexsync.exceptions import FailSafeError, RecoveryPendingError
@@ -30,6 +30,7 @@ from codexsync.mutation_journal import (
     JournalState,
     JournalStore,
     owned_by,
+    proven_foreign,
     snapshot_belongs_to,
 )
 from codexsync.recovery import list_journals
@@ -222,12 +223,112 @@ class EnvelopeAndListingTests(_Store):
         self.assertTrue(rows[own]["closes_itself"])
         self.assertEqual(rows[peer]["machine_id"], "krox-nout")
 
+    def test_a_state_write_runs_past_another_machines_open_journal(self) -> None:
+        # Owner, 2026-10-28: a laptop that crashed mid-sync must not keep this
+        # machine from editing (or repairing) its own Codex state.
+        peer = self._stuck(JournalState.RECOVERY_REQUIRED, machine="krox-nout", snapshot=PEER_SNAPSHOT)
+        state_file = self.local / ".codex-global-state.json"
+        original = _state(self.root.as_posix())
+        candidate = _state(self.root.as_posix(), order=["p-beta", "p-alpha"])
+        state_file.write_bytes(original)
+        with self.assertLogs("codexsync", level="WARNING") as logs:
+            commit_global_state(
+                self.cfg, _StoppedGate(), OperationKind.CHAT_MOVE,
+                family="chats", plan_id="c" * 64, action_count=1, state_root=self.local,
+                source=state_file, original=original, candidate=candidate,
+            )
+        self.assertEqual(state_file.read_bytes(), candidate)
+        self.assertIn(peer, "\n".join(logs.output))
+        self.assertEqual(
+            self.store.load(peer).state, JournalState.RECOVERY_REQUIRED, "never closed from here",
+        )
+
+    def test_a_state_write_still_waits_for_this_machines_own_journal(self) -> None:
+        self._stuck(JournalState.RECOVERY_REQUIRED, machine="machine-a", snapshot=OWN_SNAPSHOT)
+        state_file = self.local / ".codex-global-state.json"
+        original = _state(self.root.as_posix())
+        state_file.write_bytes(original)
+        with self.assertRaises(RecoveryPendingError):
+            commit_global_state(
+                self.cfg, _StoppedGate(), OperationKind.CHAT_MOVE,
+                family="chats", plan_id="c" * 64, action_count=1, state_root=self.local,
+                source=state_file, original=original,
+                candidate=_state(self.root.as_posix(), order=["p-beta", "p-alpha"]),
+            )
+        self.assertEqual(state_file.read_bytes(), original)
+
+    def test_a_catalogue_write_runs_past_another_machines_open_journal(self) -> None:
+        peer = self._stuck(JournalState.COMMITTING, machine="krox-nout", snapshot=PEER_SNAPSHOT)
+        database = self.local / "state_5.sqlite"
+        database.write_bytes(b"not read by this test")
+        written: list[bool] = []
+        _write_codex_catalogue(
+            self.cfg, _StoppedGate(), self.local, database,
+            family="codex-repair", plan_id="d" * 64, action_count=1, counts={}, origin="cli",
+            still_planned=lambda: True, write=lambda: written.append(True), verify=lambda: True,
+        )
+        self.assertEqual(written, [True])
+        self.assertEqual(self.store.load(peer).state, JournalState.COMMITTING)
+
+
     def test_recover_list_with_nothing_open(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = main(["-c", str(self.config_path), "recover", "list"])
         self.assertEqual(code, 0)
         self.assertIn("No open journals", out.getvalue())
+
+
+class LocalStateOnlyTests(_Store):
+    """`begin(local_state_only=True)`: only a journal proven to be another machine's is passed by."""
+
+    def test_another_machines_open_journal_does_not_block_a_local_write(self) -> None:
+        for state in (JournalState.PREPARED, JournalState.COMMITTING, JournalState.RECOVERY_REQUIRED):
+            with self.subTest(state=state):
+                peer = self._stuck(state, machine="krox-nout", snapshot=PEER_SNAPSHOT)
+                fresh = self.store.begin("chats", "b" * 64, 1, machine_id="machine-a", local_state_only=True)
+                self.assertEqual(self.store.load(peer).state, state, "left for its own machine")
+                with self.assertRaises(RecoveryPendingError, msg="any other write still waits"):
+                    self.store.begin("sync", "c" * 64, 1, machine_id="machine-a")
+                for operation_id in (peer, fresh.operation_id):
+                    (self.store.root / f"{operation_id}.json").unlink()
+
+    def test_an_older_peer_journal_known_by_its_snapshot_name_does_not_block(self) -> None:
+        self._stuck(JournalState.COMMITTING, machine=None, snapshot=PEER_SNAPSHOT)
+        self.store.begin("chats", "b" * 64, 1, machine_id="machine-a", local_state_only=True)
+
+    def test_what_still_blocks_a_local_write(self) -> None:
+        cases = {
+            "own, in the commit phase": dict(machine="machine-a", snapshot=OWN_SNAPSHOT),
+            "own by snapshot name": dict(machine=None, snapshot=OWN_SNAPSHOT),
+            "no owner at all": dict(machine=None, snapshot=None),
+        }
+        for label, owner in cases.items():
+            with self.subTest(label):
+                stuck = self._stuck(JournalState.COMMITTING, **owner)
+                with self.assertRaises(RecoveryPendingError):
+                    self.store.begin("chats", "b" * 64, 1, machine_id="machine-a", local_state_only=True)
+                (self.store.root / f"{stuck}.json").unlink()
+
+    def test_without_a_machine_nothing_is_passed_by(self) -> None:
+        self._stuck(JournalState.COMMITTING, machine="krox-nout", snapshot=PEER_SNAPSHOT)
+        with self.assertRaises(RecoveryPendingError):
+            self.store.begin("chats", "b" * 64, 1, local_state_only=True)
+
+    def test_an_unreadable_journal_still_blocks_a_local_write(self) -> None:
+        self.store.root.mkdir(parents=True, exist_ok=True)
+        (self.store.root / f"{uuid.uuid4()}.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(FailSafeError):
+            self.store.begin("chats", "b" * 64, 1, machine_id="machine-a", local_state_only=True)
+
+    def test_proven_foreign(self) -> None:
+        def journal(machine, snapshot):
+            return self.store.load(self._stuck(JournalState.COMMITTING, machine=machine, snapshot=snapshot))
+        self.assertTrue(proven_foreign(journal("krox-nout", OWN_SNAPSHOT), "machine-a"))
+        self.assertTrue(proven_foreign(journal(None, PEER_SNAPSHOT), "machine-a"))
+        self.assertFalse(proven_foreign(journal("machine-a", PEER_SNAPSHOT), "machine-a"))
+        self.assertFalse(proven_foreign(journal(None, OWN_SNAPSHOT), "machine-a"))
+        self.assertFalse(proven_foreign(journal(None, None), "machine-a"), "no owner is not foreign")
 
 
 if __name__ == "__main__":

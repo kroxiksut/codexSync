@@ -27,6 +27,7 @@ from codexsync.config_migrate import FINDING_CODES
 from codexsync.gui import i18n
 from codexsync.gui.controller import Failure
 from codexsync.gui.jobs import JOB_KINDS
+from codexsync.guardian_inventory import PROBLEM_CODES as GUARDIAN_PROBLEM_CODES
 from codexsync.guardian_models import GuardianResultStatus
 from codexsync.preflight import DETAIL_CODES
 from codexsync.progress import PHASES
@@ -165,12 +166,14 @@ class CatalogueCompletenessTests(unittest.TestCase):
         computed |= {f"guardian.reason.{code}" for code in _module_codes(PACKAGE / "guardian_restore.py")}
         computed |= {f"sessions.index.{side}{suffix}" for side in ("local", "cloud") for suffix in ("", ".missing")}
         computed |= {f"progress.phase.{phase}" for phase in PHASES}
+        computed |= {"progress.estimating", "progress.rate_eta"}
         computed |= {f"job.{kind}" for kind in JOB_KINDS}
         computed |= {f"check.detail.{code}" for code in DETAIL_CODES}
         computed |= {f"settings.migration.finding.{code}" for code in FINDING_CODES}
         computed |= {f"sync.history.result.{item.value}" for item in JournalState}
         computed |= {f"sync.note.not_done.{name}" for name in HANDOFF_STEPS}
         computed |= {f"codex.finding.{code}" for code in CODEX_FINDING_CODES}
+        computed |= {f"guardian.problem.{code}" for code in GUARDIAN_PROBLEM_CODES}
         computed |= {f"recovery.codex.severity.{item.value}" for item in CodexSeverity}
         sync_screen = GUI / "screens" / "sync.py"
         computed |= {f"sync.history.failure.{name}" for name in _module_constant(sync_screen, "KNOWN_FAILURES")}
@@ -187,6 +190,24 @@ class CatalogueCompletenessTests(unittest.TestCase):
             if kind == "choice" and section != "logging":
                 computed |= {f"settings.choice.{section}.{key}.{choice}" for choice in choices}
         self.assertEqual(sorted(computed - english), [])
+
+    def test_a_guardian_problem_sentence_names_exactly_the_values_core_attaches(self) -> None:
+        """CS-552: each `GuardianProblem(...)` in core has a known code and its sentence's placeholders."""
+        tree = ast.parse((PACKAGE / "guardian_inventory.py").read_text(encoding="utf-8"))
+        english = _raw("en")
+        seen = set()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "GuardianProblem"):
+                continue
+            code = node.args[0].value
+            seen.add(code)
+            self.assertIn(code, GUARDIAN_PROBLEM_CODES)
+            params = {keyword.arg for keyword in node.keywords}
+            for lang in ("en", "ru", "zh"):
+                sentence = _raw(lang)[f"guardian.problem.{code}"]
+                self.assertEqual(set(re.findall(r"{(\w+)}", sentence)), params, (lang, code))
+        self.assertEqual(seen, set(GUARDIAN_PROBLEM_CODES), "a code no line uses")
+        self.assertTrue(english)
 
     def test_a_finding_sentence_names_only_the_values_its_finding_carries(self) -> None:
         """A placeholder the finding has no value for would fall back to English."""

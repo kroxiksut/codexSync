@@ -20,10 +20,12 @@ writing is gated.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
 from pathlib import Path
+import re
 
 from .exceptions import FailSafeError
 
@@ -44,6 +46,14 @@ class IndexContract(str, Enum):
 class Reduction(str, Enum):
     LAST_LINE_WINS = "last-line-wins"
     MAX_UPDATED_AT = "max-updated-at"
+
+
+#: The two readings of a repeated id disagree, or one of them is undefined.
+REDUCTION_AMBIGUOUS = "REDUCTION_AMBIGUOUS"
+#: An ``updated_at`` that is not a moment with a zone, so it cannot be ordered.
+UPDATED_AT_UNREADABLE = "UPDATED_AT_UNREADABLE"
+#: Two different records of one id carry the same moment.
+UPDATED_AT_TIE = "UPDATED_AT_TIE"
 
 
 #: Contracts whose consumer semantics have been proven by a controlled test on
@@ -76,16 +86,28 @@ class IndexParseResult:
     contract: IndexContract
     codes: tuple[str, ...] = ()
     raw_tail_digest: str | None = None
+    #: Why ``reduced_by_updated_at`` is not a defined reading: an ``updated_at``
+    #: that is not a moment, or two different records at the same moment.
+    #: Kept apart from ``codes`` because it matters only under that reduction.
+    updated_at_codes: tuple[str, ...] = ()
 
     @property
     def reductions_agree(self) -> bool:
         """True when the choice of reduction cannot change the outcome."""
+        if self.updated_at_codes:
+            return False
         if set(self.reduced) != set(self.reduced_by_updated_at):
             return False
         return all(
             self.reduced[key].digest == self.reduced_by_updated_at[key].digest
             for key in self.reduced
         )
+
+    def reduced_under(self, reduction: Reduction) -> dict[str, IndexRecord]:
+        """The reading a consumer that reduces this way would see."""
+        if reduction is Reduction.MAX_UPDATED_AT:
+            return self.reduced_by_updated_at
+        return self.reduced
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,18 +182,19 @@ def parse_session_index(
     if detected is IndexContract.UNKNOWN:
         codes.append("UNRECOGNISED_CONSUMER_CONTRACT")
 
-    reduced = _reduce(records, Reduction.LAST_LINE_WINS)
-    by_updated = _reduce(records, Reduction.MAX_UPDATED_AT)
+    reduced, _ = _reduce(records, Reduction.LAST_LINE_WINS)
+    by_updated, updated_codes = _reduce(records, Reduction.MAX_UPDATED_AT)
     result = IndexParseResult(
-        tuple(records), reduced, by_updated, detected, tuple(dict.fromkeys(codes)), tail_digest
+        tuple(records), reduced, by_updated, detected, tuple(dict.fromkeys(codes)), tail_digest,
+        updated_codes,
     )
     if not result.reductions_agree:
         # The two plausible readings disagree, which is precisely a clock that
         # ran backwards. Recorded so materialization cannot proceed on a guess.
-        codes.append("REDUCTION_AMBIGUOUS")
+        codes.append(REDUCTION_AMBIGUOUS)
         result = IndexParseResult(
             tuple(records), reduced, by_updated, detected,
-            tuple(dict.fromkeys(codes)), tail_digest,
+            tuple(dict.fromkeys(codes)), tail_digest, updated_codes,
         )
     return result
 
@@ -180,14 +203,23 @@ def merge_session_indexes(
     base: IndexParseResult | None,
     local: IndexParseResult,
     remote: IndexParseResult,
+    *,
+    reduction: Reduction | None = None,
 ) -> IndexMergeResult:
     """Three-way merge against a confirmed common base.
 
     A side that did not change takes the other side's record; an identical
     change on both sides deduplicates; two different new records for one id are
     a conflict that keeps both candidates where they already are.  Timestamps
-    are never used to pick a winner — that is what ``updated_at`` cannot be
-    trusted for across two machines.
+    are never used to pick a winner between the sides — that is what
+    ``updated_at`` cannot be trusted for across two machines.
+
+    Each side is read the way the runtime reads it: by the reduction recorded
+    in ``PROVEN_CONTRACTS`` (``reduction`` overrides it, for a test). Until one
+    is recorded the last-line reading is used for the audit, and a side whose
+    two readings disagree keeps ``REDUCTION_AMBIGUOUS``, which refuses any
+    render. Once proven, that ambiguity is settled and no longer carried --
+    except where the proven reading itself is undefined (CS-521).
     """
     if base is None:
         return IndexMergeResult({}, (), ("MISSING_BASE",))
@@ -195,16 +227,24 @@ def merge_session_indexes(
     if any(result.contract is not IndexContract.V1 for result in inputs):
         return IndexMergeResult({}, (), ("UNRECOGNISED_CONSUMER_CONTRACT",))
 
+    proven = reduction if reduction is not None else PROVEN_CONTRACTS.get(IndexContract.V1)
+    chosen = proven or Reduction.LAST_LINE_WINS
     codes: list[str] = []
     for result in inputs:
-        codes.extend(code for code in result.codes if code != "MISSING_INDEX")
+        codes.extend(
+            code for code in result.codes
+            if code != "MISSING_INDEX" and not (proven is not None and code == REDUCTION_AMBIGUOUS)
+        )
+        if proven is Reduction.MAX_UPDATED_AT:
+            codes.extend(result.updated_at_codes)
 
+    base_view, local_view, remote_view = (result.reduced_under(chosen) for result in inputs)
     merged: dict[str, IndexRecord] = {}
     conflicts: list[str] = []
-    for session_id in sorted(set(base.reduced) | set(local.reduced) | set(remote.reduced)):
-        old = base.reduced.get(session_id)
-        left = local.reduced.get(session_id)
-        right = remote.reduced.get(session_id)
+    for session_id in sorted(set(base_view) | set(local_view) | set(remote_view)):
+        old = base_view.get(session_id)
+        left = local_view.get(session_id)
+        right = remote_view.get(session_id)
         if _same(left, right):
             if left is not None:
                 merged[session_id] = left
@@ -246,7 +286,10 @@ def render_session_index(result: IndexMergeResult) -> bytes:
             "cannot be rendered. Run the controlled experiment in "
             "docs/dev/experiments/session-index-contract.md and record its result in PROVEN_CONTRACTS."
         )
-    ordered = sorted(result.merged.values(), key=lambda item: (item.line_number, item.session_id))
+    # One line per id, ordered by time. Line numbers come from two different
+    # files and say nothing about each other, so they cannot order a merge
+    # (CS-521); a record whose moment is unreadable goes last, by its text.
+    ordered = sorted(result.merged.values(), key=_render_order)
     return b"".join(record.raw + b"\n" for record in ordered)
 
 
@@ -254,16 +297,70 @@ def render_session_index(result: IndexMergeResult) -> bytes:
 materialize_index = render_session_index
 
 
-def _reduce(records: list[IndexRecord], reduction: Reduction) -> dict[str, IndexRecord]:
+def _reduce(
+    records: list[IndexRecord], reduction: Reduction
+) -> tuple[dict[str, IndexRecord], tuple[str, ...]]:
+    """One record per id under ``reduction``, and why that reading is undefined.
+
+    ``updated_at`` is compared as a moment, never as text (the class of
+    CS-466): `+03:00` against `Z`, or 6 against 7 fractional digits, orders
+    text differently from time. A value that is not a moment, or two different
+    records at one moment, leaves the max reading undefined, which is said
+    rather than settled by file order.
+    """
     out: dict[str, IndexRecord] = {}
+    codes: list[str] = []
+    moments: dict[str, tuple[datetime, int] | None] = {}
     for record in records:
         if reduction is Reduction.LAST_LINE_WINS:
             out[record.session_id] = record
             continue
+        moment = _updated_moment(record.updated_at)
+        if moment is None:
+            codes.append(UPDATED_AT_UNREADABLE)
         current = out.get(record.session_id)
-        if current is None or record.updated_at > current.updated_at:
-            out[record.session_id] = record
-    return out
+        if current is None:
+            out[record.session_id], moments[record.session_id] = record, moment
+            continue
+        held = moments[record.session_id]
+        if moment is None or held is None:
+            continue
+        if moment > held:
+            out[record.session_id], moments[record.session_id] = record, moment
+        elif moment == held and record.digest != current.digest:
+            codes.append(UPDATED_AT_TIE)
+    return out, tuple(dict.fromkeys(codes))
+
+
+_MOMENT = re.compile(
+    r"^(?P<base>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(?P<fraction>\d{1,9}))?(?P<zone>Z|[+-]\d\d:\d\d)$"
+)
+
+
+def _updated_moment(value: str) -> tuple[datetime, int] | None:
+    """``updated_at`` as (moment to the second, nanoseconds), or ``None``.
+
+    Codex writes seven fractional digits (`05:09:19.7567634Z`), one more than
+    `datetime` keeps, so the fraction is held as an integer of nanoseconds
+    instead of being truncated into a false tie. A moment without a zone is
+    not one two machines can compare.
+    """
+    match = _MOMENT.match(value)
+    if match is None:
+        return None
+    zone = "+00:00" if match["zone"] == "Z" else match["zone"]
+    try:
+        moment = datetime.fromisoformat(match["base"] + zone).astimezone(timezone.utc)
+    except ValueError:
+        return None
+    return moment, int((match["fraction"] or "").ljust(9, "0"))
+
+
+def _render_order(record: IndexRecord) -> tuple:
+    moment = _updated_moment(record.updated_at)
+    if moment is None:
+        return (1, record.updated_at, 0, record.session_id)
+    return (0, moment[0].isoformat(), moment[1], record.session_id)
 
 
 def _same(left: IndexRecord | None, right: IndexRecord | None) -> bool:

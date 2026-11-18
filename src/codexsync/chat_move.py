@@ -54,6 +54,22 @@ class ChatMoveAction:
     #: silently for anyone reading the state later, so the reason is recorded.
     from_project_id: str | None
     from_association: Association
+    #: Codex lists it as "no project" (`projectless-thread-ids`), which would
+    #: keep it out of the project it is bound to; the move takes it off that
+    #: list in the same write (CS-531).
+    leaves_projectless: bool = False
+
+
+_PROJECTLESS_KEY = "projectless-thread-ids"
+
+
+def _projectless(global_state: bytes) -> frozenset[str]:
+    try:
+        state = json.loads(global_state.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError):
+        return frozenset()
+    value = state.get(_PROJECTLESS_KEY) if isinstance(state, dict) else None
+    return frozenset(item for item in value if isinstance(item, str)) if isinstance(value, list) else frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +84,7 @@ class ChatMovePlan:
 
     @property
     def writing_actions(self) -> tuple[ChatMoveAction, ...]:
-        return tuple(action for action in self.actions if action.kind.writes)
+        return tuple(action for action in self.actions if action.kind.writes or action.leaves_projectless)
 
 
 def build_chat_move_plan(
@@ -84,6 +100,7 @@ def build_chat_move_plan(
         codes.append("TARGET_PROJECT_MISSING")
 
     actions: list[ChatMoveAction] = []
+    apart = _projectless(global_state)
     for chat in sorted(chats, key=lambda item: item.session_id):
         if chat.kind is not ChatKind.TOP_LEVEL:
             # A spawned thread is not shown under a project, so pinning it says
@@ -97,13 +114,14 @@ def build_chat_move_plan(
             kind = ChatMoveKind.BIND
         actions.append(
             ChatMoveAction(
-                chat.session_id, kind, to_project_id, chat.project_id, chat.association
+                chat.session_id, kind, to_project_id, chat.project_id, chat.association,
+                leaves_projectless=chat.session_id in apart,
             )
         )
 
     if not actions:
         codes.append("NO_CHATS_SELECTED")
-    elif not any(action.kind.writes for action in actions):
+    elif not any(action.kind.writes or action.leaves_projectless for action in actions):
         codes.append("NOTHING_TO_DO")
 
     plan = ChatMovePlan(
@@ -125,9 +143,16 @@ def apply_chat_moves_to_state(state: dict[str, Any], plan: ChatMovePlan) -> int:
     if not isinstance(assignments, dict):
         raise ValueError("thread-project-assignments is not an object")
     written = 0
+    leaving: set[str] = set()
     for action in plan.writing_actions:
-        assignments[action.session_id] = build_binding_value(plan.schema_id, action.to_project_id)
+        if action.kind.writes:
+            assignments[action.session_id] = build_binding_value(plan.schema_id, action.to_project_id)
+        if action.leaves_projectless:
+            leaving.add(action.session_id)
         written += 1
+    apart = state.get(_PROJECTLESS_KEY)
+    if leaving and isinstance(apart, list):
+        state[_PROJECTLESS_KEY] = [item for item in apart if item not in leaving]
     return written
 
 
@@ -145,6 +170,8 @@ def _serialise(plan: ChatMovePlan) -> dict:
                 "to_project_id": action.to_project_id,
                 "from_project_id": action.from_project_id,
                 "from_association": action.from_association.value,
+                # Only when set, so every earlier plan keeps its id.
+                **({"leaves_projectless": True} if action.leaves_projectless else {}),
             }
             for action in plan.actions
         ],

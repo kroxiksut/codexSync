@@ -44,6 +44,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import functools
 import hashlib
 import json
 import os
@@ -51,7 +52,9 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 
-from .jsonl_codec import JSONL_READ_ERRORS, JsonlCodec, codec_of, open_jsonl, transcode, with_codec
+from .jsonl_codec import (
+    CONTAINER_DECODE_ERRORS, JSONL_READ_ERRORS, JsonlCodec, codec_of, open_jsonl, transcode, with_codec,
+)
 
 from .exceptions import FailSafeError
 from .semantic_transfer import conflict_id_for
@@ -95,6 +98,27 @@ def branch_id_for(session_hash: str, sha256: str) -> str:
 
 def session_hash_for(session_id: str) -> str:
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+
+def _fail_safe_on_damaged_container(method):
+    """A branch that cannot be decoded is a changed source to retry (CS-518).
+
+    The mirror is written by a cloud client on its own schedule, so a
+    truncated `.xz` is normal for a moment; reporting it as an internal error
+    told the person something was broken in codexSync.
+    """
+
+    @functools.wraps(method)
+    def wrapped(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except CONTAINER_DECODE_ERRORS as exc:
+            raise FailSafeError(
+                f"A branch could not be read as a whole; nothing was kept ({exc}). Try again.",
+                code="STATE_CHANGED_RETRY",
+            ) from exc
+
+    return wrapped
 
 
 class SemanticStore:
@@ -272,6 +296,7 @@ class SemanticStore:
 
     # --- superseded branches ---------------------------------------------
 
+    @_fail_safe_on_damaged_container
     def archive_superseded(
         self,
         branch: Path,
@@ -296,7 +321,11 @@ class SemanticStore:
         stage = self.root / ".staging" / "superseded" / uuid4().hex
         _mkdir_private(stage)
         body = stage / with_codec("branch.jsonl", codec)
-        transcode(branch, body, codec_of(branch.name) or JsonlCodec.NONE, codec)
+        try:
+            transcode(branch, body, codec_of(branch.name) or JsonlCodec.NONE, codec)
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
         if _file_metrics(body)[0] != sha256:
             shutil.rmtree(stage, ignore_errors=True)
             raise FailSafeError("A superseded branch failed verification before it was archived")
@@ -319,6 +348,7 @@ class SemanticStore:
 
     # --- conflict bundles --------------------------------------------------
 
+    @_fail_safe_on_damaged_container
     def conflict_bundle(
         self,
         left: Path,
@@ -367,8 +397,12 @@ class SemanticStore:
         # plain JSONL whichever container the branch was read from. Its hashes
         # are the logical ones the plan named, which is what makes the conflict
         # id here the same id the user confirmed.
-        _copy_logical(left, stage / "left.jsonl")
-        _copy_logical(right, stage / "right.jsonl")
+        try:
+            _copy_logical(left, stage / "left.jsonl")
+            _copy_logical(right, stage / "right.jsonl")
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
         if not _bundle_holds(stage, left_hash, right_hash, committed=False):
             shutil.rmtree(stage, ignore_errors=True)
             raise FailSafeError("A conflict bundle failed verification before it was committed")

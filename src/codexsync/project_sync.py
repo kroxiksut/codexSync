@@ -22,8 +22,12 @@ The receiving machine merges a peer's publication into its own state:
   is added as the peer's own entry -- nothing is invented, the fields are the
   ones Codex wrote on the other machine. Two local candidates for one root is
   ``AMBIGUOUS`` and the project is left alone.
-- Nothing is ever removed. A project only this machine has stays, pinned and
-  ordered as it was.
+- A merge never removes a project because a peer lacks it. A project only
+  this machine has stays, pinned and ordered as it was. A project removed in
+  Codex is told apart by this machine's own last list (D-039): removed here,
+  it is not taken back from the others while the person decides (``[sync]
+  removed_projects = "ask"``); once removed on purpose, every other machine
+  removes it too, once.
 - For projects both machines know, the peer's pins, order and chat bindings
   win -- but only from a publication this machine has not taken yet. Which one
   it took last is recorded by *content id* in this machine's own file, so an
@@ -55,7 +59,7 @@ sidebar follows the JSON exactly -- so the JSON is what is carried.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
@@ -75,7 +79,7 @@ from .guardian_schema import (
     project_root_paths,
 )
 from .path_mapping import PathMappingRule, path_flavor
-from .sidebar_sections import merge_sections, published_sections
+from .sidebar_sections import forget_project, merge_sections, published_sections
 from .version import PRODUCER_VERSION
 from .fs_replace import replace_with_retry
 
@@ -110,6 +114,19 @@ ROOTS_COLLAPSE = "ROOTS_COLLAPSE"
 SKIPPED_HERE = "SKIPPED_HERE"
 #: The project was carried with a root naming nothing here; it now follows a place.
 ROOT_PLACED = "ROOT_PLACED"
+#: Removed in Codex here; the person has not said yet whether on purpose (D-039).
+REMOVED_HERE_WAITING = "REMOVED_HERE_WAITING"
+#: Removed in Codex here on purpose; the other machines remove it too.
+REMOVED_HERE = "REMOVED_HERE"
+#: Removed on purpose on another machine; removed here too.
+REMOVED_ELSEWHERE = "REMOVED_ELSEWHERE"
+#: Another machine removed it, and more than one project here could be it.
+REMOVAL_AMBIGUOUS = "REMOVAL_AMBIGUOUS"
+
+#: `[sync] removed_projects` (D-039): what a project removed in Codex on this
+#: machine means. ``ask`` holds it back until the person says; ``remove`` takes
+#: it off the other machines too; ``bring_back`` puts it back here from them.
+REMOVED_PROJECTS_POLICIES: tuple[str, ...] = ("ask", "remove", "bring_back")
 
 
 class ProjectSyncError(ValueError):
@@ -127,11 +144,61 @@ class MergeKind(str, Enum):
     ADD = "ADD"
     #: Cannot be told apart safely; left alone.
     AMBIGUOUS = "AMBIGUOUS"
+    #: Removed on purpose on another machine; removed here (D-039).
+    REMOVE = "REMOVE"
+    #: Only the peer has it, but it was removed here or elsewhere: not added.
+    HELD = "HELD"
     #: This machine was told not to carry it.
     SKIPPED = "SKIPPED"
     #: Already here with the peer's root, which names nothing here; its root
     #: is rewritten to the place it now has.
     PLACED = "PLACED"
+
+
+@dataclass(frozen=True, slots=True)
+class Removal:
+    """A project removed in Codex on the machine that publishes it (D-039).
+
+    ``confirmed`` is the person's (or the policy's) word that it was on
+    purpose; only then do the other machines remove it too. Until then the
+    machine that lost it only stops taking it back.
+    """
+
+    removal_id: str
+    project_id: str
+    name: str
+    #: Its roots as that machine had them.
+    roots: tuple[str, ...]
+    removed_at_utc: str
+    confirmed: bool = False
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "removal_id": self.removal_id, "project_id": self.project_id, "name": self.name,
+            "roots": list(self.roots), "removed_at_utc": self.removed_at_utc, "confirmed": self.confirmed,
+        }
+
+    @staticmethod
+    def from_json(raw: Any) -> "Removal":
+        if not isinstance(raw, dict) or not isinstance(raw.get("removal_id"), str) or not raw["removal_id"]:
+            raise ProjectSyncError("a removal lacks its id")
+        if not isinstance(raw.get("project_id"), str) or not raw["project_id"]:
+            raise ProjectSyncError("a removal lacks its project id")
+        return Removal(
+            raw["removal_id"], raw["project_id"], str(raw.get("name") or ""),
+            tuple(str(item) for item in raw.get("roots") or ()),
+            str(raw.get("removed_at_utc") or ""), raw.get("confirmed") is True,
+        )
+
+
+def new_removal(
+    machine: str, project_id: str, entry: dict[str, Any], *, confirmed: bool, now: str, basis: str,
+) -> Removal:
+    """``basis`` is the publication the removal was found against: the id stays
+    the same between a preview and its apply, and differs for a later removal."""
+    name = entry.get("name") if isinstance(entry.get("name"), str) else ""
+    removal_id = _digest(["removal", machine, project_id, basis])[:24]
+    return Removal(removal_id, project_id, name, project_root_paths(ELECTRON_V2_SCHEMA, entry), now, confirmed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +224,20 @@ class Publication:
     sections: dict[str, Any] | None = None
     published_at_utc: str = ""
     producer_version: str = PRODUCER_VERSION
+    #: Projects removed in Codex here (D-039). Outside the content id, like
+    #: ``projectless``: a removal is read from every list, taken or not.
+    removed: tuple[Removal, ...] = ()
+    #: Removal ids of other machines this machine has already acted on, so a
+    #: project created here again later is not removed a second time.
+    followed: tuple[str, ...] = ()
+    #: Chat items of other machines' sections whose chat was not here yet, so
+    #: a later merge places each once it arrives (CS-528). Outside the content id.
+    section_waiting: tuple[str, ...] = ()
+
+    @property
+    def waiting(self) -> tuple[Removal, ...]:
+        """Removals here the person has not answered yet."""
+        return tuple(item for item in self.removed if not item.confirmed)
 
     @property
     def content(self) -> dict[str, Any]:
@@ -193,6 +274,10 @@ class Publication:
             "accepted": dict(sorted(self.accepted.items())),
             "published_at_utc": self.published_at_utc,
             "producer_version": self.producer_version,
+            # Only when there are any, so an older reader sees the same file.
+            **({"removed": [item.to_json() for item in self.removed]} if self.removed else {}),
+            **({"followed": sorted(self.followed)} if self.followed else {}),
+            **({"section_waiting": sorted(self.section_waiting)} if self.section_waiting else {}),
         }
         return {**body, "entry_digest": _digest(body)}
 
@@ -245,10 +330,30 @@ class ProjectMergePlan:
     bound_by_folder: int = 0
     #: Sidebar sections added or changed (CS-408).
     sections_changed: int = 0
+    #: This machine's removals as they stand after this run (D-039).
+    removals: tuple[Removal, ...] = ()
+    #: Other machines' removal ids acted on here, including this run's.
+    followed: tuple[str, ...] = ()
+    #: Section chat items waiting for their chat to arrive here (CS-528).
+    section_waiting: tuple[str, ...] = ()
 
     @property
     def added(self) -> tuple[ProjectMergeItem, ...]:
         return tuple(item for item in self.items if item.kind is MergeKind.ADD)
+
+    @property
+    def removed(self) -> tuple[ProjectMergeItem, ...]:
+        """Projects another machine removed on purpose, removed here by this plan."""
+        return tuple(item for item in self.items if item.kind is MergeKind.REMOVE)
+
+    @property
+    def held(self) -> tuple[ProjectMergeItem, ...]:
+        return tuple(item for item in self.items if item.kind is MergeKind.HELD)
+
+    @property
+    def waiting(self) -> tuple[Removal, ...]:
+        """Removals here waiting for the person's answer."""
+        return tuple(item for item in self.removals if not item.confirmed)
 
     @property
     def ambiguous(self) -> tuple[ProjectMergeItem, ...]:
@@ -270,15 +375,16 @@ class ProjectMergePlan:
     @property
     def writes(self) -> bool:
         return (
-            bool(self.added) or bool(self.placed) or self.pins_changed or self.order_changed
-            or self.bindings_written > 0 or self.bound_by_folder > 0 or self.sections_changed > 0
+            bool(self.added) or bool(self.placed) or bool(self.removed) or self.pins_changed
+            or self.order_changed or self.bindings_written > 0 or self.bound_by_folder > 0
+            or self.sections_changed > 0
         )
 
     @property
     def action_count(self) -> int:
         return (
-            len(self.added) + len(self.placed) + int(self.pins_changed) + int(self.order_changed)
-            + self.bindings_written + self.bound_by_folder + self.sections_changed
+            len(self.added) + len(self.placed) + len(self.removed) + int(self.pins_changed)
+            + int(self.order_changed) + self.bindings_written + self.bound_by_folder + self.sections_changed
         )
 
 
@@ -364,6 +470,7 @@ def _legacy_binding(value: Any, reverse: dict[str, str]) -> str | None:
 def publication_from_state(
     state: dict[str, Any], machine: str, *, accepted: dict[str, str] | None = None,
     now: Callable[[], str] = now_utc,
+    removed: Iterable[Removal] = (), followed: Iterable[str] = (), section_waiting: Iterable[str] = (),
 ) -> Publication:
     schema_id = require_carried_schema(state)
     projects = {
@@ -392,6 +499,9 @@ def publication_from_state(
         projectless=_projectless(state),
         sections=published_sections(state),
         published_at_utc=now(),
+        removed=tuple(sorted(removed, key=lambda item: item.removal_id)),
+        followed=tuple(sorted(set(followed))),
+        section_waiting=tuple(sorted(set(section_waiting))),
     )
 
 
@@ -435,6 +545,10 @@ def _parse(raw: Any, *, expected_machine: str) -> Publication:
         projectless = tuple(sorted({str(item) for item in body.get("projectless") or ()}))
         # Absent before CS-408.
         sections = body.get("sections") if isinstance(body.get("sections"), dict) else None
+        # Absent before D-039.
+        removed = tuple(Removal.from_json(item) for item in body.get("removed") or ())
+        followed = tuple(sorted({str(item) for item in body.get("followed") or ()}))
+        section_waiting = tuple(sorted({str(item) for item in body.get("section_waiting") or ()}))
         return Publication(
             machine=expected_machine,
             schema_id=str(body["schema_id"]),
@@ -447,6 +561,9 @@ def _parse(raw: Any, *, expected_machine: str) -> Publication:
             sections=sections,
             published_at_utc=str(body.get("published_at_utc", "")),
             producer_version=str(body.get("producer_version", "")),
+            removed=removed,
+            followed=followed,
+            section_waiting=section_waiting,
         )
     except (KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, ProjectSyncError):
@@ -530,6 +647,9 @@ def build_project_merge(
     skipped: frozenset[str] = frozenset(),
     chats: Iterable[tuple[str, str | None]] = (),
     native: Callable[[str], bool] = lambda root: True,
+    own: Publication | None = None,
+    removed_projects: str = "bring_back",
+    now: Callable[[], str] = now_utc,
 ) -> tuple[ProjectMergePlan, dict[str, Any]]:
     """The merge of ``peers`` into this machine's state, and the state it produces.
 
@@ -546,12 +666,18 @@ def build_project_merge(
     this machine's system writes paths; Codex is not relied on to place a chat
     under one that is not. Reads only; the caller writes the returned state
     through the global-state envelope.
+
+    ``own`` is this machine's last publication: a project it listed that the
+    state no longer holds was removed in Codex here, and ``removed_projects``
+    says what that means (D-039, `_removals`). A removal another machine
+    confirmed is applied here once.
     """
     state = json.loads(state_bytes.decode("utf-8-sig"))
     schema_id = require_carried_schema(state)
     chats = list(chats)
     chat_ids = [thread_id for thread_id, _ in chats if thread_id] if chats else None
     sections_changed = 0
+    section_waiting: set[str] = set()
     projects: dict[str, Any] = state.setdefault(_PROJECTS_KEY, {})
     original_order = [item for item in state.get(_ORDER_KEY) or [] if isinstance(item, str)]
     original_pinned = [item for item in state.get(_PINNED_KEY) or [] if isinstance(item, str)]
@@ -579,6 +705,10 @@ def build_project_merge(
         for peer_id, entry in peer.projects.items():
             for root in project_root_paths(ELECTRON_V2_SCHEMA, entry):
                 published.setdefault(root_key(root), set()).add(peer_id)
+    removals, followed, in_effect = _removals(
+        state, projects, bindings, reverse, schema_id, [peer for peer, _ in pending + earlier],
+        machine=machine, own=own, policy=removed_projects, map_root=map_root, now=now, items=items,
+    )
     for peer, fresh in pending + earlier:
         if peer.schema_id != ELECTRON_V2_SCHEMA:
             if fresh:
@@ -596,7 +726,11 @@ def build_project_merge(
                 map_root=map_root, folder_exists=folder_exists,
                 collapsing=collapsing, skipped=skipped, published=published,
             )
-            if fresh or item.kind in {MergeKind.ADD, MergeKind.PLACED, MergeKind.AMBIGUOUS}:
+            if item.kind is MergeKind.ADD:
+                code = _held_by(peer, peer_id, entry, in_effect, machine=machine, map_root=map_root)
+                if code is not None:
+                    item = ProjectMergeItem(peer.machine, peer_id, MergeKind.HELD, None, item.name, item.roots, (code,))
+            if fresh or item.kind in {MergeKind.ADD, MergeKind.PLACED, MergeKind.AMBIGUOUS, MergeKind.HELD}:
                 items.append(item)
             if item.local_project_id is None:
                 continue
@@ -636,12 +770,17 @@ def build_project_merge(
             current = _legacy_binding(bindings.get(thread_id), reverse)
             if current == local_project:
                 continue
-            if not fresh and (peer_project not in settled_now or current is not None):
+            # A binding of a kind not carried (a remote project, CS-526) is
+            # still a binding: only a fresh list of a project both know moves it.
+            if not fresh and (peer_project not in settled_now or bindings.get(thread_id) is not None):
                 continue
             bindings[thread_id] = build_binding_value(schema_id, local_project)
             bindings_written += 1
 
-        sections_changed += merge_sections(state, peer.sections, projects=translate, fresh=fresh, chats=chat_ids)
+        sections_changed += merge_sections(
+            state, peer.sections, projects=translate, fresh=fresh, chats=chat_ids,
+            deferred=own.section_waiting if own is not None else (), waiting=section_waiting,
+        )
 
     kept_apart = set(_projectless(state))
     for peer, _ in translations:
@@ -650,6 +789,15 @@ def build_project_merge(
         chats, bindings, projects, schema_id, reverse, translations, frozenset(kept_apart), native,
     )
 
+    # A removal here ends once its folder is a project here again, even one
+    # this very merge added (made again elsewhere after the removal).
+    present = [
+        _root_keys(project_root_paths(schema_id, entry)) for entry in projects.values() if isinstance(entry, dict)
+    ]
+    removals = tuple(
+        item for item in removals
+        if item.project_id not in projects and not any(_root_keys(item.roots) & keys for keys in present)
+    )
     order = [pid for pid in order if pid in projects]
     pinned = [pid for pid in pinned if pid in projects]
     # A state that never held a project has no order key at all; one that
@@ -670,8 +818,178 @@ def build_project_merge(
         state_sha256=hashlib.sha256(state_bytes).hexdigest(),
         bound_by_folder=bound_by_folder,
         sections_changed=sections_changed,
+        removals=removals,
+        followed=followed,
+        section_waiting=tuple(sorted(section_waiting)),
     )
     return _with_plan_id(plan), state
+
+
+def _root_keys(roots: Iterable[str]) -> set[str]:
+    return {root_key(root) for root in roots}
+
+
+def _keys_here(roots: Iterable[str], machine: str | None, map_root: Callable[[str, str], str]) -> set[str]:
+    """Another machine's roots as they read here; ``machine=None`` for this one's own."""
+    keys: set[str] = set()
+    for root in roots:
+        if machine is None:
+            keys.add(root_key(root))
+            continue
+        try:
+            keys.add(root_key(map_root(machine, root)))
+        except (RootMappingAmbiguous, RootNotPlaced):
+            # Carried as it is (D-034), so compared as it is.
+            keys.add(root_key(root))
+    return keys
+
+
+def _removals(
+    state: dict[str, Any],
+    projects: dict[str, Any],
+    bindings: dict[str, Any],
+    reverse: dict[str, str],
+    schema_id: str,
+    peers: list[Publication],
+    *,
+    machine: str,
+    own: Publication | None,
+    policy: str,
+    map_root: Callable[[str, str], str],
+    now: Callable[[], str],
+    items: list[ProjectMergeItem],
+) -> tuple[tuple[Removal, ...], tuple[str, ...], list[tuple[str | None, Removal]]]:
+    """Projects removed in Codex, here or on purpose elsewhere (D-039).
+
+    First the other machines' confirmed removals not acted on yet: the project
+    they name (by id, else the one project here under the same folder) is
+    removed from ``state`` with its bindings, pins, order and sidebar entries,
+    and the removal is recorded as followed -- once, so a project created
+    here again later stays. Then this machine's own: a project the last
+    publication listed that is neither here nor under its folder here, and
+    that no removal elsewhere explains, was removed in Codex here. ``ask``
+    records it waiting, ``remove`` confirmed, ``bring_back`` not at all (the
+    merge then takes it back from the other machines). A removal whose project
+    is here again is dropped.
+
+    Returns this machine's removals, the followed ids, and every removal in
+    effect as ``(owner or None for this machine, removal)`` for `_held_by`.
+    """
+    followed = set(own.followed) if own is not None else set()
+    live = {
+        pid: _root_keys(project_root_paths(schema_id, entry))
+        for pid, entry in projects.items() if isinstance(entry, dict)
+    }
+    elsewhere = sorted(
+        ((peer.machine, removal) for peer in peers if peer.machine != machine
+         for removal in peer.removed if removal.confirmed),
+        key=lambda pair: (pair[0], pair[1].removal_id),
+    )
+    for owner, removal in elsewhere:
+        if removal.removal_id in followed:
+            continue
+        wanted = _keys_here(removal.roots, owner, map_root)
+        if removal.project_id in live:
+            candidates = [removal.project_id]
+        else:
+            candidates = sorted(pid for pid, keys in live.items() if keys & wanted)
+        if len(candidates) > 1:
+            # Not followed: asked again once only one project is left that could be it.
+            items.append(ProjectMergeItem(owner, removal.project_id, MergeKind.AMBIGUOUS, None, removal.name,
+                                          removal.roots, (REMOVAL_AMBIGUOUS,)))
+            continue
+        followed.add(removal.removal_id)
+        if not candidates:
+            continue
+        local = candidates[0]
+        roots_here = project_root_paths(schema_id, projects[local])
+        _forget_project(state, projects, bindings, reverse, local)
+        live.pop(local, None)
+        items.append(ProjectMergeItem(owner, removal.project_id, MergeKind.REMOVE, local, removal.name,
+                                      roots_here, (REMOVED_ELSEWHERE,)))
+
+    def explained_elsewhere(project_id: str, keys: set[str]) -> bool:
+        return any(
+            removal.project_id == project_id or keys & _keys_here(removal.roots, owner, map_root)
+            for owner, removal in elsewhere
+        )
+
+    def here_again(project_id: str, keys: set[str]) -> bool:
+        return project_id in live or any(keys & other for other in live.values())
+
+    mine: dict[str, Removal] = {}
+    if policy != "bring_back":
+        for removal in own.removed if own is not None else ():
+            if here_again(removal.project_id, _root_keys(removal.roots)):
+                continue
+            if policy == "remove" and not removal.confirmed:
+                removal = Removal(removal.removal_id, removal.project_id, removal.name, removal.roots,
+                                  removal.removed_at_utc, True)
+            mine[removal.project_id] = removal
+        stamp = now()
+        for project_id, entry in sorted((own.projects if own is not None else {}).items()):
+            keys = _root_keys(project_root_paths(ELECTRON_V2_SCHEMA, entry))
+            if project_id in mine or here_again(project_id, keys) or explained_elsewhere(project_id, keys):
+                continue
+            mine[project_id] = new_removal(
+                machine, project_id, entry, confirmed=policy == "remove", now=stamp,
+                basis=own.publication_id if own is not None else "",
+            )
+    in_effect: list[tuple[str | None, Removal]] = [(None, removal) for removal in mine.values()]
+    in_effect += list(elsewhere)
+    return (
+        tuple(sorted(mine.values(), key=lambda item: item.removal_id)),
+        tuple(sorted(followed)),
+        in_effect,
+    )
+
+
+def _forget_project(
+    state: dict[str, Any], projects: dict[str, Any], bindings: dict[str, Any], reverse: dict[str, str],
+    project_id: str,
+) -> None:
+    """Take one project out of the state as Codex leaves it after a removal.
+
+    Its entry, the chat bindings pointing at it (those chats then sit where
+    their folder puts them), and its sidebar entries; pins and order are
+    filtered at the end of the merge. The app-server id map and Codex's own
+    SQLite rows are left alone: Codex was seen keeping a removed project out
+    of its list with both still there (Linux, 2026-10-26).
+    """
+    projects.pop(project_id, None)
+    for thread_id, value in list(bindings.items()):
+        if _legacy_binding(value, reverse) == project_id:
+            del bindings[thread_id]
+    forget_project(state, project_id)
+
+
+def _held_by(
+    peer: Publication,
+    peer_id: str,
+    entry: dict[str, Any],
+    in_effect: list[tuple[str | None, Removal]],
+    *,
+    machine: str,
+    map_root: Callable[[str, str], str],
+) -> str | None:
+    """Why a project only ``peer`` has is not added here, or ``None``.
+
+    A peer that already acted on a removal and still has a project there made
+    it again after the removal, so its list is believed.
+    """
+    keys: set[str] | None = None
+    for owner, removal in in_effect:
+        if owner == peer.machine or removal.removal_id in peer.followed:
+            continue
+        if peer_id != removal.project_id:
+            if keys is None:
+                keys = _keys_here(project_root_paths(ELECTRON_V2_SCHEMA, entry), peer.machine, map_root)
+            if not keys & _keys_here(removal.roots, owner, map_root):
+                continue
+        if owner is not None:
+            return REMOVED_ELSEWHERE
+        return REMOVED_HERE if removal.confirmed else REMOVED_HERE_WAITING
+    return None
 
 
 def _bind_by_folder(
@@ -716,7 +1034,8 @@ def _bind_by_folder(
     for thread_id, cwd in sorted(set(chats), key=lambda item: item[0]):
         if not thread_id or not cwd or thread_id in kept_apart:
             continue
-        if _legacy_binding(bindings.get(thread_id), reverse) is not None:
+        if bindings.get(thread_id) is not None:
+            # Any binding, of whatever kind, is Codex's own answer (CS-526).
             continue
         if _project_under(cwd, placing, schema_id, allow_tie=True) is not False:
             continue
@@ -897,19 +1216,11 @@ def _with_plan_id(plan: ProjectMergePlan) -> ProjectMergePlan:
         "bindings_written": plan.bindings_written,
         "bound_by_folder": plan.bound_by_folder,
         **({"sections_changed": plan.sections_changed} if plan.sections_changed else {}),
+        # Only when there are any, so every earlier plan keeps its id (D-039).
+        **({"removals": [[item.removal_id, item.confirmed] for item in plan.removals]} if plan.removals else {}),
+        **({"followed": list(plan.followed)} if plan.followed else {}),
     }
-    return ProjectMergePlan(
-        machine=plan.machine,
-        items=plan.items,
-        taken=plan.taken,
-        pins_changed=plan.pins_changed,
-        order_changed=plan.order_changed,
-        bindings_written=plan.bindings_written,
-        state_sha256=plan.state_sha256,
-        plan_id=_digest(material)[:32],
-        bound_by_folder=plan.bound_by_folder,
-        sections_changed=plan.sections_changed,
-    )
+    return dataclass_replace(plan, plan_id=_digest(material)[:32])
 
 
 def serialise_state(state: dict[str, Any]) -> bytes:

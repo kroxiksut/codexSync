@@ -113,6 +113,19 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(FailSafeError):
                 run_sync(ctx, dry_run=False)
 
+    def test_recovery_listing_retains_safe_session_failure_after_restart(self) -> None:
+        journal = self.journals.begin("sessions", "plan", 3, machine_id="machine-a")
+        journal = self.journals.transition(journal, JournalState.BACKED_UP)
+        journal = self.journals.transition(journal, JournalState.COMMITTING)
+        self.journals.transition(journal, JournalState.RECOVERY_REQUIRED, failure=FailSafeError("secret"),
+                                 failure_code="CODEX_STATE_UNKNOWN",
+                                 failure_params={"applied": 2, "copies": 3, "relative_path": "sessions/s3.jsonl"},
+                                 failure_message="Could not determine whether Codex is running.")
+        (info,) = list_journals(self.config_path)
+        self.assertEqual(info.failure_code, "CODEX_STATE_UNKNOWN")
+        self.assertEqual(info.failure_params["applied"], 2)
+        self.assertEqual(info.failure_params["relative_path"], "sessions/s3.jsonl")
+
     def test_resume_closes_the_journal_and_unblocks_a_rerun(self) -> None:
         operation_id = self._interrupt_sync_during_commit()
 
@@ -155,6 +168,24 @@ class RecoveryTests(unittest.TestCase):
                     run_sync(ctx, dry_run=False)
         after = manifest_file.read_bytes() if manifest_file.exists() else None
         self.assertEqual(after, before)
+
+    def test_a_rescan_failing_after_the_commit_does_not_fail_the_sync(self) -> None:
+        # CS-513: the rescan for the manifest ran before COMMITTED; an OSError
+        # there (a cloud client replacing a file) made a finished sync
+        # RECOVERY_REQUIRED and exit 1.
+        self.local_file.write_text("new", encoding="utf-8")
+        self.cloud_file.write_text("old", encoding="utf-8")
+        now_ns = time.time_ns()
+        os.utime(self.cloud_file, ns=(now_ns - 2_000_000_000, now_ns - 2_000_000_000))
+        os.utime(self.local_file, ns=(now_ns - 1_000_000_000, now_ns - 1_000_000_000))
+        with patch("codexsync.app._make_safety_gate", return_value=_StoppedGate()):
+            ctx = build_context(self.config_path, enforce_safety=True)
+        with patch("codexsync.app._build_indexes", side_effect=OSError("file busy")),                 patch("codexsync.backup.BackupManager.prune", side_effect=OSError("backup folder busy")):
+            run_sync(ctx, dry_run=False)
+        self.assertEqual(self.cloud_file.read_text(encoding="utf-8"), "new")
+        self.assertEqual(self.journals.non_terminal(), [])
+        [path] = list(self.journals.root.glob("*.json"))
+        self.assertEqual(self.journals.load(path.stem).state, JournalState.COMMITTED)
 
     def test_resume_waits_for_the_machine_lock(self) -> None:
         # CS-461: resume closed the journal while another run held the lock.
@@ -233,7 +264,7 @@ class RecoveryTests(unittest.TestCase):
         # happened before the backup was stamped, so nothing can have been
         # overwritten.
         journal = self.journals.begin(
-            "sync", "a" * 64, 1, backup_snapshot="machine-a-20260101T000000Z-deadbeef"
+            "sync", "a" * 64, 1, backup_snapshot="machine-a-20260101T000000Z-deadbeef0000"
         )
         with patch("codexsync.recovery._make_safety_gate", return_value=_StoppedGate()):
             outcome = rollback_operation(

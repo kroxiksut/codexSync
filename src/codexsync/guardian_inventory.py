@@ -45,6 +45,41 @@ MAX_LISTED_SNAPSHOTS = 500
 MAX_LISTED_QUARANTINE = 500
 
 
+class GuardianProblem(str):
+    """A ``problems`` line: the English text, plus a code and values for a window.
+
+    It is a ``str`` so the CLI and older callers print it unchanged; the window
+    says ``guardian.problem.<code>`` in its own language and falls back to the
+    English text for a plain string (CS-552).
+    """
+
+    code: str
+    params: dict[str, object]
+
+    def __new__(cls, code: str, text: str, **params: object) -> "GuardianProblem":
+        line = super().__new__(cls, text)
+        line.code = code
+        line.params = params
+        return line
+
+
+#: Every code a `GuardianProblem` may carry; each has a sentence in every language.
+PROBLEM_CODES = frozenset({
+    "POINTER_UNREADABLE",
+    "POINTER_OTHER_MACHINE",
+    "POINTER_BROKEN",
+    "POINTER_UNREADABLE_NOW",
+    "POINTER_NOT_USABLE",
+    "SNAPSHOT_NO_MANIFEST",
+    "SNAPSHOT_FOREIGN_MANIFEST",
+    "GENERATION_REUSED",
+    "SNAPSHOTS_TRUNCATED",
+    "QUARANTINE_NO_MANIFEST",
+    "QUARANTINE_FOREIGN_MANIFEST",
+    "QUARANTINE_TRUNCATED",
+})
+
+
 @dataclass(frozen=True, slots=True)
 class GuardianSnapshotInfo:
     snapshot_id: str
@@ -101,10 +136,11 @@ def read_guardian_inventory(config_path: Path) -> GuardianInventory:
     latest_good_id = _read_latest_good(root, machine, problems)
     snapshots = _list_snapshots(root, machine, latest_good_id, problems)
     if latest_good_id is None and any(item.committed and item.verified for item in snapshots):
-        problems.append(
+        problems.append(GuardianProblem(
+            "POINTER_NOT_USABLE",
             "No usable latest-good pointer although verified committed snapshots exist; "
-            "Guardian rebuilds it on its next run"
-        )
+            "Guardian compares new states with the newest of them",
+        ))
     quarantine = _list_quarantine(root, machine, problems)
     return GuardianInventory(machine, root, latest_good_id, snapshots, quarantine, tuple(problems))
 
@@ -116,16 +152,34 @@ def _read_latest_good(root: Path, machine: str, problems: list[str]) -> str | No
         return None
     pointer = _read_pointer(path)
     if pointer is None:
-        problems.append("latest-good pointer is unreadable or malformed")
+        problems.append(GuardianProblem("POINTER_UNREADABLE", "latest-good pointer is unreadable or malformed"))
         return None
     if pointer.machine_id != machine:
-        problems.append(f"latest-good pointer claims machine {pointer.machine_id!r}, expected {machine!r}")
+        problems.append(GuardianProblem(
+            "POINTER_OTHER_MACHINE",
+            f"latest-good pointer claims machine {pointer.machine_id!r}, expected {machine!r}",
+            machine=pointer.machine_id, expected=machine,
+        ))
         return None
-    if _snapshot_from_pointer(root, pointer) is None:
-        problems.append(
+    try:
+        snapshot = _snapshot_from_pointer(root, pointer)
+    except GuardianIntegrityError:
+        # A cloud client holding the payload is not damage, and a listing
+        # that stops on it shows nothing at all (CS-534).
+        problems.append(GuardianProblem(
+            "POINTER_UNREADABLE_NOW",
             f"latest-good pointer names snapshot {pointer.snapshot_id} (generation {pointer.generation}), "
-            "which is missing, uncommitted or fails verification"
-        )
+            "which cannot be read right now",
+            snapshot=pointer.snapshot_id, generation=pointer.generation,
+        ))
+        return None
+    if snapshot is None:
+        problems.append(GuardianProblem(
+            "POINTER_BROKEN",
+            f"latest-good pointer names snapshot {pointer.snapshot_id} (generation {pointer.generation}), "
+            "which is missing, uncommitted or fails verification",
+            snapshot=pointer.snapshot_id, generation=pointer.generation,
+        ))
         return None
     return pointer.snapshot_id
 
@@ -148,23 +202,35 @@ def _list_snapshots(
         try:
             manifest = load_guardian_manifest(directory / GUARDIAN_MANIFEST_NAME)
         except GuardianIntegrityError:
-            problems.append(f"snapshot directory {directory.name} has no readable manifest")
+            problems.append(GuardianProblem(
+                "SNAPSHOT_NO_MANIFEST", f"snapshot directory {directory.name} has no readable manifest",
+                name=directory.name,
+            ))
             continue
         if manifest.snapshot_id != directory.name or manifest.machine_id != machine:
-            problems.append(f"snapshot directory {directory.name} holds a manifest for another snapshot or machine")
+            problems.append(GuardianProblem(
+                "SNAPSHOT_FOREIGN_MANIFEST",
+                f"snapshot directory {directory.name} holds a manifest for another snapshot or machine",
+                name=directory.name,
+            ))
             continue
         loaded.append((manifest, directory))
 
     counts = Counter(manifest.generation for manifest, _ in loaded)
     for generation in sorted((g for g, n in counts.items() if n > 1), reverse=True):
         ids = sorted(manifest.snapshot_id for manifest, _ in loaded if manifest.generation == generation)
-        problems.append(f"generation {generation} is used by {len(ids)} snapshots: {', '.join(ids)}")
+        problems.append(GuardianProblem(
+            "GENERATION_REUSED", f"generation {generation} is used by {len(ids)} snapshots: {', '.join(ids)}",
+            generation=generation, count=len(ids), ids=", ".join(ids),
+        ))
 
     loaded.sort(key=lambda item: (item[0].generation, item[0].snapshot_id), reverse=True)
     if len(loaded) > MAX_LISTED_SNAPSHOTS:
-        problems.append(
-            f"listing truncated to the newest {MAX_LISTED_SNAPSHOTS} of {len(loaded)} snapshots"
-        )
+        problems.append(GuardianProblem(
+            "SNAPSHOTS_TRUNCATED",
+            f"listing truncated to the newest {MAX_LISTED_SNAPSHOTS} of {len(loaded)} snapshots",
+            shown=MAX_LISTED_SNAPSHOTS, total=len(loaded),
+        ))
         loaded = loaded[:MAX_LISTED_SNAPSHOTS]
 
     result: list[GuardianSnapshotInfo] = []
@@ -221,11 +287,17 @@ def _list_quarantine(root: Path, machine: str, problems: list[str]) -> tuple[Qua
         except (OSError, UnicodeError, ValueError):
             raw = None
         if not isinstance(raw, dict):
-            problems.append(f"quarantine event {directory.name} has no readable manifest")
+            problems.append(GuardianProblem(
+                "QUARANTINE_NO_MANIFEST", f"quarantine event {directory.name} has no readable manifest",
+                name=directory.name,
+            ))
             events.append(QuarantineInfo(directory.name, None, (), None))
             continue
         if raw.get("event_id") != directory.name:
-            problems.append(f"quarantine event {directory.name} has a manifest for another event")
+            problems.append(GuardianProblem(
+                "QUARANTINE_FOREIGN_MANIFEST", f"quarantine event {directory.name} has a manifest for another event",
+                name=directory.name,
+            ))
         created = raw.get("created_at_utc")
         codes = raw.get("reason_codes")
         size = raw.get("source_size")
@@ -241,8 +313,10 @@ def _list_quarantine(root: Path, machine: str, problems: list[str]) -> tuple[Qua
     # and a fallback order for an event whose manifest could not be read.
     events.sort(key=lambda event: (event.created_at_utc or "", event.event_id), reverse=True)
     if len(events) > MAX_LISTED_QUARANTINE:
-        problems.append(
-            f"quarantine listing truncated to the newest {MAX_LISTED_QUARANTINE} of {len(events)} events"
-        )
+        problems.append(GuardianProblem(
+            "QUARANTINE_TRUNCATED",
+            f"quarantine listing truncated to the newest {MAX_LISTED_QUARANTINE} of {len(events)} events",
+            shown=MAX_LISTED_QUARANTINE, total=len(events),
+        ))
         events = events[:MAX_LISTED_QUARANTINE]
     return tuple(events)

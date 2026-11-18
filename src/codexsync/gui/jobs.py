@@ -26,6 +26,7 @@ import time
 from typing import Any, Callable, Iterable
 
 from .controller import Failure, Outcome
+from ..progress import ProgressEstimate, ProgressEstimator, ProgressEvent
 
 #: Every kind a page may name. Each has a ``job.<kind>`` sentence in every
 #: language file; a job started without a kind is described by its page.
@@ -51,6 +52,8 @@ JOB_KINDS = (
     "project_files",
     "project_places",
     "project_place",
+    "project_removals",
+    "project_removal",
     "guardian_inventory",
     "guardian_snapshot",
     "guardian_restore_preview",
@@ -109,6 +112,10 @@ class RunningJob:
     started_at: float
     #: The last ``(phase, done, total)`` the job reported, if it reports.
     progress: tuple[str, int, int] | None = None
+    progress_event: ProgressEvent | None = None
+    progress_estimate: ProgressEstimate | None = None
+    estimator: ProgressEstimator | None = None
+    estimate_phase: str | None = None
 
     @property
     def shared(self) -> bool:
@@ -129,6 +136,7 @@ class FinishedJob:
     failure: Failure | None
     #: The person stopped waiting; the work itself may have run on.
     abandoned: bool = False
+    progress: tuple[str, int, int] | None = None
 
 
 class JobBook:
@@ -156,6 +164,7 @@ class JobBook:
         job = RunningJob(
             page=page, kind=kind, apply=apply, model=model, cancellable=cancellable,
             dry_run=dry_run, started=self._clock(), started_at=self._wall(),
+            estimator=ProgressEstimator(),
         )
         self.running[token] = job
         return job
@@ -177,6 +186,7 @@ class JobBook:
             seconds=max(0.0, self._clock() - job.started),
             failure=None if outcome is None else outcome.failure,
             abandoned=abandoned,
+            progress=job.progress,
         ))
         return job
 
@@ -201,6 +211,18 @@ class JobBook:
         if job is None:
             return False
         job.progress = (phase, done, total)
+        event = ProgressEvent(
+            operation=job.kind or job.page,
+            phase=phase,
+            completed=done,
+            total=total if total > 0 else None,
+        )
+        job.progress_event = event
+        if job.estimate_phase != phase:
+            job.estimator = ProgressEstimator()
+            job.estimate_phase = phase
+        if job.estimator is not None:
+            job.progress_estimate = job.estimator.update(event, now=self._clock())
         return True
 
 

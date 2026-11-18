@@ -285,7 +285,10 @@ class MainWindow(QMainWindow):
         def done(outcome: Outcome) -> None:
             if self._jobs_book.finish(key[0], outcome) is None:
                 return  # abandoned: the "stopped waiting" outcome was applied already
-            stale = cancellable and generation != self._generation
+            # A dry run writes nothing either, and its result is what unlocks
+            # an apply: one proved under the old rules must not unlock it under
+            # the new ones (CS-508). A real write keeps its real outcome.
+            stale = (cancellable or dry_run) and generation != self._generation
             if stale:
                 # The file was saved while this read ran: `config_changed`
                 # already forgot every plan, and this one was built under the
@@ -403,8 +406,21 @@ class MainWindow(QMainWindow):
             if job.progress is None or self._models.get(job.page) is not job.model:
                 continue
             if (kind is not None and job.kind == kind) or (kind is None and job.page == page):
-                return self.phase_text(job.progress)
+                return self.job_progress_text(job)
         return ""
+
+    def job_progress_text(self, job) -> str:
+        """Phase count plus a rate/ETA once this phase has enough samples."""
+        base = self.phase_text(job.progress)
+        if not base or job.progress is None:
+            return base
+        estimate = job.progress_estimate
+        if job.progress[2] <= 0 or estimate is None or estimate.items_per_second is None or estimate.remaining_seconds is None:
+            return f"{base} · {self._catalog.text('progress.estimating')}"
+        rate = estimate.items_per_second * 60
+        seconds = max(0, int(estimate.remaining_seconds + 0.5))
+        eta = self._catalog.plural("common.seconds", seconds)
+        return f"{base} · {self._catalog.text('progress.rate_eta', rate=f'{rate:.1f}', eta=eta)}"
 
     def _update_activity(self) -> None:
         if not hasattr(self, "_activity_label"):
@@ -433,7 +449,8 @@ class MainWindow(QMainWindow):
             _phase, done, total = reported
             self._activity_bar.setRange(0, total)
             self._activity_bar.setValue(done)
-            self._activity_label.setText(self.phase_text(reported))
+            job = next((item for item in running.values() if item.progress == reported), None)
+            self._activity_label.setText(self.phase_text(reported) if job is None else self.job_progress_text(job))
         else:
             self._activity_bar.setRange(0, 0)
             self._activity_label.setText(self._catalog.plural(

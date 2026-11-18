@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .exceptions import ConfigError
 from .filters import PathFilter
 from .models import AppConfig
 from .runtime import SECRET_NAMES, _is_semantic_owned
@@ -71,6 +72,20 @@ def list_sync_candidates(cfg: AppConfig, relative: str = "") -> tuple[SyncCandid
     dialog only ever shows one level at a time anyway.
     """
     node = relative.replace("\\", "/").strip("/")
+    parts = [part for part in node.split("/") if part]
+    # Only inside `.codex` and its mirror, and never inside a folder whose
+    # name marks a secret: `..` listed the folders above, and a secret folder
+    # listed the names of what it holds (CS-540).
+    if any(part in {".", ".."} or ":" in part for part in parts):
+        raise ConfigError(
+            f"{relative!r} is not a folder inside the Codex state directory",
+            code="ROOT_OUTSIDE_STATE", params={"path": relative},
+        )
+    if any(part in SECRET_NAMES for part in parts):
+        raise ConfigError(
+            f"{relative!r} is a secret folder; codexSync does not list it",
+            code="ROOT_IS_SECRET", params={"path": relative},
+        )
     local_root = locate_local_state_dir(cfg)
     roots = {"local": local_root, "cloud": cfg.paths.cloud_root_dir}
 

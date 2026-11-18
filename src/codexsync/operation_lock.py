@@ -7,6 +7,7 @@ from pathlib import Path
 import threading
 
 from .exceptions import OperationBusyError
+from .guardian_models import normalize_machine_id
 
 #: Lock files this thread holds with ``reentrant=True``, with their depth.
 _HELD = threading.local()
@@ -47,7 +48,11 @@ class OperationLock:
         reentrant: bool = False,
     ) -> None:
         canonical_state = str(state_root.resolve()).casefold() if os.name == "nt" else str(state_root.resolve())
-        material = "\0".join((canonical_state, machine_id)).encode("utf-8")
+        # The machine's name as every other record keys it: `state-backup`
+        # used the normalised one and the rest the raw one, which made two
+        # locks for one machine whose host name is `My PC` (CS-511).
+        machine_key = normalize_machine_id(machine_id) or "unknown-machine"
+        material = "\0".join((canonical_state, machine_key)).encode("utf-8")
         self.path = root / "locks" / f"{hashlib.sha256(material).hexdigest()}.lock"
         self.family = family
         self._reentrant = reentrant

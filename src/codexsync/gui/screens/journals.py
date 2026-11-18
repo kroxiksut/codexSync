@@ -22,7 +22,9 @@ from PySide6.QtWidgets import QComboBox, QSplitter
 from ...codex_health import CATALOGUE_MISSES_CHATS, Severity
 from .. import theme
 from ..controller import Outcome
-from ..widgets import Banner, Cell, button, card, fill_table, label, row, selected_data, set_tone, table
+from ..widgets import (
+    Banner, Cell, button, card, fill_table, keep_content_height, label, row, selected_data, set_tone, table,
+)
 from .base import Model, Screen
 from .guardian import _when
 
@@ -114,6 +116,7 @@ class RecoveryScreen(Screen):
 
         actions, actions_inner = card(self.t("recovery.actions.title"))
         self.evidence = label("", wrap=True)
+        self.evidence.setTextFormat(Qt.PlainText)
         actions_inner.addWidget(self.evidence)
 
         self.resume_dry = button(self.t("recovery.resume.dry"))
@@ -147,6 +150,10 @@ class RecoveryScreen(Screen):
         self.splitter.setHandleWidth(theme.GRID_GAP)
         self.splitter.addWidget(frame)
         self.splitter.addWidget(actions)
+        # A two-line banner plus evidence that wraps (a long backup name) made
+        # the card shorter than its text: rows overlapped, buttons were cut (CS-484).
+        keep_content_height(actions)
+        self.actions_card = actions
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
         self.body.addWidget(self.splitter, stretch=1)
@@ -240,6 +247,31 @@ class RecoveryScreen(Screen):
             return Outcome(value=(done, controller.codex_check() if done.ok else None))
 
         self.run(go, self._codex_written, kind="catalogue_rebuild")
+
+    def _result_text(self, value) -> str:
+        """A recovery's result in the window's language, from its fields only.
+
+        The core's ``detail`` is the English line the CLI prints; appending it
+        left a Russian window saying "Откат выполнен. Restored 1 file(s)..." (CS-485).
+        """
+        action = value.action.value
+        would = value.would
+        if action == "WOULD_RECOVER" and would is not None:
+            # Worded from what core checked, not from the button (CS-549): a
+            # rollback with nothing replaced never read its snapshot.
+            if would.value == "ROLLED_BACK":
+                return self.t("recovery.result.would_rollback", snapshot=value.snapshot or "—")
+            if would.value == "NOTHING_TO_ROLL_BACK":
+                return self.t("recovery.result.would_close_unreplaced")
+        family_key = f"journal.family.{value.family}"
+        family = self.t(family_key) if self.host.catalog.has(family_key) else value.family
+        if action == "RETRY_ALLOWED" and not value.snapshot_kept:
+            return self.t("recovery.result.closed_no_backup", family=family)
+        key = f"recovery.action.{action}"
+        params = {"family": family, "snapshot": value.snapshot or "—"}
+        if self.host.catalog.is_plural(key):
+            return self.p(key, value.restored_files, **params)
+        return self.t(key, **params)
 
     @staticmethod
     def _codex_written(model: RecoveryModel, outcome: Outcome) -> None:
@@ -380,9 +412,17 @@ class RecoveryScreen(Screen):
                     state, tone = self.t(f"journal.state.{journal.state}"), None
                 else:
                     state, tone = self.t(f"journal.state.{journal.state}"), "danger"
-                snapshot = journal.backup_snapshot or "—"
+                snapshot, snapshot_tone = journal.backup_snapshot or "—", None
                 if journal.backup_snapshot and journal.backup_snapshot_present is False:
-                    snapshot = self.t("recovery.backup.missing", name=journal.backup_snapshot)
+                    # A closed journal's copy was either never needed (nothing
+                    # existed to overwrite) or pruned by age, and one that
+                    # stopped before its commit phase replaced nothing; only an
+                    # open one past that phase has lost something (CS-485, CS-549).
+                    if not journal.backup_needed:
+                        snapshot = self.t("recovery.backup.not_kept", name=journal.backup_snapshot)
+                    else:
+                        snapshot = self.t("recovery.backup.missing", name=journal.backup_snapshot)
+                        snapshot_tone = "danger"
                 if journal.own:
                     machine = self.t("recovery.machine.this", machine=journal.machine_id or self.host.machine_id() or "—")
                 else:
@@ -393,7 +433,7 @@ class RecoveryScreen(Screen):
                     Cell(self.t(f"journal.family.{journal.family}") if journal.family and self.host.catalog.has(f"journal.family.{journal.family}") else (journal.family or "—")),
                     Cell(_when(journal.created_at_utc) if journal.created_at_utc else "—"),
                     Cell(str(journal.action_count) if journal.action_count is not None else "—"),
-                    Cell(snapshot, muted=True),
+                    Cell(snapshot, tone=snapshot_tone, muted=snapshot_tone is None),
                     Cell(journal.operation_id, muted=True),
                 ])
             self.table.blockSignals(True)
@@ -508,6 +548,16 @@ class RecoveryScreen(Screen):
                     "recovery.evidence.other_machine",
                     machine=journal.machine_id or self.t("recovery.machine.unknown"),
                 )
+            params = journal.failure_params or {}
+            if journal.failure_code and isinstance(params.get("applied"), int) and isinstance(params.get("copies"), int):
+                text += "\n" + self.t(
+                    "recovery.evidence.transfer", applied=params["applied"], copies=params["copies"],
+                    deleted=params.get("deleted", 0), deletions=params.get("deletions", 0),
+                    path=params.get("relative_path", "—"), code=journal.failure_code,
+                )
+                reason_key = f"recovery.failure.{journal.failure_code}"
+                if self.host.catalog.has(reason_key):
+                    text += "\n" + self.t(reason_key)
             self.evidence.setText(text)
 
         text, tone = "", None
@@ -516,8 +566,7 @@ class RecoveryScreen(Screen):
         elif model.result is not None:
             if model.result.ok:
                 value = model.result.value
-                text = self.t(f"recovery.action.{value.action.value}") + " " + value.detail
-                tone = "ok"
+                text, tone = self._result_text(value), "ok"
             else:
                 text, tone = self.failure_text(model.result), "danger"
         elif journal is not None and not journal.terminal and journal.readable:

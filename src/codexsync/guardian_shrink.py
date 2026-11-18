@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .guardian_models import GuardianManifest, ValidationReport, ValidationStatus
+from .guardian_models import GuardianManifest, ValidationReport, ValidationStatus, holds_no_projects
 
 
 PROJECT_COUNT_DROP = "PROJECT_COUNT_DROP"
@@ -32,7 +32,12 @@ def assess_suspicious_shrink(
         return _indeterminate(candidate, BASELINE_UNVERIFIED)
     if not candidate.schema_id or not baseline.schema_id:
         return _indeterminate(candidate, UNKNOWN_SCHEMA)
-    if candidate.schema_id != baseline.schema_id:
+    if candidate.schema_id != baseline.schema_id and not (
+        holds_no_projects(candidate.project_count, candidate.binding_count)
+        or holds_no_projects(baseline.project_count, baseline.binding_count)
+    ):
+        # An empty project list has no schema of its own (CS-487): losing
+        # every project is a drop to compare, not a format change.
         return _indeterminate(candidate, BASELINE_SCHEMA_MISMATCH)
     if candidate.project_count is None or candidate.binding_count is None:
         return _indeterminate(candidate, UNKNOWN_SCHEMA)

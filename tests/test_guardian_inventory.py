@@ -170,6 +170,22 @@ class GuardianInventoryTests(unittest.TestCase):
         self.assertTrue(any(second.snapshot_id in problem for problem in inventory.problems))
         self.assertEqual(self.pointer.read_bytes(), pointer_bytes)
 
+    def test_a_snapshot_a_cloud_client_holds_is_a_problem_line_not_a_failure(self) -> None:
+        # CS-534: the payload could not be read right now; the listing raised
+        # GuardianIntegrityError and `guardian list` exited 5.
+        from codexsync.exceptions import GuardianIntegrityError
+
+        self._store().commit(_observation(b'{"version":1}'), _passed())
+
+        def held(snapshot):
+            raise GuardianIntegrityError("payload cannot be read") from PermissionError(13, "held")
+
+        with patch("codexsync.guardian_pointer.verify_guardian_snapshot", side_effect=held):
+            inventory = read_guardian_inventory(self.config_path)
+        self.assertIsNone(inventory.latest_good_id)
+        self.assertTrue(any("cannot be read right now" in problem for problem in inventory.problems))
+        self.assertEqual(len(inventory.snapshots), 1)
+
     def test_unreadable_pointer_is_reported(self) -> None:
         self._store().commit(_observation(b'{"version":1}'), _passed())
         self.pointer.write_text("not-json", encoding="utf-8")

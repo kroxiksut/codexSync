@@ -248,7 +248,9 @@ def build_settle_plan(
     source = snapshot = None
     # Only a status whose meaning was observed is settled; an unknown one is
     # Codex's own, and writing `complete` over it would be a guess (CS-394).
-    if current is not None and current[0] in {BACKFILL_RUNNING, BACKFILL_PENDING}:
+    # A value of a type that cannot be compared exactly (a BLOB) leaves
+    # nothing to settle: the write compares the row it finds with this one.
+    if current is not None and reading.exact and current[0] in {BACKFILL_RUNNING, BACKFILL_PENDING}:
         if own_backup is not None and own_backup[1][0] == BACKFILL_COMPLETE:
             snapshot, target, source = own_backup[0], tuple(own_backup[1]), SOURCE_OWN_BACKUP  # type: ignore[assignment]
         else:

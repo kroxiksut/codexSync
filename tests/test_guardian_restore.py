@@ -178,6 +178,21 @@ class GuardianRestorePlanTests(unittest.TestCase):
 
         self.assertIn(SCHEMA_CHANGED, plan.codes)
 
+    def test_a_live_state_that_lost_every_project_can_have_them_back(self) -> None:
+        # CS-487: the emptied state reads as legacy-v1, the snapshot is
+        # electron-v2, and SCHEMA_CHANGED refused exactly the restore that
+        # loss needs.
+        snapshot = self._commit(self.good)
+        emptied = _payload(_electron_state(**{
+            "local-projects": {}, "project-order": [], "thread-project-assignments": {},
+        }))
+        self.assertEqual(validate_global_state_references(emptied).schema_id, "legacy-v1")
+
+        plan, payload = self._plan(snapshot.snapshot_id, emptied)
+
+        self.assertEqual(plan.codes, ())
+        self.assertEqual(payload, self.good)
+
     def test_a_live_state_in_an_unrecognised_shape_is_not_overwritten(self) -> None:
         """A newer desktop build's shape is not damage (CS-325).
 

@@ -116,5 +116,35 @@ class PypiReadmeTests(unittest.TestCase):
         self.assertNotIn("[!", out)
 
 
+
+class PackageMetadataTests(unittest.TestCase):
+    """What PyPI shows and what builds the wheel must agree with the release (CS-555/556)."""
+
+    def setUp(self) -> None:
+        import tomllib
+
+        self.project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    def test_a_licence_expression_asks_for_a_setuptools_that_reads_it(self) -> None:
+        # `license = "<SPDX>"` and `license-files` (PEP 639) need setuptools 77.
+        self.assertIsInstance(self.project["project"]["license"], str)
+        floors = [
+            tuple(int(part) for part in re.match(r"setuptools>=([\d.]+)", item).group(1).split("."))
+            for item in self.project["build-system"]["requires"] if item.startswith("setuptools")
+        ]
+        self.assertEqual(len(floors), 1)
+        self.assertGreaterEqual(floors[0], (77,))
+        self.assertFalse(
+            [c for c in self.project["project"]["classifiers"] if c.startswith("License ::")],
+            "PEP 639 refuses a licence classifier beside a licence expression",
+        )
+
+    def test_a_release_without_a_label_is_not_called_alpha(self) -> None:
+        version = self.project["project"]["version"]
+        status = [c for c in self.project["project"]["classifiers"] if c.startswith("Development Status ::")]
+        self.assertEqual(len(status), 1)
+        if not meta.is_prerelease(version):
+            self.assertNotIn("Alpha", status[0])
+
 if __name__ == "__main__":
     unittest.main()

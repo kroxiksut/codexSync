@@ -1,7 +1,7 @@
 "use strict";
 // Starts the codexSync program for this system (CS-416).
 //
-// `codexsync` on npm is only this launcher. The programs are the release
+// `@kroxut/codexsync` on npm is only this launcher. The programs are the release
 // builds, one package per system, which npm installs as an optional
 // dependency where `os` and `cpu` match -- the way Codex's own npm package is
 // laid out. Nothing is downloaded, built or run at install time.
@@ -43,7 +43,7 @@ function programPath(program, { platform = process.platform, arch = process.arch
   } catch {
     throw new LaunchError(
       `the program for ${key} is not installed (npm skipped the optional package codexsync-${key}). ` +
-        "Install again without --omit=optional: npm install -g codexsync",
+        "Install again without --omit=optional: npm install -g @kroxut/codexsync",
     );
   }
   return path.join(path.dirname(manifest), "dist", platform === "win32" ? `${program}.exe` : program);
@@ -78,7 +78,7 @@ function run(program, { detach = false } = {}) {
     if (error instanceof LaunchError) fail(error.message);
     throw error;
   }
-  if (!fs.existsSync(file)) fail(`${file} is missing; install codexsync again`);
+  if (!fs.existsSync(file)) fail(`${file} is missing; install @kroxut/codexsync again`);
   ensureExecutable(file);
   const args = process.argv.slice(2);
 

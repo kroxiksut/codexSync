@@ -49,12 +49,15 @@ SANDBOX = Path(__file__).resolve().parents[1] / "test-sandbox"
 class _Gate:
     def __init__(self, state: ProcessState = ProcessState.STOPPED) -> None:
         self.state = state
+        #: Every operation a write asked the gate about, in order.
+        self.required: list[OperationKind] = []
 
     def check(self, operation: OperationKind, *, final: bool = False) -> SafetyDecision:
         allowed = self.state is ProcessState.STOPPED
         return SafetyDecision(operation, self.state, allowed, "test gate")
 
     def require(self, operation: OperationKind, *, final: bool = False) -> SafetyDecision:
+        self.required.append(operation)
         if self.state is ProcessState.RUNNING:
             raise SafetyPreconditionError("Codex is running")
         return self.check(operation, final=final)
@@ -1005,7 +1008,7 @@ class HandoffConfigTests(_Workspace):
         manifest = (self.workspace / "manifest.json").as_posix()
         text = text.replace(f'manifest_file = "{manifest}"', "")
         config.write_text(text, encoding="utf-8")
-        with self.assertRaisesRegex(ConfigError, "handoff.root_dir is empty"):
+        with self.assertRaisesRegex(ConfigError, "set state.manifest_file"):
             load_config(config)
 
     def test_the_watcher_replaces_the_sign_in_sync(self) -> None:

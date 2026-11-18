@@ -102,9 +102,16 @@ def canonical_digest(raw: bytes) -> str | None:
         return None
     if not _canonicalisable(value):
         return None
-    encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    ).encode("utf-8")
+    try:
+        encoded = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate (`"\ud800"` escaped in the file) parses into a
+        # string UTF-8 cannot encode. Its meaning is not provable either, and
+        # raising here made the whole comparison fail, so the chat was blocked
+        # for good instead of being an ordinary, resolvable divergence (CS-520).
+        return None
     return hashlib.sha256(CANONICAL_DIGEST_VERSION.encode("ascii") + b"\0" + encoded).hexdigest()
 
 

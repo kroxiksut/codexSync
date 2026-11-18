@@ -53,6 +53,7 @@ import codecs
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import getpass
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -61,6 +62,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Protocol
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape as _xml_escape
@@ -106,6 +108,11 @@ LOGIN_SYNC_SLOT = "sync-at-login"
 STATE_BACKUP_SLOT = "state-backup"
 HANDOFF_SLOT = "handoff"
 SLOTS = (JOB_SLOT, LOGIN_SYNC_SLOT, STATE_BACKUP_SLOT, HANDOFF_SLOT)
+#: The two tasks that write: never ended from outside. The sign-in sync ends
+#: by itself; the watcher ends on a stop request between runs
+#: (`watcher_stop`, CS-506). Ending either half way through a full sync left
+#: RECOVERY_REQUIRED, and every later write refused until `recover`.
+NEVER_ENDED_SLOTS = frozenset({LOGIN_SYNC_SLOT, HANDOFF_SLOT})
 
 #: The mode each slot runs, for the slots that run exactly one.
 _SLOT_MODES = {
@@ -245,6 +252,30 @@ def job_command(
         if windowless.is_file():
             exe = windowless
     return [str(exe), "-m", "codexsync"]
+
+
+#: `job_command` names `python -m codexsync`, and this interpreter has no
+#: installed codexsync: a task starts in a folder of the OS's choosing
+#: (`System32` on Windows), where a source checkout is not on the path, so
+#: every run would fail with ModuleNotFoundError (CS-546).
+PACKAGE_NOT_INSTALLED = "PACKAGE_NOT_INSTALLED"
+
+
+def job_command_problem(*, frozen: bool | None = None) -> str | None:
+    """Why the command `job_command` returns would fail in a task, or None.
+
+    A frozen build is its own program. Otherwise the package must be installed
+    for this interpreter (pip, pipx, or `pip install -e` of a checkout):
+    `python -m codexsync` from a checkout works only in that folder.
+    """
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    if is_frozen:
+        return None
+    try:
+        importlib.metadata.distribution("codexsync")
+    except importlib.metadata.PackageNotFoundError:
+        return PACKAGE_NOT_INSTALLED
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1175,11 +1206,12 @@ class WindowsTaskScheduler:
         return removed
 
     def _remove_one(self, name: str) -> bool:
-        # /Delete leaves a running instance alive (the watcher would keep
-        # going); /End first, and "not running"/"not found" are fine (CS-448).
-        # Not the sign-in sync: it ends by itself, and /End would kill a write
-        # half way through.
-        if self._slot != LOGIN_SYNC_SLOT:
+        # /Delete leaves a running instance alive; a read-only job or a copy
+        # is ended first, and "not running"/"not found" are fine (CS-448).
+        # Never the two that write (NEVER_ENDED_SLOTS): /End kills a sync
+        # half way through. The watcher ends itself on the stop request the
+        # removal leaves (CS-506).
+        if self._slot not in NEVER_ENDED_SLOTS:
             _invoke(self._run, [self.schtasks, "/End", "/TN", name])
         result = _invoke(self._run, [self.schtasks, "/Delete", "/TN", name, "/F"])
         if result.returncode == 0:
@@ -1352,6 +1384,10 @@ _LAUNCHD_LABELS = {
 _LAST_EXIT_CODE = re.compile(r"^\s*last exit code\s*=\s*(-?\d+)", re.MULTILINE)
 
 
+_BOOTSTRAP_ATTEMPTS = 3
+_BOOTSTRAP_RETRY_SECONDS = 1.0
+
+
 class LaunchdScheduler:
     """``~/Library/LaunchAgents/io.codexsync.job.plist`` in the GUI domain.
 
@@ -1375,8 +1411,10 @@ class LaunchdScheduler:
         protected_roots: Sequence[Path] | None = None,
         launchctl: str = "/bin/launchctl",
         slot: str = JOB_SLOT,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._run = run
+        self._sleep = sleep
         self._slot = _require_slot(slot)
         self.label = _LAUNCHD_LABELS.get(self._slot, LAUNCHD_LABEL)
         self._home = Path.home() if home is None else Path(home)
@@ -1422,6 +1460,13 @@ class LaunchdScheduler:
         _refuse_protected(definition.log_dir, self._protected)
         # launchd opens the log files but does not create their directory.
         definition.log_dir.mkdir(parents=True, exist_ok=True)
+        if self._slot in NEVER_ENDED_SLOTS:
+            # Sign-in only, and never ended from outside (CS-506, CS-548):
+            # `bootout` sends a running sync SIGTERM. The new file is what
+            # launchd loads at the next sign-in; until then a loaded old one
+            # has nothing left to run.
+            _write_atomically(self.plist_path, payload)
+            return
         _write_atomically(self.plist_path, payload)
         _invoke(self._run, [self.launchctl, "bootout", self._service])  # not loaded is fine
         if _first_run_at_sign_in(job):
@@ -1429,13 +1474,30 @@ class LaunchdScheduler:
             # not at sign-in. launchd loads every LaunchAgent at the next login,
             # and StartInterval counts from then.
             return
-        _require_success(
-            _invoke(self._run, [self.launchctl, "bootstrap", self._domain, str(self.plist_path)]),
-            "Loading the LaunchAgent",
-        )
+        self._bootstrap()
+
+    def _bootstrap(self) -> None:
+        """Load the agent; retried, since a `bootout` just before may not have finished.
+
+        `bootout` returns while launchd is still tearing the old instance
+        down, and a `bootstrap` in that moment fails with "Bootstrap failed:
+        5" (CS-548). A few short retries cover it; a real refusal still raises.
+        """
+        argv = [self.launchctl, "bootstrap", self._domain, str(self.plist_path)]
+        for attempt in range(_BOOTSTRAP_ATTEMPTS):
+            result = _invoke(self._run, argv)
+            if result.returncode == 0 or attempt == _BOOTSTRAP_ATTEMPTS - 1:
+                break
+            self._sleep(_BOOTSTRAP_RETRY_SECONDS)
+        _require_success(result, "Loading the LaunchAgent")
 
     def remove(self) -> bool:
-        booted = _invoke(self._run, [self.launchctl, "bootout", self._service]).returncode == 0
+        # The two that write are not booted out: that would end a sync
+        # running now (CS-506). Without its file the agent is not loaded at
+        # the next sign-in, and the watcher ends on its stop request.
+        booted = False
+        if self._slot not in NEVER_ENDED_SLOTS:
+            booted = _invoke(self._run, [self.launchctl, "bootout", self._service]).returncode == 0
         existed = self.plist_path.exists()
         if existed:
             self.plist_path.unlink()
@@ -1703,11 +1765,12 @@ class SystemdUserScheduler:
         if not existed:
             return False
         _invoke(self._run, self._ctl("disable", "--now", self.timer))
-        # Stopping the timer leaves a running oneshot service (the watcher has
-        # no time limit) going; stop it too, "not loaded" is fine (CS-448).
-        # Not the sign-in sync: it ends by itself, and a stop would cut a write
-        # half way through.
-        if self._slot != LOGIN_SYNC_SLOT:
+        # Stopping the timer leaves a running oneshot service going; a
+        # read-only job or a copy is stopped too, "not loaded" is fine
+        # (CS-448). Never the two that write (NEVER_ENDED_SLOTS): a stop cuts
+        # a sync half way through; the watcher ends itself on the stop request
+        # the removal leaves (CS-506), and its unit stays loaded until then.
+        if self._slot not in NEVER_ENDED_SLOTS:
             _invoke(self._run, self._ctl("stop", self.service))
         # A stopped watcher ends on SIGTERM, which systemd records as failed,
         # and the removed unit then stays in `systemctl --user --failed`
@@ -1840,9 +1903,9 @@ def _normalise_unit_text(text: str) -> list[str]:
 #: The task `scripts/scheduler/windows/install-task.ps1` registered in 0.1, and
 #: the LaunchAgent label `scripts/scheduler/macos/install-launchd.sh` used. Both
 #: ran `codexsync sync` on a timer, with their settings outside `config.toml`.
-#: Under 0.2 that is a settings-only sync -- chats are carried by `handoff sync`
-#: -- so such a task keeps running and carries no chat, and nothing says so
-#: unless it is found. Found by its default name, or by the runner script it
+#: Under 0.2 that is a full sync (`[sync] scope = "full"`, D-028) every few
+#: minutes, which with `[sync] close_codex = true` asks Codex to quit while
+#: someone works in it (CS-507), and nothing says so unless it is found. Found by its default name, or by the runner script it
 #: calls, since the name was editable. Never written or removed by this version.
 LEGACY_01_WINDOWS_TASK = "codexSyncSync"
 LEGACY_01_LAUNCHD_LABEL = "com.codexsync.sync"
@@ -1956,5 +2019,8 @@ __all__ = [
     "WindowsTaskScheduler",
     "job_arguments",
     "job_command",
+    "job_command_problem",
+    "NEVER_ENDED_SLOTS",
+    "PACKAGE_NOT_INSTALLED",
     "system_scheduler",
 ]

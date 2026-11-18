@@ -250,11 +250,13 @@ class FakeController(Controller):
 
     def resume_journal(self, operation_id, *, dry_run) -> Outcome:
         self.calls.append(("resume", operation_id, dry_run))
-        return Outcome(value=RecoveryOutcome(operation_id, "sync", "COMMITTING", RecoveryAction.WOULD_RECOVER if dry_run else RecoveryAction.RETRY_ALLOWED, "snap-1", 0, "detail"))
+        return Outcome(value=RecoveryOutcome(operation_id, "sync", "COMMITTING", RecoveryAction.WOULD_RECOVER if dry_run else RecoveryAction.RETRY_ALLOWED, "snap-1", 0, "detail",
+                                               would=RecoveryAction.RETRY_ALLOWED if dry_run else None, snapshot_kept=True))
 
     def rollback_journal(self, operation_id, *, target, dry_run) -> Outcome:
         self.calls.append(("rollback", operation_id, target, dry_run))
-        return Outcome(value=RecoveryOutcome(operation_id, "sync", "COMMITTING", RecoveryAction.WOULD_RECOVER if dry_run else RecoveryAction.ROLLED_BACK, "snap-1", 2, "detail"))
+        return Outcome(value=RecoveryOutcome(operation_id, "sync", "COMMITTING", RecoveryAction.WOULD_RECOVER if dry_run else RecoveryAction.ROLLED_BACK, "snap-1", 2, "detail",
+                                               would=RecoveryAction.ROLLED_BACK if dry_run else None, snapshot_kept=True))
 
     def codex_check(self) -> Outcome:
         self.calls.append(("codex_check",))
@@ -390,6 +392,14 @@ class FakeController(Controller):
     def place_project(self, project_id, *, path=None, skip=False, forget=False, whole_folder=True) -> Outcome:
         self.calls.append(("place_project", project_id, path, skip, forget, whole_folder))
         return self._answer("place_project", Outcome(value=None))
+
+    def project_removals(self) -> Outcome:
+        self.calls.append(("project_removals",))
+        return self._answer("project_removals", Outcome(value=_removals_report()))
+
+    def decide_project_removal(self, project_id, *, everywhere) -> Outcome:
+        self.calls.append(("decide_project_removal", project_id, everywhere))
+        return self._answer("decide_project_removal", Outcome(value=None))
 
 
 
@@ -843,6 +853,30 @@ class OverviewSideTests(_OverviewCase):
         self.assertTrue(screen.recovery.isVisibleTo(screen))
         self.assertEqual(screen.recovery.title.text(), window.catalog.plural("recovery.blocked.title", 1))
 
+    def test_unprotectable_folders_are_announced_with_their_commands(self) -> None:
+        from PySide6.QtGui import QGuiApplication
+
+        commands = ['icacls "D:\\p\\.git" /setowner "PC\\me" /T /C /L', 'icacls "D:\\p\\.codex" /setowner "PC\\me" /C /L']
+        row = CheckRow("codex_sandbox", "WARN", "...", (
+            ("codex_sandbox.owned_by_sandbox", {"folder": "D:\\p\\.codex", "owner": "PC\\CodexSandboxOffline"}),
+            ("codex_sandbox.consequence", {}),
+            *(("codex_sandbox.fix", {"command": command}) for command in commands),
+        ))
+        controller = FakeController()
+        controller.outcomes["state"] = Outcome(value=_view(stopped=True, checks=(row,)))
+        window, _ = self.make(controller=controller)
+        screen = window.screen("overview")
+        self.assertTrue(screen.sandbox.isVisibleTo(screen))
+        self.assertEqual(screen.sandbox.title.text(), window.catalog.plural("overview.sandbox.title", 2))
+        self.assertIn(commands[0], screen.table.item(0, 2).text())
+        screen.copy_sandbox.click()
+        self.assertEqual(QGuiApplication.clipboard().text(), "\n".join(commands))
+        self.assertEqual(screen.sandbox.detail.text(), window.catalog.text("overview.sandbox.copied"))
+
+    def test_no_unprotectable_folder_shows_no_sandbox_banner(self) -> None:
+        window, _ = self.make()
+        self.assertFalse(window.screen("overview").sandbox.isVisibleTo(window.screen("overview")))
+
     def test_no_open_journal_shows_no_alert(self) -> None:
         controller = FakeController()
         controller.outcomes["journals"] = Outcome(value=[])
@@ -926,6 +960,44 @@ def _places_report():
     ), MachinePlaces("laptop", "linux"), Path("ws/state/path-places"))
 
 
+def _removals_report():
+    from codexsync.app import ProjectRemoval, ProjectRemovals
+
+    return ProjectRemovals("laptop", "ask", (
+        ProjectRemoval("laptop", "p1", "atlas", ("/opt/atlas",), "2026-10-26T00:00:00Z", False, True),
+        ProjectRemoval("desktop", "p2", "globe", ("D:\\globe",), "2026-10-25T00:00:00Z", True, False),
+    ))
+
+
+class ProjectRemovalTests(_WindowTestCase):
+    """D-039: a project removed in Codex here is asked about, and the answer is saved."""
+
+    def test_arriving_reads_nothing_and_only_a_removal_here_can_be_answered(self) -> None:
+        window, controller = self.make()
+        window.go_to("projects")
+        screen = window.screen("projects")
+        self.assertNotIn(("project_removals",), controller.calls, "arriving reads nothing")
+        screen.check_removals()
+        self.pump(lambda: window.model("projects").removals is not None, seconds=5)
+        self.assertEqual(screen.removals_table.rowCount(), 2)
+        self.assertFalse(screen.removal_everywhere.isEnabled())
+        screen.removals_table.selectRow(1)  # removed elsewhere: nothing to answer here
+        self.assertFalse(screen.removal_everywhere.isEnabled())
+        screen.removals_table.selectRow(0)
+        self.assertTrue(screen.removal_everywhere.isEnabled())
+        screen.decide_removal(everywhere=True)
+        self.pump(lambda: window.model("projects").removal_result is not None, seconds=5)
+        self.assertIn(("decide_project_removal", "p1", True), controller.calls)
+        self.assertEqual(len(self.confirmations), 1, "an answer that reaches other machines is confirmed first")
+        self.assertEqual(screen.removal_status.text(), window.catalog.text("projects.removed.saved"))
+
+    def test_a_sync_that_found_a_removal_leads_to_the_list(self) -> None:
+        window, controller = self.make()
+        window.go_to("projects", "removals")
+        self.pump(lambda: window.model("projects").removals is not None, seconds=5)
+        self.assertIn(("project_removals",), controller.calls)
+
+
 class ProjectPlacesTests(_WindowTestCase):
     """D-033: where another machine's project is here, asked once and remembered."""
 
@@ -956,6 +1028,21 @@ class ProjectPlacesTests(_WindowTestCase):
         self.assertEqual(controller.calls.count(("project_places",)), 2)
         self.assertEqual(screen.place_status.text(), window.catalog.text("projects.places.saved"))
 
+
+    def test_a_refused_answer_does_not_leave_reading_on_screen(self) -> None:
+        # CS-550: the summary said "Reading..." for good after a refusal.
+        window, controller = self.make()
+        window.go_to("projects")
+        screen = window.screen("projects")
+        screen.check_places()
+        self.pump(lambda: window.model("projects").places is not None, seconds=5)
+        drawn = screen.places_summary.text()
+        controller.outcomes["place_project"] = Outcome(failure=Failure.CONFIGURATION, message="no")
+        screen.places_table.selectRow(0)
+        screen.answer_place(skip=True)
+        self.pump(lambda: window.model("projects").place_result is not None, seconds=5)
+        self.assertNotEqual(screen.places_summary.text(), window.catalog.text("projects.places.checking"))
+        self.assertEqual(screen.places_summary.text(), drawn)
 
 class ProjectFilesTests(_WindowTestCase):
     """D-026: which projects and which files did not come along."""
@@ -1350,6 +1437,22 @@ class SessionsTests(_WindowTestCase):
         screen.scan()
         return window, controller, screen
 
+    def test_another_pair_forgets_the_scan_of_the_old_one(self) -> None:
+        # CS-509: the table and Apply stayed about desktop -> laptop while the
+        # labels named the new pair, and a choice went into the old pair's file.
+        window, controller, screen = self._conflict_window()
+        self.assertIsNotNone(screen._scan())
+        screen.source.setEditText("laptop")
+        screen.target.setEditText("desktop")
+        screen._pair_changed()
+        self.assertIsNone(window.model("sessions").scan)
+        self.assertIsNone(screen._scan())
+        self.assertFalse(screen.apply_button.isEnabled())
+        self.assertEqual(screen.table.rowCount(), 0)
+        before = list(controller.calls)
+        screen.resolve()
+        self.assertEqual(controller.calls, before, "nothing to record a choice against")
+
     def test_the_choices_name_the_machines_and_the_hint_names_the_chat(self) -> None:
         # CS-343: "this machine's branch" and "the exact bytes of both
         # branches" asked a person to know what a branch is.
@@ -1684,6 +1787,131 @@ class RecoveryTests(_WindowTestCase):
         self.assertFalse(screen.splitter.childrenCollapsible())
         self.assertGreaterEqual(screen.table.minimumHeight(), JOURNAL_LIST_MIN_HEIGHT)
 
+    def test_wrapped_evidence_never_overlaps_the_actions_below_it(self) -> None:
+        # CS-484: a two-line banner and evidence wrapped by a long backup name
+        # left the card shorter than its text; the splitter clipped it.
+        from PySide6.QtCore import QRect
+        from PySide6.QtWidgets import QLabel, QPushButton
+
+        long_name = "20261025T183012Z-" + "desktop-krox-" * 6 + "sync-" + "f" * 32
+        controller = FakeController()
+        controller.outcomes["journals"] = Outcome(value=[
+            JournalInfo("op-" + "1" * 32, "sync", "COMMITTING", "2026-10-25T18:30:12Z", 3, long_name,
+                        False, True, True, True, True),
+        ])
+        window, _ = self.make("ru", controller)
+        window.resize(1280, 1000)
+        window.go_to("recovery")
+        window.show()
+        self.addCleanup(window.hide)
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        card = screen.actions_card
+        self.pump(lambda: card.height() >= card.layout().totalHeightForWidth(card.width()))
+        self.assertGreater(screen.evidence.heightForWidth(screen.evidence.width()), screen.evidence.fontMetrics().height(),
+                           "the evidence must wrap for this test to mean anything")
+        widgets = [w for w in card.findChildren(QLabel) + card.findChildren(QPushButton) if w.isVisibleTo(card)]
+        boxes = [(w, QRect(w.mapTo(card, w.rect().topLeft()), w.size())) for w in widgets]
+        for widget, box in boxes:
+            self.assertTrue(card.rect().contains(box), f"{widget.objectName() or type(widget).__name__} is cut")
+            if isinstance(widget, QLabel) and widget.wordWrap():
+                self.assertGreaterEqual(widget.height(), widget.heightForWidth(widget.width()), widget.text()[:40])
+        labels = [(w, box) for w, box in boxes if isinstance(w, QLabel)]
+        for index, (first, a) in enumerate(labels):
+            for second, b in labels[index + 1:]:
+                if first.parent() is second.parent() and not (first.isAncestorOf(second) or second.isAncestorOf(first)):
+                    self.assertFalse(a.intersects(b), f"{first.text()[:30]!r} overlaps {second.text()[:30]!r}")
+
+    def test_a_result_is_said_in_the_window_s_language_only(self) -> None:
+        # CS-485: "Откат выполнен. Restored 1 file(s)..." -- the core's English tail.
+        window, _ = self.make("ru")
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        screen.act("rollback", dry_run=True)
+        self.assertEqual(screen.status.text(), window.catalog.text("recovery.result.would_rollback", snapshot="snap-1"))
+        screen.act("rollback", dry_run=False)
+        self.assertEqual(screen.status.text(), window.catalog.plural("recovery.action.ROLLED_BACK", 2, snapshot="snap-1"))
+        self.assertNotIn("detail", screen.status.text())
+
+    def test_a_closed_journal_s_absent_copy_is_not_called_lost(self) -> None:
+        controller = FakeController()
+        controller.outcomes["journals"] = Outcome(value=[
+            JournalInfo("op-0", "sync", "COMMITTED", "2026-09-05T09:00:00Z", 1, "snap-0", True, True, False, False, False),
+            JournalInfo("op-1", "sync", "COMMITTING", "2026-09-05T10:00:00Z", 1, "snap-1", False, True, True, True, False,
+                        backup_needed=True),
+            # CS-549: stopped before its commit phase, so its absent copy lost nothing.
+            JournalInfo("op-2", "sync", "BACKED_UP", "2026-09-05T11:00:00Z", 1, "snap-2", False, True, True, True, False),
+        ])
+        window, _ = self.make(controller=controller)
+        window.go_to("recovery")
+        table = window.screen("recovery").table
+        cells = {table.item(index, 6).text(): table.item(index, 5).text() for index in range(table.rowCount())}
+        self.assertEqual(cells["op-0"], window.catalog.text("recovery.backup.not_kept", name="snap-0"))
+        self.assertEqual(cells["op-1"], window.catalog.text("recovery.backup.missing", name="snap-1"))
+        self.assertEqual(cells["op-2"], window.catalog.text("recovery.backup.not_kept", name="snap-2"))
+
+    def test_a_result_says_what_core_checked_not_which_button_was_pressed(self) -> None:
+        # CS-549: a rollback with nothing replaced read no snapshot, yet the
+        # window said the backup "verifies and can be restored"; a resume said
+        # "the backup is kept" of a backup that was gone.
+        controller = FakeController()
+        window, _ = self.make(controller=controller)
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        controller.rollback_journal = lambda operation_id, *, target, dry_run: Outcome(value=RecoveryOutcome(
+            operation_id, "sync", "BACKED_UP", RecoveryAction.WOULD_RECOVER, "snap-1", 0, "detail",
+            would=RecoveryAction.NOTHING_TO_ROLL_BACK,
+        ))
+        screen.act("rollback", dry_run=True)
+        self.assertEqual(screen.status.text(), window.catalog.text("recovery.result.would_close_unreplaced"))
+        controller.resume_journal = lambda operation_id, *, dry_run: Outcome(value=RecoveryOutcome(
+            operation_id, "sync", "COMMITTING", RecoveryAction.RETRY_ALLOWED, "snap-1", 0, "detail",
+            snapshot_kept=False,
+        ))
+        screen.act("resume", dry_run=False)
+        family = window.catalog.text("journal.family.sync")
+        self.assertEqual(screen.status.text(), window.catalog.text("recovery.result.closed_no_backup", family=family))
+
+    def test_another_machine_s_journal_offers_no_rollback(self) -> None:
+        # CS-486: its backup holds that machine's files.
+        controller = FakeController()
+        controller.outcomes["journals"] = Outcome(value=[
+            JournalInfo(
+                "op-9", "sync", "RECOVERY_REQUIRED", "2026-10-26T10:00:00Z", 2, "laptop-20261026T100000Z-0123456789ab",
+                False, True, True, False, True, rollback_refusal="it was run on machine laptop",
+                machine_id="laptop", own=False, backup_needed=True,
+            ),
+        ])
+        window, _ = self.make(controller=controller)
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        self.assertFalse(screen.rollback_dry.isEnabled())
+        self.assertFalse(screen.target.isEnabled())
+        self.assertTrue(screen.resume_dry.isEnabled())
+        self.assertIn(window.catalog.text("recovery.evidence.other_machine", machine="laptop"), screen.evidence.text())
+
+    def test_recovery_shows_failed_chat_and_applied_count_from_journal(self) -> None:
+        controller = FakeController()
+        controller.outcomes["journals"] = Outcome(value=[
+            JournalInfo("op-9", "sessions", "RECOVERY_REQUIRED", "2026-11-16T10:00:00Z", 3,
+                        "snapshot", False, True, True, False, True,
+                        failure_code="CODEX_STATE_UNKNOWN",
+                        failure_params={"applied": 2, "copies": 3, "deleted": 0,
+                                        "deletions": 1, "relative_path": "sessions/s3.jsonl"},
+                        failure_message="Could not determine whether Codex is running."),
+        ])
+        window, _ = self.make(controller=controller)
+        window.go_to("recovery")
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        self.assertIn("sessions/s3.jsonl", screen.evidence.text())
+        self.assertIn("2", screen.evidence.text())
+        self.assertIn("3", screen.evidence.text())
+        self.assertIn(window.catalog.text("recovery.failure.CODEX_STATE_UNKNOWN"), screen.evidence.text())
+
     def test_an_open_journal_blocks_and_rollback_goes_to_each_files_own_side(self) -> None:
         window, controller = self.make()
         window.go_to("recovery")
@@ -1824,6 +2052,39 @@ class GuardianAcceptScreenTests(_WindowTestCase):
         self.assertNotIn(("apply_accept", "plan-accept-1"), controller.calls)
         self.assertEqual(self.confirmations, [])
 
+
+    def test_a_saved_config_forgets_the_baseline_preview_and_the_selection(self) -> None:
+        # CS-551: only the restore plan was forgotten on a save.
+        window, controller, screen = self._window()
+        screen.snapshots.selectRow(1)
+        screen.preview_accept()
+        self.assertIsNotNone(window.model("guardian").accept_preview)
+        window.config_changed()
+        model = window.model("guardian")
+        self.assertIsNone(model.accept_preview)
+        self.assertIsNone(model.accept_result)
+        self.assertIsNone(model.selected)
+        self.assertFalse(window.screen("guardian").accept_apply.isEnabled())
+
+    def test_store_problems_are_said_in_the_windows_language(self) -> None:
+        # CS-552: core's English lines went into the banner as they were.
+        from codexsync.guardian_inventory import GuardianProblem
+
+        controller = FakeController()
+        controller.outcomes["guardian_inventory"] = Outcome(value=GuardianInventory(
+            "laptop", Path("C:/g"), None, (), (),
+            (GuardianProblem("POINTER_UNREADABLE", "latest-good pointer is unreadable or malformed"),
+             "a line core gave no code"),
+        ))
+        window, _ = self.make("ru", controller=controller)
+        window.go_to("guardian")
+        screen = window.screen("guardian")
+        if window.model("guardian").inventory is None:
+            screen.refresh()
+        body = screen.banner.detail.text()
+        self.assertIn(window.catalog.text("guardian.problem.POINTER_UNREADABLE"), body)
+        self.assertNotIn("unreadable or malformed", body)
+        self.assertIn("a line core gave no code", body, "no code: the English line, not nothing")
 
 class ProjectMoveScreenTests(_WindowTestCase):
     def _screen(self, controller=None):
@@ -2045,6 +2306,28 @@ class SharedJobsTests(_WindowTestCase):
         runner.finish(len(runner.pending))
         self.assertIsNone(window.model("sync").result, "the late result lands nowhere new")
 
+    def test_a_dry_run_that_outlived_a_save_unlocks_nothing(self) -> None:
+        # CS-508: a dry run is a write job (not cancellable); its old result
+        # set `checked` again after the save had forgotten every plan.
+        window, _, runner = self._window()
+        window.go_to("recovery")
+        for token in range(1, len(runner.pending) + 1):
+            if runner.pending[token - 1] is not None:
+                runner.finish(token)
+                runner.pending[token - 1] = None
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        screen.target.setCurrentIndex(screen.target.findData("local"))
+        screen.act("rollback", dry_run=True)
+        token = len(runner.pending)
+        window.config_changed()
+        runner.finish(token)
+        self.assertIsNone(window.model("recovery").checked)
+        screen = window.screen("recovery")
+        screen.table.selectRow(0)
+        screen.target.setCurrentIndex(screen.target.findData("local"))
+        self.assertFalse(screen.rollback_apply.isEnabled())
+
     def test_a_kind_the_window_does_not_know_is_refused(self) -> None:
         window, _, _ = self._window()
         with self.assertRaises(ValueError):
@@ -2242,6 +2525,31 @@ class WorkingSetTests(_WindowTestCase):
         window.go_to("sessions")
         screen = window.screen("sessions")
         self.assertEqual(screen.model.scope_projects, ("p1",))
+
+    def test_a_stored_project_that_matches_nothing_is_named_and_kept(self) -> None:
+        """CS-495: a vanished project stays in the set and is said, never dropped."""
+        from codexsync.session_scope import SessionScope
+
+        window, controller = self.make()
+        controller.outcomes["working_set"] = Outcome(value=SessionScope(projects=("gone-project",)))
+        window.go_to("sessions")
+        screen = window.screen("sessions")
+        screen.load_projects()
+        self.assertIn("gone-project", screen.scope_summary.text())
+        self._check(screen, self._tree_names(screen)[0])
+        self.assertIn("gone-project", screen.model.scope_projects, "ticking another keeps it")
+
+    def test_a_taken_set_names_what_it_could_not_find(self) -> None:
+        from codexsync.session_scope import SessionScope
+
+        window, screen, controller = self._screen()
+        controller.outcomes["save_working_set"] = Outcome(value=SessionScope(
+            projects=("p1",), unresolved_projects=("typo",), chat_count=0,
+        ))
+        self._check(screen, self._tree_names(screen)[0])
+        screen.take_working_set()
+        self.assertIn(window.catalog.plural("sessions.scope.not_found", 1, names="typo"),
+                      screen.scope_summary.text())
 
     def test_the_projects_are_offered_with_their_chat_counts(self) -> None:
         _window, screen, _ = self._screen()
@@ -2583,7 +2891,7 @@ class ProgressTests(_WindowTestCase):
         expected = window.catalog.text(
             "progress.of", phase=window.catalog.text("progress.phase.sessions"), done=1, total=2,
         )
-        self.assertIn(expected, seen, "the phase line is drawn while the read runs")
+        self.assertTrue(any(text.startswith(expected) for text in seen), "the phase line is drawn while the read runs")
 
     def test_the_status_bar_shows_a_determinate_bar_while_a_read_reports(self) -> None:
         window, _ = self.make()
@@ -2618,6 +2926,13 @@ class ProgressTests(_WindowTestCase):
                             model=window.model("chats"), cancellable=True)
         window.jobs().report("t", "no-such-phase", 1, 2)
         self.assertIn("no-such-phase", window.progress_text("chats"))
+
+    def test_progress_line_says_estimating_until_rate_and_total_are_known(self) -> None:
+        window, _ = self.make()
+        window.jobs().start("t", page="chats", kind=None, apply=lambda *_: None,
+                            model=window.model("chats"), cancellable=True)
+        window.jobs().report("t", "sessions", 1, 0)
+        self.assertIn(window.catalog.text("progress.estimating"), window.progress_text("chats"))
 
 
 class ConfigScreensTests(_WindowTestCase):

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any, Iterable
 
 from .exceptions import ConfigError
-from .guardian_models import GuardianConfig, require_guardian_machine_id
+from .guardian_models import GuardianConfig, normalize_machine_id, require_guardian_machine_id
 from .jsonl_codec import parse_codec
 from .path_mapping import PathMappingRule
 from .process_knowledge import default_background_process_names, default_process_names
@@ -48,6 +49,10 @@ PATH_SUBSTITUTIONS: tuple[str, ...] = ("${workspace_root}",)
 #: window's Synchronise -- settings, chats, projects; ``settings`` is the files
 #: under `targets.include_roots` only, which is all `sync` did before D-028.
 SYNC_SCOPES: tuple[str, ...] = ("full", "settings")
+#: `[sync] removed_projects` (D-039); the same tuple as
+#: `project_sync.REMOVED_PROJECTS_POLICIES`, kept here so config loads
+#: without importing the merge.
+REMOVED_PROJECTS_POLICIES: tuple[str, ...] = ("ask", "remove", "bring_back")
 
 
 def preview_path(
@@ -122,14 +127,24 @@ def load_config(path: Path) -> AppConfig:
     # Before anything is read: Codex keeps a `config.toml` of its own, and a
     # parse error about its keys would hide what is wrong (CS-412).
     require_config_outside_codex(path)
+    return load_config_text(path, decode_config_bytes(read_config_bytes(path), source=str(path)))
+
+
+def read_config_bytes(path: Path) -> bytes:
+    """Read one config source with the loader's errors, without parsing it."""
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
     try:
-        data = path.read_bytes()
+        return path.read_bytes()
     except OSError as exc:
         raise ConfigError(f"Cannot read config file: {path}. {exc}") from exc
+
+
+def load_config_text(path: Path, text: str) -> AppConfig:
+    """Load already captured text with the same location guards as a file load."""
+    require_config_outside_codex(path)
     cfg = parse_config_text(
-        decode_config_bytes(data, source=str(path)),
+        text,
         base_dir=path.parent.resolve(),
         source=str(path),
     )
@@ -164,10 +179,10 @@ def codex_folder_holding(
         return None
     for folder in candidates:
         try:
-            target.relative_to(folder.expanduser().resolve())
-        except (OSError, ValueError):
+            if _lies_under(target, folder.expanduser().resolve()):
+                return folder
+        except OSError:
             continue
-        return folder
     return None
 
 
@@ -236,7 +251,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
     project_files_raw = _section(raw, "project_files")
     path_mappings_raw = raw.get("path_mappings", [])
 
-    identity = IdentityConfig(machine_id=identity_raw.get("machine_id"))
+    identity = IdentityConfig(machine_id=_machine_id(identity_raw.get("machine_id")))
 
     workspace_root_dir = _to_path(
         paths_raw.get("workspace_root_dir"),
@@ -335,6 +350,7 @@ def parse_config_text(text: str, *, base_dir: Path, source: str = "<config text>
         delete_policy=sync_raw.get("delete_policy", "never"),
         scope=str(sync_raw.get("scope", "full")).strip().lower(),
         close_codex=_bool_value(sync_raw, "close_codex", False, "sync.close_codex"),
+        removed_projects=str(sync_raw.get("removed_projects", "ask")).strip().lower(),
         session_mode=(
             str(sync_raw.get("session_mode")).strip().lower()
             if sync_raw.get("session_mode") is not None
@@ -651,9 +667,11 @@ def _validate_handoff(cfg: AppConfig) -> None:
     root = settings.root_dir
     if root is None:
         if settings.enabled:
+            # The handoff folder sits beside the sync manifest (CS-335), and
+            # `handoff.root_dir` is not a setting -- name the one that is (CS-542).
             raise ConfigError(
-                "handoff.root_dir is empty: choose a folder inside the synced workspace "
-                "before switching handoff on"
+                "the handoff folder is kept beside state.manifest_file, which is empty: set "
+                "state.manifest_file to a file inside the synced workspace before switching handoff on"
             )
         return
     resolved = root.resolve()
@@ -709,6 +727,51 @@ def _validate_scheduler(scheduler: SchedulerConfig) -> None:
         )
 
 
+#: The name a machine without any usable id falls back to; never an id of its own.
+_FALLBACK_MACHINE = "unknown-machine"
+
+
+def _machine_id(value: Any) -> str | None:
+    """`identity.machine_id`, refused unless it is already the name codexSync files use.
+
+    The id keys this machine's manifest baseline, journals, snapshots, locks
+    and boards, each through `normalize_machine_id`, which drops what a file
+    name cannot hold. Two ids that differ only there -- `Laptop-дом` and
+    `Laptop-работа` both become `Laptop`, any all-Cyrillic name becomes
+    `unknown-machine` -- would be one machine to every one of those (CS-494),
+    so only an id that normalisation leaves unchanged is accepted. Writing the
+    normalised form keeps every record the machine already has.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError("identity.machine_id must be a string")
+    text = value.strip()
+    if not text:
+        return None
+    if text == _FALLBACK_MACHINE:
+        raise ConfigError(
+            f"identity.machine_id {text!r} is the name codexSync uses for a machine without an id; "
+            "write a name of your own, different on every machine.",
+            code="MACHINE_ID_RESERVED", params={"value": text},
+        )
+    stored = normalize_machine_id(text)
+    if stored == text:
+        return text
+    if stored and stored != _FALLBACK_MACHINE:
+        raise ConfigError(
+            f"identity.machine_id {text!r} has characters codexSync cannot use in file names; it is "
+            f"stored as {stored!r}. Write machine_id = \"{stored}\" -- that keeps this machine's "
+            "records -- and give every machine an id of its own (Latin letters, digits, '.', '_', '-').",
+            code="MACHINE_ID_NOT_FILE_SAFE", params={"value": text, "stored": stored},
+        )
+    raise ConfigError(
+        f"identity.machine_id {text!r} has no Latin letter or digit codexSync can use in file names. "
+        "Write a name of Latin letters, digits, '.', '_' or '-', different on every machine.",
+        code="MACHINE_ID_UNUSABLE", params={"value": text},
+    )
+
+
 def _validate_config(cfg: AppConfig) -> None:
     # A list or table here would fail `in {...}` as unhashable -- exit 1, not 4 (CS-457).
     for name, value in (
@@ -734,6 +797,9 @@ def _validate_config(cfg: AppConfig) -> None:
 
     if cfg.sync.scope not in SYNC_SCOPES:
         raise ConfigError("sync.scope must be one of: " + ", ".join(SYNC_SCOPES))
+
+    if cfg.sync.removed_projects not in REMOVED_PROJECTS_POLICIES:
+        raise ConfigError("sync.removed_projects must be one of: " + ", ".join(REMOVED_PROJECTS_POLICIES))
 
     if cfg.sync.time_tolerance_seconds < 0:
         raise ConfigError("sync.time_tolerance_seconds must be >= 0")
@@ -1010,18 +1076,25 @@ def require_outside_state_dir(cfg: AppConfig, state_dir: Path) -> None:
             )
 
 
-def _paths_overlap(first: Path, second: Path) -> bool:
-    """True when either resolved path contains the other, including junction escapes."""
+def _ignores_case() -> bool:
+    """macOS folders ignore case by default; Windows paths already compare without it."""
+    return sys.platform == "darwin"
+
+
+def _lies_under(child: Path, parent: Path) -> bool:
+    """``child`` is ``parent`` or inside it, case-blind where the system is (CS-541)."""
+    if _ignores_case():
+        child, parent = Path(str(child).casefold()), Path(str(parent).casefold())
     try:
-        first.relative_to(second)
-        return True
-    except ValueError:
-        pass
-    try:
-        second.relative_to(first)
+        child.relative_to(parent)
         return True
     except ValueError:
         return False
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    """True when either resolved path contains the other, including junction escapes."""
+    return _lies_under(first, second) or _lies_under(second, first)
 
 
 def _parse_background_process_names(proc_raw: dict[str, Any]) -> dict[str, list[str]]:

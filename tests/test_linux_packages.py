@@ -145,6 +145,68 @@ class ToolPinTests(unittest.TestCase):
                     self.assertRegex(pin["sha256"], r"^[0-9a-f]{64}$")
 
 
+    def test_a_dropped_download_is_tried_again(self) -> None:
+        # CS-558: one `IncompleteRead` failed a whole build.
+        import http.client
+        import io
+
+        answers = [http.client.IncompleteRead(b"par"), ConnectionResetError("reset"), io.BytesIO(b"whole")]
+        waits = []
+
+        def opener(url, timeout):
+            answer = answers.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        self.assertEqual(packages._download("https://x/y", sleep=waits.append, opener=opener), b"whole")
+        self.assertEqual(len(waits), 2)
+
+    def test_a_download_that_keeps_failing_stops_the_build(self) -> None:
+        def opener(url, timeout):
+            raise TimeoutError("slow")
+
+        with self.assertRaises(SystemExit):
+            packages._download("https://x/y", sleep=lambda _: None, opener=opener)
+
+
+class CleanSystemCheckTests(unittest.TestCase):
+    """`scripts/linux_package_check.sh`, read: only the Release rehearsal runs it."""
+
+    def setUp(self) -> None:
+        self.script = (REPO_ROOT / "scripts" / "linux_package_check.sh").read_text(encoding="utf-8")
+
+    def test_ldd_searches_the_bundle_as_the_bootloader_does(self) -> None:
+        # CS-489: `_sqlite3` has no RUNPATH; the libsqlite3 PyInstaller brought
+        # is found through LD_LIBRARY_PATH=_internal at run time, and `ldd`
+        # without it called a clean Ubuntu "libraries missing".
+        body = self.script.split("check_libraries() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('bundle="$1/_internal"', body)
+        self.assertIn('LD_LIBRARY_PATH="$bundle" xargs', body)
+
+    def test_every_format_imports_what_a_command_needs(self) -> None:
+        # `--version` imports neither sqlite3 nor zstd; `doctor --report` does,
+        # and must say it reads `.jsonl.zst` (CS-553).
+        cases = self.script.split('case "$kind" in', 1)[1]
+        for kind in ("deb", "rpm", "appimage", "tarball"):
+            with self.subTest(kind=kind):
+                branch = cases.split(f"    {kind})", 1)[1].split(";;", 1)[0]
+                self.assertIn("check_report ", branch)
+        report = self.script.split("check_report() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('"zstd": true', report)
+        self.assertIn('HOME="$smoke"', report, "nothing of the check lands in a real home")
+
+class DocumentationNamesTests(unittest.TestCase):
+    def test_the_install_steps_name_the_files_a_release_has(self) -> None:
+        # CS-557: the guides said `codexsync-<version>-...`; the files carry the tag.
+        for lang, token in (("en", "<tag>"), ("ru", "<метка>"), ("zh", "<标签>")):
+            text = (REPO_ROOT / "docs" / lang / "README.md").read_text(encoding="utf-8")
+            for extension in ("deb", "rpm", "AppImage", "tar.gz"):
+                with self.subTest(lang=lang, extension=extension):
+                    self.assertIn(packages.asset_name(token, "x86_64", extension), text)
+            self.assertIn(packages.asset_name("v0.2.0", "x86_64", "deb"), text)
+            self.assertNotRegex(text, r"codexsync-<(version|версия|版本)>-linux")
+
 class LauncherFileTests(unittest.TestCase):
     def test_the_menu_entry_names_the_window_and_its_icon(self) -> None:
         entry = configparser.ConfigParser(interpolation=None)

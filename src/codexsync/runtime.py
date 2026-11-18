@@ -18,6 +18,7 @@ import time
 
 from .exceptions import ConfigError, ConfigOutdatedError
 from .filters import PathFilter
+from .guardian_models import normalize_machine_id
 from .native_programs import is_native_program
 from .manifest import save_manifest
 from .models import AppConfig, FileMeta, SyncManifest, SyncPlan
@@ -26,6 +27,7 @@ from .process_knowledge import is_cli_daemon_path
 from .safety_gate import ProcessState, SafetyGate
 from .scanner import scan_tree
 from .session_index import SESSION_INDEX_FILE
+from .work_scheduler import WorkScheduler
 
 LOG = logging.getLogger(__name__)
 
@@ -60,9 +62,11 @@ def sync_machine_id(cfg: AppConfig) -> str:
     """Whose baseline this machine reads and writes in the shared sync manifest.
 
     The same identity backups are named after, so a machine without
-    `identity.machine_id` still gets one stable key (its host name).
+    `identity.machine_id` still gets one stable key (its host name). Always the
+    normalised form -- the one name every record of this machine is keyed by
+    (manifest, journals, snapshots, locks, boards; CS-511).
     """
-    return cfg.identity.machine_id or platform.node()
+    return normalize_machine_id(cfg.identity.machine_id or platform.node()) or "unknown-machine"
 
 def _ensure_dir(path: Path, field_name: str) -> None:
     try:
@@ -226,13 +230,20 @@ def collect_process_snapshot(cfg: AppConfig, detector: CodexProcessDetector | No
         background_processes=background_processes,
     )
 
-def _build_indexes(cfg: AppConfig, local_dir: Path, cloud_dir: Path) -> tuple[dict[str, FileMeta], dict[str, FileMeta]]:
+def _build_indexes(
+    cfg: AppConfig, local_dir: Path, cloud_dir: Path, *,
+    scheduler: WorkScheduler | None = None,
+) -> tuple[dict[str, FileMeta], dict[str, FileMeta]]:
     path_filter = PathFilter(cfg.filters.exclude_globs)
-    local_idx = scan_tree(local_dir, cfg.targets.include_roots, path_filter)
-    cloud_idx = scan_tree(cloud_dir, cfg.targets.include_roots, path_filter)
-    local_idx = {rel: meta for rel, meta in local_idx.items() if _is_plain_copy_candidate(rel)}
-    cloud_idx = {rel: meta for rel, meta in cloud_idx.items() if _is_plain_copy_candidate(rel)}
-    local_idx, cloud_idx = _without_programs(local_idx), _without_programs(cloud_idx)
+
+    def read_index(root: Path) -> dict[str, FileMeta]:
+        index = scan_tree(root, cfg.targets.include_roots, path_filter)
+        return _without_programs({rel: meta for rel, meta in index.items() if _is_plain_copy_candidate(rel)})
+
+    if scheduler is None:
+        local_idx, cloud_idx = read_index(local_dir), read_index(cloud_dir)
+    else:
+        local_idx, cloud_idx = scheduler.map_read(read_index, (local_dir, cloud_dir))
     return _apply_session_mode(local_idx, cloud_idx, cfg.sync.session_mode)
 
 def _without_programs(index: dict[str, FileMeta]) -> dict[str, FileMeta]:

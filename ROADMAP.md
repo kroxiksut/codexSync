@@ -11,14 +11,14 @@ is started before then, not even a prototype.
 
 ## 0.2 — now
 
-0.2.0 alpha 1 is out. Before 0.2.0 itself:
+0.2.0 is out. In 0.2.x:
 
 - reports from more machines than ours — please
   [tell us](https://github.com/kroxiksut/codexSync/issues/new/choose) what
   happened on yours;
 - writes on macOS, which stay closed until someone checks the process detection
   on a Mac against a real Codex (see [Have a Mac?](./README.md#have-a-mac));
-- fixes for what the alpha reports turn up.
+- fixes for what the reports turn up.
 
 The scope of 0.2 is fixed: no new features go in.
 

@@ -10,6 +10,7 @@ import uuid
 from unittest.mock import patch
 
 from codexsync.app import build_context, restore_from_backup, run_sync
+from codexsync.exceptions import ConfigError
 
 
 class _StoppedGate:
@@ -123,9 +124,13 @@ class IntegrationSyncFlowTests(unittest.TestCase):
             # 5) Restore latest backup to local (latest snapshot contains previous cloud version = v2).
             local_file.write_text("broken", encoding="utf-8")
             with patch("codexsync.restore._make_safety_gate", return_value=_StoppedGate()):
+                # The snapshot holds the cloud side, so it is named: without a
+                # name only this machine's backups of the target side qualify (CS-514).
+                with self.assertRaises(ConfigError):
+                    restore_from_backup(config_path=config_path, snapshot_name=None, target="local", dry_run=True)
                 result = restore_from_backup(
                     config_path=config_path,
-                    snapshot_name=None,
+                    snapshot_name=backup_zips[0].name,
                     target="local",
                     dry_run=False,
                 )

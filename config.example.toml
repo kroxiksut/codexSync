@@ -31,6 +31,11 @@ scope = "full"
 # does not quit, nothing is written. The handoff watcher never asks.
 # Ask Codex to save its work before: a running agent turn is interrupted.
 close_codex = false
+# A project removed in Codex on this machine: ask|remove|bring_back
+# ask = it stays removed here, and the next sync asks whether on purpose;
+# remove = it is removed on the other machines too; bring_back = it is put
+# back here from the other machines (a removal by mistake).
+removed_projects = "ask"
 # Session mode:
 # all|last_date_only (latest date folder under sessions/, if date-based layout is detected)
 # Keep "all": last_date_only can discard branches, so every mutation command

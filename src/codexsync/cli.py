@@ -15,6 +15,8 @@ from .app import (
     sync_projects,
     place_project,
     project_places,
+    project_removals,
+    decide_project_removal,
     PlacesReport,
     refresh_thread_catalogue,
     build_issue_report,
@@ -92,7 +94,6 @@ from .app import (
 from .chat_directory import Association, ChatDirectory, ChatEntry, search_chats
 from .chat_move import ChatMovePlan
 from .config import SYNC_SCOPES, _paths_overlap, codex_folder_holding, load_config, require_config_outside_codex
-from .program_file import frozen_program
 from .config_locations import (
     ConfigChoice,
     choose_config_path,
@@ -112,7 +113,7 @@ from .repair_plan import save_repair_plan
 from .safety_gate import OperationKind
 from .scheduler import render_scheduler_templates, write_scheduler_templates
 from .semantic_transfer import CWD_ABSENT_HERE, FORMAT_MIGRATION, OLDER_FORMAT_HAS_LATER_RECORDS
-from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK
+from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK, job_command
 from .version import __version__
 
 LOG = logging.getLogger(__name__)
@@ -339,6 +340,12 @@ def print_automation_status(view: AutomationView) -> None:
     # A JSON list is the one rendering that is exact on every platform: no
     # shell's quoting rules are needed to read back where an argument ends.
     safe_print(f"  argv: {json.dumps(list(view.argv), ensure_ascii=False)}")
+    if view.command_problem == "PACKAGE_NOT_INSTALLED":
+        print(
+            "  warning: codexsync is not installed for this Python, so a task could not start it "
+            "(it runs from a folder of the system's choosing). Install it with "
+            "`pip install codexsync` (or `pip install -e .` in a checkout), then apply again."
+        )
     print(f"  ignored_settings: {', '.join(view.ignored) if view.ignored else '(none)'}")
     print(f"  sync_at_login: {_yes_no(view.sync_at_login)}")
     safe_print(f"  login_argv: {json.dumps(list(view.login_argv), ensure_ascii=False)}")
@@ -387,8 +394,9 @@ def print_automation_status(view: AutomationView) -> None:
         )
     for task in view.legacy_tasks:
         safe_print(
-            f"Task left by codexSync 0.1: {task.name} -- it still runs `codexsync sync` on its own timer, "
-            "which in 0.2 carries settings only, never chats."
+            f"Task left by codexSync 0.1: {task.name} -- it still runs `codexsync sync --apply` on its own "
+            "timer, which in 0.2 is a full sync of settings and chats ([sync] scope = \"full\", the default) "
+            "and, with [sync] close_codex = true, asks Codex to quit while you work."
         )
         safe_print(f"  remove it: {task.remove_command}")
         print("  then use [handoff] enabled = true and `codexsync automation apply` for the full sync.")
@@ -701,7 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
     _conflict_policy_argument(sync)
 
     restore = sub.add_parser("restore", help="Restore files from backup snapshot")
-    restore.add_argument("--from", dest="snapshot", default=None, help="Snapshot directory name in backup_dir")
+    restore.add_argument("--from", dest="snapshot", default=None, help="Snapshot name in backup_dir (default: this machine's newest backup of --target)")
     restore.add_argument(
         "--allow-legacy-snapshot",
         action="store_true",
@@ -776,12 +784,17 @@ def build_parser() -> argparse.ArgumentParser:
     automation_sub.add_parser(
         "status", help="Print [scheduler] and the operating system task; changes nothing"
     )
-    automation_sub.add_parser(
+    automation_apply = automation_sub.add_parser(
         "apply", help="Install, update or remove the task so it matches [scheduler] as saved"
     )
-    automation_sub.add_parser(
+    automation_remove = automation_sub.add_parser(
         "remove", help="Remove the task; config.toml is left unchanged"
     )
+    for automation_parser in (automation_apply, automation_remove):
+        automation_parser.add_argument(
+            "--replace-other-config", action="store_true",
+            help="Change the tasks even when another existing config installed them (one set per account)",
+        )
     automation_sub.add_parser(
         "run", help="Run the configured safe job once, now, in this process"
     )
@@ -1006,6 +1019,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--only-this", action="store_true",
         help="Learn only this project's folder, not the folder above it for its neighbours",
     )
+
+    projects_removed = projects_sub.add_parser(
+        "removed",
+        help=(
+            "Projects removed in Codex here (waiting for an answer) and, on purpose, on other machines; "
+            "with --everywhere or --bring-back answers for one removed here"
+        ),
+    )
+    removed_how = projects_removed.add_mutually_exclusive_group()
+    removed_how.add_argument(
+        "--everywhere", metavar="PROJECT", default=None,
+        help="Removed here on purpose: the other machines remove it too on their next sync",
+    )
+    removed_how.add_argument(
+        "--bring-back", metavar="PROJECT", default=None,
+        help="Removed here by mistake: the next sync takes it back from the other machines",
+    )
+    projects_removed.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
 
     state_backup = sub.add_parser(
         "state-backup",
@@ -1290,6 +1321,18 @@ def _print_handoff_result(result) -> None:
     print(f"Handoff finished on {result.machine}.")
     print(f"  loaded from: {', '.join(result.taken) or 'nothing new'}")
     print(f"  files written: {result.sync_actions}, chats written: {result.session_actions}")
+    files_held = getattr(result, "files_held_back", 0)
+    chats_held = getattr(result, "chats_held_back", 0)
+    if files_held:
+        print(
+            f"  settings files newer in the cloud copy, not loaded: {files_held} "
+            "([sync] direction = to_cloud only sends)"
+        )
+    if chats_held:
+        print(
+            f"  chats newer in the cloud copy, not loaded: {chats_held} "
+            "(held back by the working set or [sync] direction)"
+        )
     if result.chats_decided_by_rule:
         print(
             f"  chats changed on both machines, decided by [conflict] policy: "
@@ -1318,6 +1361,13 @@ def _print_handoff_result(result) -> None:
         print(
             f"  added without a folder here: {result.projects_missing_folders} "
             "(their chats can be read; `projects place` gives one a folder)"
+        )
+    if result.projects_removed:
+        print(f"  projects removed here because another machine removed them on purpose: {result.projects_removed}")
+    if result.projects_waiting:
+        print(
+            f"  projects removed in Codex here, waiting for an answer: {result.projects_waiting} "
+            "(`projects removed` lists them; until answered they stay removed here and are kept elsewhere)"
         )
     if result.chats_archived or result.chats_restored:
         print(
@@ -1384,11 +1434,15 @@ def _print_scope(scope, args: argparse.Namespace, *, as_json: bool) -> int:
     """`sessions scope`: the working set stored for a pair of machines."""
     expanded = args.expand and not scope.is_empty
     if as_json:
-        payload = {"projects": list(scope.projects), "chats": list(scope.chats), "empty": scope.is_empty}
+        payload = {
+            "projects": sorted({*scope.projects, *scope.unresolved_projects}),
+            "chats": list(scope.chats), "empty": scope.is_empty,
+        }
         if expanded:
             payload.update(
                 chat_count=scope.chat_count, total_bytes=scope.total_bytes,
                 not_in_catalog=len(scope.not_in_catalog),
+                not_found=list(scope.unresolved),
             )
         print(json.dumps(payload, sort_keys=True, indent=2))
         return int(ExitCode.OK)
@@ -1403,6 +1457,10 @@ def _print_scope(scope, args: argparse.Namespace, *, as_json: bool) -> int:
         print(f"  chat: {chat}")
     if expanded:
         print(f"  covers now: {scope.chat_count} chat(s), {scope.total_bytes} B")
+        for name in scope.unresolved:
+            # Kept in the set: it covers nothing now, it does not widen to
+            # every chat (CS-495).
+            print(f"  not found now, brings nothing: {name}")
         if scope.not_in_catalog:
             print(f"  not in this machine's thread catalogue: {len(scope.not_in_catalog)}")
     return int(ExitCode.OK)
@@ -1810,6 +1868,8 @@ def _print_journals(journals, *, as_json: bool, include_finished: bool) -> None:
                 "can_resume": item.can_resume,
                 "can_rollback": item.can_rollback,
                 "rollback_refusal": item.rollback_refusal,
+                "backup_needed": item.backup_needed,
+                "copy_of": item.copy_of,
             }
             for item in journals
         ], sort_keys=True, indent=2))
@@ -1830,10 +1890,18 @@ def _print_journals(journals, *, as_json: bool, include_finished: bool) -> None:
             continue
         if item.closes_itself:
             print("    stopped before replacing anything; the next sync on this machine closes it by itself")
+        elif not item.readable and item.copy_of:
+            print(
+                f"    a copy of journal {item.copy_of}, whose own file is missing; check it in the "
+                "journals folder, then remove it"
+            )
         elif not item.readable:
             print("    cannot be read; inspect the file in the journals folder before anything else")
         elif not item.own:
-            print("    another machine's run; close it there, or here with `recover resume` once that run is over")
+            print(
+                "    another machine's run: roll it back or close it there (its backup holds that machine's "
+                "files); close it here with `recover resume` only once that run is over"
+            )
         else:
             exits = ["`recover resume`"] + (["`recover rollback`"] if item.can_rollback else [])
             print(f"    entered the commit phase; close it with {' or '.join(exits)}")
@@ -1897,6 +1965,9 @@ def _project_sync_json(result: ProjectSyncResult) -> dict:
         "order_changed": plan.order_changed,
         "bindings_written": plan.bindings_written,
         "bound_by_folder": plan.bound_by_folder,
+        "removals_waiting": [
+            {"project_id": item.project_id, "name": item.name, "roots": list(item.roots)} for item in plan.waiting
+        ],
         "written": result.written,
         "published": result.published,
     }
@@ -1918,6 +1989,23 @@ def _places_json(report: PlacesReport) -> dict:
         ],
         "learned": report.learned.body(),
     }
+
+
+def _print_removals(removals) -> None:
+    """Projects removed in Codex, here and on purpose elsewhere (D-039)."""
+    print(f"Removed projects ({removals.machine}; [sync] removed_projects = {removals.policy!r}):")
+    if not removals.items:
+        print("  none")
+        return
+    for item in removals.items:
+        name = item.name or item.project_id
+        if item.here and not item.confirmed:
+            state = "removed here, waiting: --everywhere or --bring-back"
+        elif item.here:
+            state = "removed here on purpose; the other machines remove it too"
+        else:
+            state = f"removed on purpose on {item.machine}; removed here too"
+        print(f"  {name:<30} {state}  ({', '.join(item.roots) or 'no folder'})")
 
 
 def _print_places(report: PlacesReport, *, everything: bool) -> None:
@@ -1969,6 +2057,13 @@ def _print_project_sync(result: ProjectSyncResult, *, applied: bool) -> None:
         f"pins {'change' if plan.pins_changed else 'kept'}, order {'changes' if plan.order_changed else 'kept'}, "
         f"chat bindings: {plan.bindings_written}, chats bound by their folder: {plan.bound_by_folder}"
     )
+    if plan.removed:
+        print(f"  removed here because another machine removed them on purpose: {len(plan.removed)}")
+    if plan.waiting:
+        print(
+            f"  removed in Codex here, waiting for an answer: {len(plan.waiting)} -- not taken back; "
+            "`codexsync projects removed` answers"
+        )
     if plan.unplaced:
         print(
             f"  carried with the other machine's root as it is: {len(plan.unplaced)} -- "
@@ -2147,13 +2242,13 @@ def main(argv: list[str] | None = None) -> int:
                 print_automation_status(automation_status(config_path))
                 return int(ExitCode.OK)
             if args.automation_command == "apply":
-                view = apply_automation(config_path)
+                view = apply_automation(config_path, replace_other_config=args.replace_other_config)
                 print("Scheduled task installed or updated." if view.enabled else
                       "Scheduled task removed: [scheduler] enabled = false.")
                 print_automation_status(view)
                 return int(ExitCode.OK)
             if args.automation_command == "remove":
-                existed = remove_automation(config_path)
+                existed = remove_automation(config_path, replace_other_config=args.replace_other_config)
                 print("Scheduled task removed." if existed else "No scheduled task was installed.")
                 print(
                     "  config.toml was not changed: while [scheduler] says enabled = true, "
@@ -2171,8 +2266,12 @@ def main(argv: list[str] | None = None) -> int:
                 "repair": OperationKind.REPAIR_APPLY,
             }[args.diagnostic_for]
             if args.report:
-                print(json.dumps(build_issue_report(config_path, operation=operation), indent=2, sort_keys=True))
-                return int(ExitCode.OK)
+                issue = build_issue_report(config_path, operation=operation)
+                print(json.dumps(issue, indent=2, sort_keys=True))
+                # The same exit as `doctor` itself (AI_RULES 7): a script that
+                # attaches the report still learns a check failed (CS-539).
+                failed = any(status == "FAIL" for status in issue.get("checks", {}).values())
+                return int(ExitCode.FAIL_SAFE if failed else ExitCode.OK)
             report = run_preflight(config_path, operation=operation)
             print_preflight_report(report)
             if report.is_ok:
@@ -2355,7 +2454,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             templates = render_scheduler_templates(
                 args.platform,
-                executable=frozen_program() or Path(sys.executable).resolve(),
+                # The prefix a real task runs: `python -m codexsync` from pip (CS-543).
+                command=job_command(platform=args.platform),
                 config_path=config_path.resolve(),
                 log_dir=Path(args.log_dir).expanduser().resolve(),
                 interval_seconds=args.interval,
@@ -2458,6 +2558,10 @@ def main(argv: list[str] | None = None) -> int:
                 "working_set": {
                     "projects": len(scope.projects) if scope else 0,
                     "chats": scope.chat_count if scope else 0,
+                    # Chosen names that match nothing now: the set then covers
+                    # nothing for them, never everything (CS-495).
+                    # `sessions scope --expand` names them.
+                    "not_found": len(scope.unresolved) if scope else 0,
                 } if scope else None,
                 "codes": list(plan.codes),
                 # Session ids, thread names and record payloads never appear:
@@ -2747,6 +2851,31 @@ def main(argv: list[str] | None = None) -> int:
             print("The next sync (`codexsync sync`, or `projects sync`) carries it accordingly.")
             return int(ExitCode.OK)
 
+        if args.command == "projects" and args.projects_command == "removed":
+            chosen = args.everywhere or args.bring_back
+            if chosen is not None:
+                decided = decide_project_removal(config_path, chosen, everywhere=args.everywhere is not None)
+                print(
+                    f"{decided.name or decided.project_id}: "
+                    + ("removed on purpose; the other machines remove it on their next sync."
+                       if decided.confirmed else "removed by mistake; the next sync takes it back here.")
+                )
+                return int(ExitCode.OK)
+            removals = project_removals(config_path)
+            if args.as_json:
+                print(json.dumps({
+                    "machine": removals.machine, "policy": removals.policy,
+                    "removed": [
+                        {"machine": item.machine, "project_id": item.project_id, "name": item.name,
+                         "roots": list(item.roots), "removed_at_utc": item.removed_at_utc,
+                         "confirmed": item.confirmed, "here": item.here}
+                        for item in removals.items
+                    ],
+                }, sort_keys=True, indent=2, ensure_ascii=False))
+                return int(ExitCode.OK)
+            _print_removals(removals)
+            return int(ExitCode.OK)
+
         if args.command == "projects":
             result = sync_projects(config_path, confirm_plan=args.confirm_plan, dry_run=args.dry_run, origin="cli")
             if args.as_json:
@@ -2916,6 +3045,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Recovery {outcome.action.value} for {outcome.family} operation {outcome.operation_id}")
             print(f"  journal state before: {outcome.state}")
             print(f"  backup snapshot: {outcome.snapshot or '(none recorded)'}")
+            if outcome.would is not None:
+                print(f"  --apply would: {outcome.would.value}")
             if outcome.restored_files:
                 print(f"  restored files: {outcome.restored_files}")
             print(f"  {outcome.detail}")

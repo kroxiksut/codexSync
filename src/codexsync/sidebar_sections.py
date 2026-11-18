@@ -36,6 +36,8 @@ _SECTIONS_KEY = "sidebar-custom-sections-v3"
 _PROJECT_PREFIX = "codex:project:"
 _THREAD_PREFIX = "codex:thread:local:"
 _ORDER_PREFIX = "custom:"
+#: The sidebar's own project order (`codex:project:<legacy id>`), beside `project-order`.
+_UNIFIED_ORDER_KEY = "unified-sidebar-project-order-v1"
 
 
 def _account(state: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
@@ -102,13 +104,17 @@ def merge_sections(
     projects: dict[str, str],
     fresh: bool,
     chats: Iterable[str] | None = None,
+    deferred: Iterable[str] = (),
+    waiting: set[str] | None = None,
 ) -> int:
     """Merge one peer's sections into ``state`` in place; returns the changes made.
 
     ``projects`` maps the peer's project ids to this machine's (the project
     merge's translation); an item for a project or a chat not here is dropped.
     ``chats`` are the thread ids of this machine's chats, ``None`` for "do not
-    filter". Sections of another account are not carried.
+    filter". Sections of another account are not carried. A chat item dropped
+    because the chat is not here yet is added to ``waiting``; ``deferred`` are
+    such items from earlier merges, placed once the chat has arrived.
     """
     if not peer or not isinstance(peer.get("sections"), list):
         return 0
@@ -117,6 +123,13 @@ def merge_sections(
         return 0
     _, store = found
     here_chats = frozenset(chats) if chats is not None else None
+    deferred = frozenset(deferred)
+    if waiting is not None and here_chats is not None:
+        for offered in peer["sections"]:
+            for raw in (offered.get("items") or ()) if isinstance(offered, dict) else ():
+                if isinstance(raw, str) and raw.startswith(_THREAD_PREFIX) and raw[len(_THREAD_PREFIX):] \
+                        and raw[len(_THREAD_PREFIX):] not in here_chats:
+                    waiting.add(raw)
     sections: list[dict[str, Any]] = store["sections"]
     by_id = {item.get("id"): item for item in sections if isinstance(item, dict)}
     order: list[str] = [value for value in store.get("sectionOrder") or [] if isinstance(value, str)]
@@ -145,6 +158,20 @@ def merge_sections(
             order.append(_ORDER_PREFIX + section_id)
             changes += 1
         elif not fresh:
+            # A list already taken: only a chat that was not on this machine
+            # when the list was taken (``deferred``), has arrived since and sits
+            # in no section here joins the section the peer put it in (CS-528).
+            # Any other item stays as the person left it here.
+            placed = {key for item in sections if isinstance(item, dict) for key in item.get("itemKeys") or ()}
+            arrived = [key for key in items if key not in placed and key in deferred]
+            if arrived:
+                current["itemKeys"] = [key for key in current.get("itemKeys") or [] if isinstance(key, str)] + arrived
+                changes += 1
+                for key in arrived:
+                    if key.startswith(_THREAD_PREFIX):
+                        if not isinstance(host_ids, dict):
+                            host_ids = store["threadHostIds"] = {}
+                        host_ids[key[len(_THREAD_PREFIX):]] = "local"
             continue
         else:
             for field_name, value in (("name", offered.get("name") or ""), ("appearance", offered.get("appearance"))):
@@ -183,6 +210,28 @@ def merge_sections(
             changes += 1
     if order != store.get("sectionOrder"):
         store["sectionOrder"] = order
+    return changes
+
+
+def forget_project(state: dict[str, Any], project_id: str) -> int:
+    """Take a removed project out of every section and the sidebar's own order (D-039).
+
+    Returns the number of places it was taken out of. A section is never
+    removed, even when this leaves it empty: removing sections is not ours.
+    """
+    key = _PROJECT_PREFIX + project_id
+    changes = 0
+    found = _account(state)
+    if found is not None:
+        for section in found[1]["sections"]:
+            if isinstance(section, dict) and key in (section.get("itemKeys") or ()):
+                section["itemKeys"] = [item for item in section["itemKeys"] if item != key]
+                changes += 1
+    atoms = state.get(_ATOMS_KEY)
+    order = atoms.get(_UNIFIED_ORDER_KEY) if isinstance(atoms, dict) else None
+    if isinstance(order, list) and key in order:
+        atoms[_UNIFIED_ORDER_KEY] = [item for item in order if item != key]
+        changes += 1
     return changes
 
 

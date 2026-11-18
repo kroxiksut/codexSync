@@ -30,8 +30,11 @@ import hashlib
 from pathlib import Path
 import re
 import sqlite3
-from typing import Callable, TypeVar
+from typing import TYPE_CHECKING, Callable, Mapping, TypeVar
 from urllib.parse import quote
+
+if TYPE_CHECKING:
+    from .sqlite_observation import SQLiteObservation
 
 
 class SQLiteRole(str, Enum):
@@ -97,7 +100,7 @@ class ThreadPlacements:
     something that looks local.
     """
     status: PlacementStatus
-    by_session: dict[str, str | None]
+    by_session: Mapping[str, str | None]
     archived: frozenset[str] = frozenset()
     codes: tuple[str, ...] = ()
     #: Codex 0.163's own history store (`thread_history_<n>.sqlite`, CS-426):
@@ -118,7 +121,7 @@ class ThreadPlacements:
 
 
 def read_thread_placements(
-    state_root: Path, *, timeout_seconds: float = 2.0
+    state_root: Path, *, timeout_seconds: float = 2.0, observation: SQLiteObservation | None = None,
 ) -> ThreadPlacements:
     """Rollout path per thread, from the thread catalogue, strictly read-only.
 
@@ -128,8 +131,15 @@ def read_thread_placements(
     system is not the whole truth about where a session lives: putting a branch
     somewhere the catalogue does not name makes it invisible, with no error.
     """
+    if observation is not None:
+        return observation.placements
     root = state_root.resolve()
-    discovered = discover_sqlite_sets(root)
+    try:
+        discovered = discover_sqlite_sets(root)
+    except OSError:
+        return ThreadPlacements(
+            PlacementStatus.INDETERMINATE, {}, codes=("CATALOG_UNAVAILABLE",)
+        )
     unopenable = [
         item for item in discovered
         if _would_create_a_sidecar(root / Path(item.database.relative_path))
@@ -166,7 +176,7 @@ def read_thread_placements(
     codes: list[str] = []
     for item in catalogues:
         database = root / Path(item.database.relative_path)
-        immutable = not _has_pending_frames(database)
+        immutable = _reading_start(database)
         try:
             connection = _read_only_connect(database, timeout_seconds)
         except sqlite3.Error:
@@ -230,7 +240,7 @@ def read_projected_threads(
     database = stores[0]
     if _would_create_a_sidecar(database):
         return PlacementStatus.INDETERMINATE, frozenset(), (WAL_WITHOUT_SHARED_INDEX,)
-    immutable = not _has_pending_frames(database)
+    immutable = _reading_start(database)
     try:
         connection = _read_only_connect(database, timeout_seconds)
     except sqlite3.Error:
@@ -272,9 +282,23 @@ class BackfillReading:
     last_watermark: str | None = None
     last_success_at: int | None = None
     updated_at: int | None = None
+    #: The four values exactly as stored. A repair compares the stored row
+    #: under the write lock, so a REAL where an INTEGER was expected must reach
+    #: the plan as it is, not as ``None`` (CS-525).
+    raw: tuple[object, ...] | None = None
 
     @property
-    def row(self) -> tuple[str | None, str | None, int | None, int | None]:
+    def exact(self) -> bool:
+        """Whether `row` is the stored row value for value."""
+        if self.raw is None:
+            return True
+        return all(value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
+                   for value in self.raw)
+
+    @property
+    def row(self) -> tuple[object, ...]:
+        if self.raw is not None and self.exact:
+            return tuple(self.raw)
         return (self.backfill, self.last_watermark, self.last_success_at, self.updated_at)
 
 
@@ -300,7 +324,10 @@ def _query_the_catalogue(
     Returns (status, catalogue path relative to the root, result, codes).
     """
     root = state_root.resolve()
-    discovered = discover_sqlite_sets(root)
+    try:
+        discovered = discover_sqlite_sets(root)
+    except OSError:
+        return PlacementStatus.INDETERMINATE, None, None, ("CATALOG_UNAVAILABLE",)
     if any(_would_create_a_sidecar(root / Path(item.database.relative_path)) for item in discovered):
         return PlacementStatus.INDETERMINATE, None, None, (WAL_WITHOUT_SHARED_INDEX,)
     shapes = [(item, _looks_like_thread_catalogue(root, item, timeout_seconds)) for item in discovered]
@@ -315,7 +342,7 @@ def _query_the_catalogue(
         return PlacementStatus.INDETERMINATE, None, None, ("SEVERAL_CATALOGUES",)
     relative = catalogues[0].database.relative_path
     database = root / Path(relative)
-    immutable = not _has_pending_frames(database)
+    immutable = _reading_start(database)
     try:
         connection = _read_only_connect(database, timeout_seconds)
     except sqlite3.Error:
@@ -339,9 +366,13 @@ def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')}
 
 
-def read_backfill_state(state_root: Path, *, timeout_seconds: float = 2.0) -> BackfillReading:
+def read_backfill_state(
+    state_root: Path, *, timeout_seconds: float = 2.0, observation: SQLiteObservation | None = None,
+) -> BackfillReading:
     """The catalogue's own backfill status, strictly read-only."""
 
+    if observation is not None:
+        return observation.backfill
     optional = ("last_watermark", "last_success_at", "updated_at")
 
     def query(connection: sqlite3.Connection) -> tuple[object, ...] | None:
@@ -360,6 +391,7 @@ def read_backfill_state(state_root: Path, *, timeout_seconds: float = 2.0) -> Ba
         last_watermark=watermark if isinstance(watermark, str) else None,
         last_success_at=success if isinstance(success, int) else None,
         updated_at=updated if isinstance(updated, int) else None,
+        raw=tuple(row),
     )
 
 
@@ -488,14 +520,22 @@ def _has_pending_frames(database: Path) -> bool:
     wal, _ = _sidecars(database)
     try:
         return wal.stat().st_size > 0
-    except OSError:
+    except FileNotFoundError:
         return False
 
 
 def _would_create_a_sidecar(database: Path) -> bool:
     """Whether opening this database would write a file beside it."""
     wal, shm = _sidecars(database)
-    return wal.exists() and _has_pending_frames(database) and not shm.exists()
+    try:
+        has_wal = wal.stat().st_size > 0
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # The WAL may hold the only current copy of rows. Unknown metadata is
+        # not evidence that it is empty, and opening could create a shared index.
+        return True
+    return has_wal and not shm.exists()
 
 
 def _read_only_connect(database: Path, timeout_seconds: float) -> sqlite3.Connection | None:
@@ -504,13 +544,17 @@ def _read_only_connect(database: Path, timeout_seconds: float) -> sqlite3.Connec
     Returns ``None`` when that is impossible, which the caller reports rather
     than works around.
     """
-    if _would_create_a_sidecar(database):
+    try:
+        if _would_create_a_sidecar(database):
+            return None
+        has_pending_frames = _has_pending_frames(database)
+    except OSError:
         return None
     # The path is percent-encoded: in a URI `?` and `#` start the query and
     # the fragment and `%` starts an escape, so a folder named with one of them
     # would otherwise open some other file, or none.
     uri = f"file:{quote(database.as_posix(), safe='/:')}?mode=ro"
-    if not _has_pending_frames(database):
+    if not has_pending_frames:
         # No pending frames, so the main file is the whole database and the WAL
         # machinery -- the part that creates and rewrites files -- is not needed
         # to read it. This covers a `-wal` that exists but is empty, which is a
@@ -523,15 +567,39 @@ def _read_only_connect(database: Path, timeout_seconds: float) -> sqlite3.Connec
     return connection
 
 
-def _wal_appeared(database: Path, opened_immutable: bool) -> bool:
-    """Whether a writer started while an immutable reading was in progress.
+@dataclass(frozen=True, slots=True)
+class _ReadingStart:
+    """What was beside the database right before a reading opened it."""
+    immutable: bool
+    sidecars: frozenset[str]
+
+
+def _present_sidecars(database: Path) -> frozenset[str]:
+    return frozenset(path.name for path in _sidecars(database) if path.exists())
+
+
+def _reading_start(database: Path) -> _ReadingStart:
+    try:
+        immutable = not _has_pending_frames(database)
+    except OSError:
+        immutable = False
+    return _ReadingStart(immutable, _present_sidecars(database))
+
+
+def _wal_appeared(database: Path, start: _ReadingStart) -> bool:
+    """Whether the database changed under a reading, so it is no whole state.
 
     ``immutable=1`` also gives up locking, so a Codex that began writing during
     the read would leave us holding a picture that was never a whole state. The
     ``-wal`` appearing is that event, and the answer is to report it, not to
-    keep the reading.
+    keep the reading. A sidecar that was not there when the reading started
+    means the same, whoever made it: a checkpoint between the look at the log
+    and the open can leave a plain read-only open on a log that just went
+    (CS-524).
     """
-    if not opened_immutable:
+    if _present_sidecars(database) - start.sidecars:
+        return True
+    if not start.immutable:
         return False
     return _has_pending_frames(database)
 
@@ -620,7 +688,16 @@ def discover_sqlite_sets(state_root: Path) -> list[SQLiteSet]:
     return result
 
 
-def audit_sqlite(state_root: Path, *, cold: bool = False, timeout_seconds: float = 2.0) -> list[SQLiteAuditReport]:
+def audit_sqlite(
+    state_root: Path, *, cold: bool = False, timeout_seconds: float = 2.0,
+    observation: SQLiteObservation | None = None,
+) -> list[SQLiteAuditReport]:
+    if observation is not None:
+        if cold and not observation.cold:
+            raise ValueError("Supplied SQLite observation does not include cold checks")
+        if observation.error is not None:
+            raise OSError(observation.error)
+        return list(observation.reports)
     root = state_root.resolve()
     return [_audit_one(root, item, cold=cold, timeout_seconds=timeout_seconds) for item in discover_sqlite_sets(root)]
 
@@ -628,7 +705,7 @@ def audit_sqlite(state_root: Path, *, cold: bool = False, timeout_seconds: float
 def _audit_one(root: Path, asset_set: SQLiteSet, *, cold: bool, timeout_seconds: float) -> SQLiteAuditReport:
     database = root / Path(asset_set.database.relative_path)
     before = _set_signature(root, asset_set)
-    immutable = not _has_pending_frames(database)
+    immutable = _reading_start(database)
     codes: list[str] = []
     try:
         connection = _read_only_connect(database, timeout_seconds)

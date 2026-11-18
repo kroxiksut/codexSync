@@ -28,7 +28,7 @@ from .config import load_config
 from .exceptions import ConfigError
 from .filters import PathFilter
 from .models import AppConfig, CopyAction, SyncPlan
-from .mutation_journal import JournalState, JournalStore
+from .mutation_journal import JournalState, JournalStore, snapshot_belongs_to
 from .operation_lock import OperationLock
 from .runtime import (
     _hash_file,
@@ -184,11 +184,14 @@ def restore_from_backup(
     initialize_runtime_paths(cfg)
 
     target_root = _resolve_restore_target(cfg, target)
-    snapshot = _resolve_snapshot_dir(
-        cfg.paths.backup_dir,
-        snapshot_name,
-        allow_legacy_snapshot=allow_legacy_snapshot,
-    )
+    if snapshot_name:
+        snapshot = _resolve_snapshot_dir(
+            cfg.paths.backup_dir,
+            snapshot_name,
+            allow_legacy_snapshot=allow_legacy_snapshot,
+        )
+    else:
+        snapshot = _newest_own_snapshot(cfg.paths.backup_dir, cfg.identity.machine_id or platform.node(), target)
     _verify_backup_snapshot(snapshot, allow_legacy_snapshot=allow_legacy_snapshot)
 
     def destination(_rel: str) -> tuple[str, Path]:
@@ -216,6 +219,7 @@ def execute_restore_plan(
     extracted_snapshot_dir: Path | None,
     *,
     dry_run: bool,
+    superseding: str | None = None,
 ) -> None:
     """Run a restore plan through the mutation envelope, then drop its staging.
 
@@ -223,7 +227,8 @@ def execute_restore_plan(
     careful as a restore: operation lock, journal, backup of what is replaced,
     the process re-checked before each replace. The lock is the local state
     root's even for a cloud-side write -- the key every family takes, since a
-    sync writes both sides under it (CS-304).
+    sync writes both sides under it (CS-304). ``superseding`` is the journal
+    a rollback undoes; it stays open while this runs (``JournalStore.begin``).
     """
     mgr = BackupManager(
         backup_root=cfg.paths.backup_dir,
@@ -251,6 +256,7 @@ def execute_restore_plan(
                     plan.action_count,
                     backup_snapshot=mgr.snapshot_name,
                     machine_id=cfg.identity.machine_id or platform.node(),
+                    superseding=superseding,
                 )
                 current = [journal]
 
@@ -324,6 +330,38 @@ def _resolve_snapshot_dir(
         raise ConfigError(f"No backup snapshots found in: {backup_root}", code="NO_BACKUPS", params={"path": str(backup_root)})
     snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return snapshots[0]
+
+def _newest_own_snapshot(backup_root: Path, machine_id: str, target: str) -> Path:
+    """The snapshot `restore` takes when none is named (CS-514).
+
+    The backup folder is shared: the newest snapshot in it may be another
+    machine's, or one a sync took of the other side, and restoring every file
+    of it into ``target`` puts those files where they never were. Without
+    ``--from`` only this machine's own snapshots qualify, and only one whose
+    manifest records every entry as backed up from ``target``.
+    """
+    candidates: list[Path] = []
+    if backup_root.is_dir():
+        for path in backup_root.iterdir():
+            if not _is_supported_snapshot(path) or not snapshot_belongs_to(path.name, machine_id):
+                continue
+            if not _backup_manifest_path(path).is_file():
+                continue
+            try:
+                sides = read_backup_manifest_sides(path)
+            except ConfigError:
+                continue
+            if sides and all(side == target for side in sides.values()):
+                candidates.append(path)
+    if not candidates:
+        raise ConfigError(
+            f"No backup snapshot of this machine holds only {target}-side files; name one with --from",
+            code="NO_OWN_BACKUP_FOR_TARGET",
+            params={"target": target},
+        )
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0].resolve()
+
 
 def _is_supported_snapshot(path: Path) -> bool:
     return path.is_dir() or (path.is_file() and path.suffix.lower() == ".zip")
@@ -423,7 +461,7 @@ def _snapshot_hash_inventory(snapshot: Path) -> dict[str, tuple[str, int]]:
 def _build_restore_plan_from_snapshot(
     snapshot: Path,
     destination: Destination,
-    include_roots: list[str],
+    include_roots: list[str] | None,
     exclude_globs: list[str],
     temp_root: Path,
 ) -> tuple[SyncPlan, Path | None]:
@@ -432,6 +470,11 @@ def _build_restore_plan_from_snapshot(
     ``destination(relative_path)`` returns the side and root for that entry,
     or ``None`` to leave it out. The side decides the plan list (`to_local` or
     `to_cloud`), which is what the restore's own backup then records.
+
+    ``include_roots=None`` takes every entry, ignoring today's filters too: a
+    rollback puts back what its operation replaced, and the config may have
+    narrowed since -- filtering then skipped files silently and still closed
+    the journal (CS-492).
     """
     if snapshot.is_dir():
         return _build_restore_plan(snapshot, destination, include_roots, exclude_globs), None
@@ -448,12 +491,12 @@ def _build_restore_plan_from_snapshot(
 def _build_restore_plan_from_zip_snapshot(
     snapshot_zip: Path,
     destination: Destination,
-    include_roots: list[str],
+    include_roots: list[str] | None,
     exclude_globs: list[str],
     temp_root: Path,
 ) -> tuple[SyncPlan, Path]:
     path_filter = PathFilter(exclude_globs)
-    allowed_roots = [root.strip("/\\") for root in include_roots if root.strip("/\\")]
+    allowed_roots = _allowed_roots(include_roots)
     staging_dir = temp_root / f".codexsync-restore-{uuid.uuid4().hex}"
     staging_dir.mkdir(parents=True, exist_ok=True)
 
@@ -469,9 +512,7 @@ def _build_restore_plan_from_zip_snapshot(
             seen_entries.add(rel)
             if _is_semantic_owned(rel):
                 raise ConfigError("Legacy restore contains semantic-owned state and requires the semantic restore pipeline")
-            if not _is_included_root(rel, allowed_roots):
-                continue
-            if path_filter.is_excluded(rel):
+            if not _filter_allows(rel, allowed_roots, path_filter):
                 continue
             where = destination(rel)
             if where is None:
@@ -488,11 +529,11 @@ def _build_restore_plan_from_zip_snapshot(
 def _build_restore_plan(
     snapshot_dir: Path,
     destination: Destination,
-    include_roots: list[str],
+    include_roots: list[str] | None,
     exclude_globs: list[str],
 ) -> SyncPlan:
     path_filter = PathFilter(exclude_globs)
-    allowed_roots = [root.strip("/\\") for root in include_roots if root.strip("/\\")]
+    allowed_roots = _allowed_roots(include_roots)
     plan = SyncPlan()
 
     snapshot_root = snapshot_dir.resolve()
@@ -505,9 +546,7 @@ def _build_restore_plan(
         rel = source.relative_to(snapshot_dir).as_posix()
         if _is_semantic_owned(rel):
             raise ConfigError("Legacy restore contains semantic-owned state and requires the semantic restore pipeline")
-        if not _is_included_root(rel, allowed_roots):
-            continue
-        if path_filter.is_excluded(rel):
+        if not _filter_allows(rel, allowed_roots, path_filter):
             continue
         where = destination(rel)
         if where is None:
@@ -518,6 +557,19 @@ def _build_restore_plan(
         _plan_list(plan, side).append(CopyAction(src=source, dst=dst, relative_path=rel))
 
     return plan
+
+
+def _allowed_roots(include_roots: list[str] | None) -> list[str] | None:
+    if include_roots is None:
+        return None
+    return [root.strip("/\\") for root in include_roots if root.strip("/\\")]
+
+
+def _filter_allows(rel: str, allowed_roots: list[str] | None, path_filter: PathFilter) -> bool:
+    """Today's config filters; ``None`` roots means a rollback, which takes everything."""
+    if allowed_roots is None:
+        return True
+    return _is_included_root(rel, allowed_roots) and not path_filter.is_excluded(rel)
 
 
 def _plan_list(plan: SyncPlan, side: str) -> list[CopyAction]:

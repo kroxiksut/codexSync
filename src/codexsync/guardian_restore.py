@@ -41,6 +41,7 @@ from .guardian_models import (
     GuardianManifest,
     GuardianSnapshot,
     ValidationStatus,
+    holds_no_projects,
     require_guardian_machine_id,
 )
 from .guardian_pointer import _verify_candidate
@@ -161,7 +162,14 @@ def build_guardian_restore_plan(
             payload = None
         elif live_unrecognised:
             codes.append(LIVE_SCHEMA_UNKNOWN)
-        elif schema_now is not None and schema_id is not None and schema_now != schema_id:
+        elif (
+            schema_now is not None and schema_id is not None and schema_now != schema_id
+            and not holds_no_projects(projects_now, bindings_now)
+            and not holds_no_projects(projects_in_snapshot, bindings_in_snapshot)
+        ):
+            # A live state that lost every project reads as legacy-v1 only
+            # because nothing in it is Electron any more; refusing to put the
+            # projects back then is the opposite of a restore (CS-487).
             codes.append(SCHEMA_CHANGED)
         elif current_state is not None:
             ids_now = _project_ids(current_state)

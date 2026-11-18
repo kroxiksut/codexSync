@@ -151,7 +151,7 @@ class AutomationApplyRemoveTests(unittest.TestCase):
             code, out, _ = _run_cli(["-c", "cfg.toml", "automation", "apply"])
 
         self.assertEqual(code, 0)
-        apply.assert_called_once_with(Path("cfg.toml"))
+        apply.assert_called_once_with(Path("cfg.toml"), replace_other_config=False)
         self.assertIn("installed or updated", out)
         self.assertEqual(_fields(out)["installed"], "yes")
 
@@ -176,10 +176,29 @@ class AutomationApplyRemoveTests(unittest.TestCase):
                 with mock.patch("codexsync.cli.remove_automation", return_value=existed) as remove:
                     code, out, _ = _run_cli(["-c", "cfg.toml", "automation", "remove"])
                 self.assertEqual(code, 0)
-                remove.assert_called_once_with(Path("cfg.toml"))
+                remove.assert_called_once_with(Path("cfg.toml"), replace_other_config=False)
                 self.assertIn(message, out)
                 self.assertIn("enabled = true", out)
                 self.assertIn("automation apply", out)
+
+    def test_a_program_no_task_could_start_is_warned_about(self) -> None:
+        """CS-546: from a checkout without install every task run would fail."""
+        with mock.patch("codexsync.cli.apply_automation", return_value=_view(command_problem="PACKAGE_NOT_INSTALLED")):
+            code, out, _ = _run_cli(["-c", "cfg.toml", "automation", "apply"])
+        self.assertEqual(code, 0)
+        self.assertIn("codexsync is not installed for this Python", out)
+        with mock.patch("codexsync.cli.apply_automation", return_value=_view()):
+            _, out, _ = _run_cli(["-c", "cfg.toml", "automation", "apply"])
+        self.assertNotIn("not installed for this Python", out)
+
+    def test_taking_the_tasks_over_from_another_config_is_asked_for_by_a_flag(self) -> None:
+        """CS-545: one set of tasks per account; the flag says this config may take them."""
+        for command, name, value in (("apply", "apply_automation", _view()), ("remove", "remove_automation", True)):
+            with self.subTest(command=command):
+                with mock.patch(f"codexsync.cli.{name}", return_value=value) as call:
+                    code, _, _ = _run_cli(["-c", "cfg.toml", "automation", command, "--replace-other-config"])
+                self.assertEqual(code, 0)
+                call.assert_called_once_with(Path("cfg.toml"), replace_other_config=True)
 
     def test_a_refused_remove_is_a_safe_abort(self) -> None:
         with mock.patch("codexsync.cli.remove_automation", side_effect=FailSafeError("not removed")):

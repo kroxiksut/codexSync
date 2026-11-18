@@ -59,27 +59,35 @@ def resolve_or_restore_latest_good(root_dir: Path, machine_id: str) -> GuardianS
 def find_latest_good(root_dir: Path, machine_id: str) -> tuple[GuardianSnapshot | None, bool]:
     """``resolve_or_restore_latest_good`` minus the rebuild: ``(snapshot, resolved)``.
 
-    ``resolved`` is false when committed snapshots exist but the pointer does
-    not name a verified one. The writer would rebuild the pointer then; a
-    caller that only looks must say so instead, because a pointer that moved
-    because someone looked is a silent state change.
+    The answer is the snapshot the writer would compare with, and the pointer
+    is never rewritten here: a pointer that moved because someone looked is a
+    silent state change. A pointer naming a snapshot proven gone or damaged
+    gives way to the newest verified committed snapshot, as in the writer
+    (which keeps that pointer when the snapshot is older than it). ``resolved``
+    is false only when that cannot be known now: a snapshot unreadable at this
+    moment, or a dangling pointer with nothing committed to fall back on.
     """
     root = root_dir.resolve()
     machine = require_guardian_machine_id(machine_id)
     if not root.is_dir():
         return None, True
     pointer = _read_pointer(_pointer_path(root, machine))
+    if pointer is not None and pointer.machine_id != machine:
+        pointer = None
     try:
-        if pointer is not None and pointer.machine_id == machine:
+        if pointer is not None:
             snapshot = _snapshot_from_pointer(root, pointer)
             if snapshot is not None:
                 return snapshot, True
-        if _scan_latest_committed(root, machine) is None and pointer is None:
-            return None, True
+        recovered = _scan_latest_committed(root, machine)
     except GuardianIntegrityError:
         # A snapshot that cannot be read now: not resolved, nothing rebuilt.
         return None, False
-    return None, False
+    if recovered is not None:
+        # Answering "unresolved" here made every accept preview differ from
+        # the accept itself, which resolves to this snapshot, for good (CS-532).
+        return recovered, True
+    return None, pointer is None
 
 
 def publish_latest_good(root_dir: Path, candidate: GuardianSnapshot) -> GuardianSnapshot:

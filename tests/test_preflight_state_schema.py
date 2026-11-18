@@ -170,6 +170,32 @@ class PreflightStateSchemaTests(unittest.TestCase):
         self.assertIn("1 newer state", check.details)
         self.assertIn("guardian accept", check.details)
 
+    def test_a_state_held_back_by_its_format_says_guardian_is_stuck(self) -> None:
+        # CS-533: a state in another schema than latest-good's is quarantined
+        # too, and doctor said PASS while latest-good stood still.
+        self._state(ELECTRON_STATE)
+        snapshot = self.guardian / "snapshots" / "machine-a" / "snap-1"
+        snapshot.mkdir(parents=True)
+        (snapshot / "COMMITTED").write_text("{}", encoding="utf-8")
+        (snapshot / "manifest.json").write_text(
+            json.dumps({"created_at_utc": "2026-09-05T10:57:48.403582Z"}), encoding="utf-8"
+        )
+        pointer = self.guardian / "latest-good" / "machine-a.json"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(json.dumps({"snapshot_id": "snap-1"}), encoding="utf-8")
+        for name, codes in (("one", ["BASELINE_SCHEMA_MISMATCH"]), ("two", ["PROJECT_NOT_IN_ORDER", "UNKNOWN_SCHEMA"])):
+            event = self.guardian / "quarantine" / "machine-a" / name
+            event.mkdir(parents=True)
+            (event / "manifest.json").write_text(
+                json.dumps({"created_at_utc": "2026-09-13T09:40:48.856560Z", "reason_codes": codes}),
+                encoding="utf-8",
+            )
+
+        check = self._check(self._run(), "guardian_latest_good")
+
+        self.assertEqual(check.status, "WARN")
+        self.assertEqual(check.parts, (("guardian_latest_good.stuck_schema", {"snapshot": "snap-1", "count": 2}),))
+
 
 if __name__ == "__main__":
     unittest.main()

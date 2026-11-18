@@ -421,6 +421,15 @@ class BoundByFolderTests(unittest.TestCase):
         self.assertEqual(plan.bound_by_folder, 1)
         self.assertEqual(state["thread-project-assignments"], {"t1": {"projectKind": "local", "projectId": "a"}})
 
+    def test_a_binding_of_a_kind_not_carried_is_still_a_binding(self) -> None:
+        # CS-526: a chat bound to a remote project is not "unbound".
+        peer = publication_from_state(_state([_project("a", "Alpha", "D:\\P\\alpha")]), "desk")
+        remote = {"projectKind": "remote", "projectId": "r-1"}
+        local = _state([], extra={"thread-project-assignments": {"t1": remote}})
+        plan, state = self._plan(local, peer, [("t1", "D:\\P\\alpha\\src")], {"D:\\P": "/home/u"})
+        self.assertEqual(plan.bound_by_folder, 0)
+        self.assertEqual(state["thread-project-assignments"], {"t1": remote})
+
     def test_a_binding_or_a_folder_codex_places_by_itself_is_left_alone(self) -> None:
         peer = publication_from_state(_state([_project("a", "Alpha", "D:\\P\\alpha")]), "desk")
         local = _state([_project("z", "Zed", "D:\\P\\alpha")], bindings={"t1": "z"})
@@ -632,11 +641,280 @@ class TwoMachineTests(_Workspace):
         ).target_path
         self.assertEqual(back.replace("\\", "/"), (foreign + "/docs").replace("\\", "/"))
 
+    def test_an_answer_over_an_unreadable_own_file_is_refused(self) -> None:
+        # CS-527: read as empty, the new answer replaced every earlier one.
+        from codexsync.app import places_root
+        from codexsync.exceptions import FailSafeError
+
+        foreign = "/srv/work/atlas" if os.name == "nt" else "D:\\Work\\atlas"
+        desktop, desktop_codex = self.machine("desktop")
+        laptop, laptop_codex = self.machine("laptop")
+        self.codex_state(desktop_codex, _state([_project("atl", "atlas", foreign)]))
+        self.codex_state(laptop_codex, _state([]))
+        run_handoff(desktop)
+        place_project(laptop, "atlas", skip=True)
+        own = places_root(load_config(laptop)) / "laptop.json"
+        damaged = own.read_text(encoding="utf-8")[:-10]
+        own.write_text(damaged, encoding="utf-8")
+        with self.assertRaises(FailSafeError):
+            place_project(laptop, "atlas", forget=True)
+        self.assertEqual(own.read_text(encoding="utf-8"), damaged)
+
     def test_a_machine_without_a_global_state_still_hands_off(self) -> None:
         laptop, _ = self.machine("laptop")
         with self.assertRaises(ProjectsNotCarried):
             sync_projects(laptop)
         self.assertEqual(run_handoff(laptop).projects_added, 0)
+
+
+class RemovedProjectTests(_Workspace):
+    """D-039: a project removed in Codex on one machine (CS-497).
+
+    Before it, the next sync took the project back from the other machine,
+    every time, so a carried project could be removed nowhere.
+    """
+
+    def codex_state(self, local: Path, state: dict) -> None:
+        (local / ".codex-global-state.json").write_bytes(_bytes(state))
+
+    def read_state(self, local: Path) -> dict:
+        return json.loads((local / ".codex-global-state.json").read_text(encoding="utf-8"))
+
+    def removed_in_codex(self, local: Path, project_id: str) -> None:
+        state = self.read_state(local)
+        del state["local-projects"][project_id]
+        state["project-order"] = [item for item in state["project-order"] if item != project_id]
+        state["pinned-project-ids"] = [item for item in state["pinned-project-ids"] if item != project_id]
+        # A binding to a project that is gone would leave the state invalid.
+        state["thread-project-assignments"] = {
+            thread: value for thread, value in state["thread-project-assignments"].items()
+            if value.get("projectId") != project_id
+        }
+        self.codex_state(local, state)
+
+    def policy(self, config: Path, value: str) -> None:
+        text = config.read_text(encoding="utf-8")
+        config.write_text(text.replace('session_mode = "all"', f'session_mode = "all"\nremoved_projects = "{value}"', 1),
+                          encoding="utf-8")
+
+    def two_machines(self, *, desktop_policy: str | None = None, laptop_policy: str | None = None):
+        desktop, desktop_codex = self.machine("desktop")
+        laptop, laptop_codex = self.machine("laptop")
+        for config, value in ((desktop, desktop_policy), (laptop, laptop_policy)):
+            if value:
+                self.policy(config, value)
+        self.codex_state(desktop_codex, _state(
+            [_project("a", "Alpha", str(self.root / "alpha")), _project("b", "Beta", str(self.root / "beta"))],
+            pinned=["b"], bindings={"chat-b": "b", "chat-a": "a"},
+        ))
+        self.codex_state(laptop_codex, _state([]))
+        run_handoff(desktop)
+        run_handoff(laptop)
+        self.assertEqual(set(self.read_state(laptop_codex)["local-projects"]), {"a", "b"})
+        return desktop, desktop_codex, laptop, laptop_codex
+
+    def test_by_default_a_project_removed_here_stays_removed_and_waits_for_an_answer(self) -> None:
+        from codexsync.app import project_removals
+
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines()
+        self.removed_in_codex(laptop_codex, "b")
+
+        result = run_handoff(laptop)
+        self.assertNotIn("b", self.read_state(laptop_codex)["local-projects"])
+        report = project_removals(laptop)
+        self.assertEqual([(item.project_id, item.confirmed, item.here) for item in report.items], [("b", False, True)])
+        self.assertEqual(report.policy, "ask")
+        self.assertEqual(result.projects_waiting, 1)
+        # Not on purpose yet: the other machine keeps it.
+        run_handoff(desktop)
+        self.assertIn("b", self.read_state(desktop_codex)["local-projects"])
+        # And asking again changes nothing: the question stands, the project stays out.
+        run_handoff(laptop)
+        self.assertNotIn("b", self.read_state(laptop_codex)["local-projects"])
+        self.assertEqual(len(project_removals(laptop).waiting), 1)
+
+    def test_on_purpose_the_other_machine_removes_it_too_once(self) -> None:
+        from codexsync.app import decide_project_removal, project_removals
+
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines()
+        self.removed_in_codex(laptop_codex, "b")
+        run_handoff(laptop)
+        decide_project_removal(laptop, "Beta", everywhere=True)
+        self.assertEqual(project_removals(laptop).waiting, ())
+
+        result = run_handoff(desktop)
+        state = self.read_state(desktop_codex)
+        self.assertEqual(set(state["local-projects"]), {"a"})
+        self.assertNotIn("b", state["pinned-project-ids"])
+        self.assertNotIn("b", state["project-order"])
+        self.assertNotIn("chat-b", state["thread-project-assignments"])
+        self.assertIn("chat-a", state["thread-project-assignments"])
+        self.assertEqual(result.projects_removed, 1)
+        report = validate_global_state_references(_bytes(state))
+        self.assertIn(report.status, {ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING})
+        self.assertFalse(sync_projects(desktop).plan.writes)
+        self.assertFalse(sync_projects(laptop).plan.writes)
+
+        # Made again on the desktop later, under its own new id: kept there and carried back.
+        state["local-projects"]["b2"] = _project("b2", "Beta", str(self.root / "beta"))
+        state["project-order"].append("b2")
+        self.codex_state(desktop_codex, state)
+        run_handoff(desktop)
+        self.assertIn("b2", self.read_state(desktop_codex)["local-projects"])
+        run_handoff(laptop)
+        self.assertIn("b2", self.read_state(laptop_codex)["local-projects"])
+        self.assertEqual(project_removals(laptop).items, (), "the removal ends once the folder is a project again")
+
+    def test_by_mistake_the_next_sync_takes_it_back(self) -> None:
+        from codexsync.app import decide_project_removal, project_removals
+
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines()
+        self.removed_in_codex(laptop_codex, "b")
+        run_handoff(laptop)
+        decide_project_removal(laptop, "b", everywhere=False)
+        run_handoff(laptop)
+        self.assertIn("b", self.read_state(laptop_codex)["local-projects"])
+        self.assertEqual(project_removals(laptop).items, ())
+        run_handoff(desktop)
+        self.assertIn("b", self.read_state(desktop_codex)["local-projects"])
+
+    def test_remove_means_on_purpose_without_a_question(self) -> None:
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines(laptop_policy="remove")
+        self.removed_in_codex(laptop_codex, "b")
+        run_handoff(laptop)
+        run_handoff(desktop)
+        self.assertEqual(set(self.read_state(desktop_codex)["local-projects"]), {"a"})
+
+    def test_bring_back_takes_it_back_at_once(self) -> None:
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines(laptop_policy="bring_back")
+        self.removed_in_codex(laptop_codex, "b")
+        run_handoff(laptop)
+        self.assertIn("b", self.read_state(laptop_codex)["local-projects"])
+
+    def test_a_third_machine_that_still_lists_it_does_not_bring_it_back(self) -> None:
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines(laptop_policy="remove")
+        office, office_codex = self.machine("office")
+        self.codex_state(office_codex, _state([]))
+        run_handoff(office)
+        self.assertIn("b", self.read_state(office_codex)["local-projects"])
+
+        self.removed_in_codex(laptop_codex, "b")
+        run_handoff(laptop)
+        run_handoff(desktop)
+        # The office has not synced yet and still publishes it.
+        run_handoff(laptop)
+        run_handoff(desktop)
+        self.assertNotIn("b", self.read_state(laptop_codex)["local-projects"])
+        self.assertNotIn("b", self.read_state(desktop_codex)["local-projects"])
+        run_handoff(office)
+        self.assertNotIn("b", self.read_state(office_codex)["local-projects"])
+
+    def test_the_same_folder_under_a_new_id_is_not_a_removal(self) -> None:
+        # Codex re-created every project under a new id once (2026-09-13).
+        from codexsync.app import project_removals
+
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines()
+        state = self.read_state(laptop_codex)
+        state["local-projects"]["b-new"] = {**state["local-projects"].pop("b"), "id": "b-new"}
+        state["project-order"] = ["b-new" if item == "b" else item for item in state["project-order"]]
+        state["pinned-project-ids"] = []
+        self.codex_state(laptop_codex, state)
+        run_handoff(laptop)
+        self.assertEqual(project_removals(laptop).items, ())
+
+    def test_the_preview_and_its_apply_have_one_plan_id(self) -> None:
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines()
+        self.removed_in_codex(laptop_codex, "b")
+        preview = sync_projects(laptop)
+        self.assertEqual([(item.peer_project_id, item.kind) for item in preview.plan.held], [("b", MergeKind.HELD)])
+        self.assertEqual(sync_projects(laptop).plan.plan_id, preview.plan.plan_id)
+        done = sync_projects(laptop, confirm_plan=preview.plan.plan_id)
+        self.assertTrue(done.published)
+
+    def test_an_unreadable_own_list_refuses_instead_of_forgetting_removals(self) -> None:
+        from codexsync.app import projects_root
+        from codexsync.exceptions import FailSafeError
+
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines()
+        own = publication_path(projects_root(load_config(laptop)), "laptop")
+        own.write_text(own.read_text(encoding="utf-8")[:-20], encoding="utf-8")
+        with self.assertRaises(FailSafeError):
+            sync_projects(laptop)
+
+    def test_the_console_lists_and_answers(self) -> None:
+        import contextlib
+        import io
+
+        from codexsync.app import project_removals
+        from codexsync.cli import main
+
+        desktop, desktop_codex, laptop, laptop_codex = self.two_machines()
+        self.removed_in_codex(laptop_codex, "b")
+        run_handoff(laptop)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["-c", str(laptop), "projects", "removed", "--json"]), 0)
+        self.assertEqual([item["name"] for item in json.loads(out.getvalue())["removed"]], ["Beta"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["-c", str(laptop), "projects", "removed", "--everywhere", "Beta"]), 0)
+            self.assertEqual(main(["-c", str(laptop), "projects", "removed", "--bring-back", "nope"]), 4)
+        self.assertTrue(project_removals(laptop).items[0].confirmed)
+
+    def test_an_unknown_policy_is_refused(self) -> None:
+        laptop, _ = self.machine("laptop")
+        self.policy(laptop, "forget")
+        with self.assertRaises(ConfigError):
+            load_config(laptop)
+
+
+class RemovalMergeTests(unittest.TestCase):
+    def test_a_removal_elsewhere_takes_the_project_out_of_sections_and_the_sidebar_order(self) -> None:
+        from codexsync.project_sync import REMOVED_ELSEWHERE, Removal
+
+        account = {
+            "sections": [{"id": "s1", "name": "Work", "itemKeys": ["codex:project:b", "codex:project:a"]}],
+            "sectionOrder": ["custom:s1"],
+        }
+        local = _state(
+            [_project("a", "A", "D:\\a"), _project("b", "B", "D:\\b")],
+            extra={"electron-persisted-atom-state": {
+                "sidebar-custom-sections-v3": {"acct": account},
+                "unified-sidebar-project-order-v1": ["codex:project:b", "codex:project:a"],
+            }},
+        )
+        peer = Publication(
+            "desktop", ELECTRON_V2_SCHEMA, {"a": _project("a", "A", "D:\\a")}, ("a",), (), {},
+            removed=(Removal("r1", "b", "B", ("D:\\b",), "2026-10-26T00:00:00Z", True),),
+        )
+        plan, state = _merge(local, peer)
+        self.assertEqual([(item.kind, item.codes) for item in plan.removed], [(MergeKind.REMOVE, (REMOVED_ELSEWHERE,))])
+        atoms = state["electron-persisted-atom-state"]
+        self.assertEqual(atoms["unified-sidebar-project-order-v1"], ["codex:project:a"])
+        self.assertEqual(atoms["sidebar-custom-sections-v3"]["acct"]["sections"][0]["itemKeys"], ["codex:project:a"])
+        self.assertEqual(plan.followed, ("r1",))
+
+    def test_a_removal_not_confirmed_elsewhere_is_ignored(self) -> None:
+        from codexsync.project_sync import Removal
+
+        local = _state([_project("a", "A", "D:\\a"), _project("b", "B", "D:\\b")])
+        peer = Publication(
+            "desktop", ELECTRON_V2_SCHEMA, {"a": _project("a", "A", "D:\\a")}, ("a",), (), {},
+            removed=(Removal("r1", "b", "B", ("D:\\b",), "", False),),
+        )
+        plan, state = _merge(local, peer)
+        self.assertEqual(plan.removed, ())
+        self.assertIn("b", state["local-projects"])
+
+    def test_a_removal_older_readers_never_saw_keeps_the_file_readable(self) -> None:
+        from codexsync.project_sync import Removal
+
+        publication = Publication(
+            "desktop", ELECTRON_V2_SCHEMA, {}, (), (), {},
+            removed=(Removal("r1", "b", "B", ("D:\\b",), "t", True),), followed=("x",),
+        )
+        plain = Publication("desktop", ELECTRON_V2_SCHEMA, {}, (), (), {})
+        self.assertEqual(publication.publication_id, plain.publication_id)
+        self.assertNotIn("removed", plain.to_json())
 
 
 if __name__ == "__main__":

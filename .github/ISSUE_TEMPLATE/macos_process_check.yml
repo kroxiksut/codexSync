@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thank you. This needs one Terminal command that only reads the list of running
-        programs. With codexSync 0.2.0a2 or later (no config needed, nothing is written,
+        programs. With codexSync 0.2.0 or later (no config needed, nothing is written,
         no path or command line is printed):
 
         ```sh

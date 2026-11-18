@@ -41,14 +41,23 @@ def scan_tree(base_dir: Path, include_roots: list[str], path_filter: PathFilter)
             if path_filter.is_excluded(rel):
                 continue
             st = root_path.stat()
-            result[rel] = FileMeta(rel, root_path, st.st_mtime_ns, st.st_size)
+            result[rel] = FileMeta(
+                rel, root_path, st.st_mtime_ns, st.st_size, st.st_dev, st.st_ino,
+            )
             continue
 
         for path, st in _walk_files(root_path):
             rel = path.relative_to(base_resolved).as_posix()
             if path_filter.is_excluded(rel):
                 continue
-            result[rel] = FileMeta(rel, path, st.st_mtime_ns, st.st_size)
+            # On Windows ``DirEntry.stat`` may report ``st_dev/st_ino`` as
+            # zero even though a path stat returns the stable file identity.
+            # Bind the plan using the same form the pre-backup check reads.
+            identity = path.stat()
+            result[rel] = FileMeta(
+                rel, path, st.st_mtime_ns, st.st_size,
+                identity.st_dev, identity.st_ino,
+            )
 
     return result
 

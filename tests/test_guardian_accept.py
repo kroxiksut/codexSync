@@ -244,8 +244,11 @@ class GuardianAcceptTests(unittest.TestCase):
 
         self.assertEqual(_tree(self.root), before)
         self.assertFalse(pointer.exists())
-        # The writer would rebuild that pointer; the preview says so instead.
-        self.assertEqual(plan.codes, ("BASELINE_UNRESOLVED",))
+        # The writer would rebuild that pointer and compare with the newest
+        # committed snapshot; the preview compares with the same one and
+        # rebuilds nothing, so its plan is the one an accept arrives at (CS-532).
+        self.assertEqual(plan.codes, ())
+        self.assertEqual(self._runner().accept(confirm_plan=plan.plan_id)[0].plan_id, plan.plan_id)
 
     # -- accepting ----------------------------------------------------------------
 
@@ -294,6 +297,29 @@ class GuardianAcceptTests(unittest.TestCase):
         with self.assertRaises(FailSafeError):
             self._runner().accept(confirm_plan="0" * 64)
         self.assertEqual(resolve_or_restore_latest_good(self.config.root_dir, "machine-a"), baseline)
+
+    def test_a_pointer_to_a_snapshot_that_is_gone_does_not_block_accept_for_good(self) -> None:
+        # CS-532: the pointer named generation 2, which was deleted. The writer
+        # compares with generation 1 and never moves the pointer below 2; the
+        # preview answered BASELINE_UNRESOLVED, the accept resolved to 1, and
+        # the two ids never matched.
+        self._write(BEFORE)
+        first = self._runner().once()
+        self._write(_state(
+            {"p1": "C:/a", "p2": "C:/b", "p3": "C:/c"},
+            {"t1": "p1", "t2": "p1", "t3": "p2", "t4": "p3", "t5": "p3"},
+        ))
+        second = self._runner().once()
+        self.assertEqual(second.status, GuardianResultStatus.COMMITTED)
+        shutil.rmtree(second.result.snapshot.directory)
+        self._write(RECREATED)
+        self.assertEqual(self._runner().once().status, GuardianResultStatus.QUARANTINED)
+
+        plan = self._runner().preview_accept()
+        self.assertEqual(plan.codes, ())
+        self.assertEqual(plan.baseline_snapshot_id, first.result.snapshot.snapshot_id)
+        _, snapshot = self._runner().accept(confirm_plan=plan.plan_id)
+        self.assertEqual(resolve_or_restore_latest_good(self.config.root_dir, "machine-a"), snapshot)
 
     def test_accepting_waits_for_no_running_watcher(self) -> None:
         self._stuck_store()

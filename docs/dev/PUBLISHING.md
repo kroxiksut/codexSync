@@ -170,13 +170,18 @@ GitHub's `> [!IMPORTANT]` alerts, which PyPI shows literally, into a bold label.
 ### npm: one-time setup
 
 npm's trusted publishing works the same way, but npm adds a trusted publisher
-only to a package that already exists, so the first publish needs a token:
+only to a package that already exists, so the first publish needs a token.
+The package is scoped, `@kroxut/codexsync` (owner, 2026-10-28): npm cannot
+rename a package, and a scope stays the publisher's whatever the GitHub
+account or repository is called later.
 
+0. On npmjs.com create the organisation `kroxut` (free plan: public packages
+   only), or check that it exists and the publishing account is an owner.
 1. On npmjs.com (an account with two-factor authentication) create a granular
    access token that may publish, with a short expiry. On GitHub → *Settings*
    → *Environments* create `npm` and give it the secret `NPM_TOKEN`.
 2. Run the release with `publish_npm` on. The job publishes with the token.
-3. On npmjs.com → package `codexsync` → *Settings* → *Trusted publishing* →
+3. On npmjs.com → package `@kroxut/codexsync` → *Settings* → *Trusted publishing* →
    GitHub Actions: owner `kroxiksut`, repository `codexSync`, workflow
    `release.yml`, environment `npm`. Then delete the `NPM_TOKEN` secret and
    revoke the token: every later publish goes through OIDC, with provenance.
@@ -341,11 +346,14 @@ D-037: the same frozen build packed four ways — `.deb`, `.rpm`, AppImage and
 CS-416: the same builds through npm, for people who already install Codex
 CLI with it. No macOS package: there is no frozen macOS build.
 
-- **The layout is Codex's own.** `codexsync` is a launcher
+- **The layout is Codex's own.** `@kroxut/codexsync` is a launcher
   (`packaging/npm`: `bin/codexsync.js`, `bin/codexsync-gui.js`,
   `lib/launch.js`) whose `optionalDependencies` alias one package per
-  system — `codexsync-linux-x64` is `npm:codexsync@<version>-linux-x64` —
-  and npm installs only the one whose `os`/`cpu` match. The launcher passes
+  system — `codexsync-linux-x64` is `npm:@kroxut/codexsync@<version>-linux-x64` —
+  and npm installs only the one whose `os`/`cpu` match. The alias stays
+  unscoped: it is only the folder the launcher looks in. `npm pack` names a
+  scoped package's file `kroxut-codexsync-<version>….tgz`; the release
+  assets keep their own `codexsync-<tag>-…` names. The launcher passes
   the arguments through and returns the program's exit code; a missing
   platform package is exit 4 with a sentence saying why. On Windows the
   window started with no command is left running on its own.
@@ -372,7 +380,7 @@ CLI with it. No macOS package: there is no frozen macOS build.
 
   ```sh
   python scripts/npm_packages.py stage --tag v0.2.0-alpha.2 --assets release --out npm --platforms win32-x64
-  npm install -g --prefix ./prefix ./npm/codexsync-0.2.0-alpha.2.tgz
-  npm install -g --prefix ./prefix "codexsync-win32-x64@file:./npm/codexsync-0.2.0-alpha.2-win32-x64.tgz"
+  npm install -g --prefix ./prefix ./npm/kroxut-codexsync-0.2.0-alpha.2.tgz
+  npm install -g --prefix ./prefix "codexsync-win32-x64@file:./npm/kroxut-codexsync-0.2.0-alpha.2-win32-x64.tgz"
   ./prefix/codexsync --version
   ```

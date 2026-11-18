@@ -39,3 +39,16 @@ def is_link(path: str | os.PathLike[str], info: os.stat_result) -> bool:
     if not isinstance(tag, int) or tag == 0:
         return True
     return bool(tag & REPARSE_TAG_NAME_SURROGATE)
+
+
+def extended_path(path: str) -> str:
+    """``path`` in Windows' extended-length form, not held to 260 characters.
+
+    Elsewhere, and for a path already in that form, it is returned as given.
+    """
+    if os.name != "nt" or path.startswith("\\\\?\\"):
+        return path
+    full = os.path.abspath(path)
+    if full.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + full[2:]
+    return "\\\\?\\" + full

@@ -36,12 +36,15 @@ compression = "none"             # none | zip
 ```powershell
 codexsync -c config.toml backups list                                  # the snapshots and their names
 codexsync -c config.toml restore --dry-run                              # preview, writes nothing
-codexsync -c config.toml restore --apply                                # the latest backup into the local .codex
+codexsync -c config.toml restore --apply                                # this machine's latest backup of the local .codex
 codexsync -c config.toml restore --from <snapshot-name> --apply         # a specific backup (directory or .zip)
 codexsync -c config.toml restore --target cloud --apply                 # into the cloud mirror instead
 ```
 
 - A restore needs Codex closed, and backs up whatever it replaces first.
+- Without `--from`, only this machine's own backups count, and only one taken
+  of the side being restored (`--target`): the backup folder is shared, and the
+  newest backup in it may be another machine's, or a backup of the other side.
 - The dry run verifies every file against the backup's manifest.
 - A legacy backup without a manifest needs an explicit `--from` plus
   `--allow-legacy-snapshot`, and cannot restore semantic-owned state (sessions,
@@ -72,12 +75,25 @@ for you: a run that entered the commit phase (`COMMITTING`,
 `RECOVERY_REQUIRED`), and another machine's run — the journals folder is in the
 shared workspace, and that run may still be going.
 
+**Another machine's open journal holds back only what it concerns.** Sync,
+chat transfer and restore wait for it, since they write the shared copy. A
+change to this machine's own Codex state — moving a chat, the project list,
+`repair-projects`, a Guardian restore, a project move, chat names, the chat
+catalogue and `codex repair` — goes ahead with a warning in the log: a laptop
+that stopped half-way through a sync no longer keeps this computer from
+repairing a Codex that does not start. A journal whose machine cannot be told,
+or that cannot be read, still holds back everything.
+
 **See what is open** (no side effects):
 
 ```powershell
 codexsync -c config.toml recover list           # open journals, and what closes each
 codexsync -c config.toml recover list --all     # finished ones too; --json for scripts
 ```
+
+A cloud client's copy of a journal file (such as `<id> (1).json`) blocks nothing
+while the journal it copies is readable, and is not listed. A copy whose original
+is gone still blocks; the list names it so you can check it and remove it.
 
 In the window the same list is the **Recovery** page; a synchronisation stopped
 by an open journal offers **Open Recovery**, which lands on that journal.
@@ -108,6 +124,13 @@ codexsync -c config.toml recover rollback <operation-id>
 codexsync -c config.toml recover rollback <operation-id> --apply
 ```
 
+- Only the machine that ran the operation can roll it back: its backup holds
+  that machine's files, and the local side here is another `.codex`. Another
+  machine's journal can only be closed here with `resume`, once that run is
+  certainly over.
+- Every file the backup holds goes back, even one that today's `include_roots`
+  or `exclude_globs` would leave out: the rollback undoes what the operation
+  replaced under the settings it ran with.
 - Each file goes back to the side it was backed up from: one sync backs up files
   of both sides, and the backup records the side of each one. `--target`
   (`local` or `cloud`) is optional; given, it must be the only side the backup
@@ -123,8 +146,10 @@ codexsync -c config.toml recover rollback <operation-id> --apply
   conflict bundle, so re-running it loses nothing.
 - Both commands default to a dry run and require Codex to be closed.
 - `rollback` checks everything that could refuse — the backup against its
-  committed manifest, the sides, the global state's validity — before it releases
-  the journal, so a rollback that cannot run leaves the block in place.
+  committed manifest, the sides, the global state's validity — before it writes
+  anything, and closes the journal only after every file is back. A rollback
+  that cannot run, or that Codex starting interrupts, leaves the block in place;
+  run it again once Codex is closed.
 - If the backup the journal names is gone (removed by retention, possibly by
   another machine sharing the backup folder), the rollback is refused: what was
   replaced can no longer be proven. `resume` still closes the journal.
@@ -168,3 +193,34 @@ request started the rebuild, the exact row from the backup it took then is put
 back. Codex then starts with the chats it already listed; ask for a rebuild
 again with `sessions catalogue` when you can leave Codex open until it
 finishes. `doctor` reports the same state as `codex_startup`.
+
+## When Codex refuses every command
+
+On Windows, Codex runs an agent's commands in a sandbox. Before each command it
+puts a deny entry on the folders of the project that the agent must not touch —
+`.codex`, `.agents`, `.git` — and to do that you have to be able to change
+their permissions. A folder created by a command *inside* the sandbox belongs
+to the sandbox account (`CodexSandboxOffline`), and one created from a shell
+run as administrator belongs to Administrators; then you may not change its
+permissions, the setup fails, and after a while Codex refuses every command in
+every chat of that project (`setup refresh had errors`).
+
+`doctor` checks each project's `.codex`, `.agents` and `.git` and reports any
+it cannot protect as `codex_sandbox`, with the owner and, when Codex's own
+sandbox log says the same, that too. In the window the Overview names them and
+*Copy commands* puts the fix on the clipboard. codexSync changes no permission
+itself: the folders are yours. Run the commands in PowerShell as
+administrator; each changes only the owner, and `/L` works on a link itself
+instead of what it points to. The names are in single quotes, where PowerShell expands
+nothing, so a `$` or a backtick in a folder name stays part of the name:
+
+```powershell
+icacls 'D:\Projects\app\.codex' /setowner 'PC\you' /C /L
+icacls 'D:\Projects\app\.git' /setowner 'PC\you' /T /C /L
+```
+
+Only `.git` is changed recursively: `.agents` and `.codex` may hold junctions
+into folders other agents use (Claude Code reads `.agents/skills`). Give such a
+folder back by changing its owner — never delete or recreate it. The deny
+entries Codex leaves on these folders after a successful setup are its
+protection working: they deny the sandbox, not you.

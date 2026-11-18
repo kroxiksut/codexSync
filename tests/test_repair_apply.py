@@ -144,6 +144,14 @@ class RepairApplyTests(unittest.TestCase):
                 **kwargs,
             )
 
+    def test_a_temp_file_left_by_a_dead_save_does_not_block_the_next(self) -> None:
+        # CS-529: "x" mode refused every save after one died mid-write.
+        temp = self.plan_path.with_suffix(self.plan_path.suffix + ".tmp")
+        temp.write_text("half", encoding="utf-8")
+        save_repair_plan(self.plan, self.plan_path)
+        self.assertFalse(temp.exists())
+        self.assertIn(self.plan.plan_id, self.plan_path.read_text(encoding="utf-8"))
+
     def test_apply_adds_only_the_approved_fields(self) -> None:
         approved = self._apply()
         self.assertGreater(approved, 0)

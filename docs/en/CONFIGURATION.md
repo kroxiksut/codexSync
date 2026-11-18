@@ -28,7 +28,11 @@ temp_dir = "${workspace_root}/.tmp"
 
 - **`machine_id`** is unique and permanent. Backups, snapshots, plans and mapping
   rules on the other machine refer to it; two machines under one name mix their
-  data.
+  data. It is written with Latin letters, digits, `.`, `_` and `-` only, because
+  it names files: an id with other characters (`My PC`, `Ноутбук`) is refused
+  with the form it would be stored as, and two ids that differ only in capital
+  letters (`Laptop`, `laptop`) are refused too, since Windows and most cloud
+  folders keep their files as one.
 - **`workspace_root_dir`** is a folder your cloud client syncs between machines.
   `${workspace_root}` in any other path stands for it.
 - **`local_state_dir`** is Codex's own state directory. It is read, written only
@@ -54,7 +58,7 @@ owner that removes files from it on its own schedule. A path written with the
 
 | Section | What it controls | See |
 |---|---|---|
-| `[sync]` | Comparison, direction, deletions, dry run by default | [Synchronisation](SYNC.md) |
+| `[sync]` | Comparison, direction, deletions, dry run by default; `removed_projects`: a project removed in Codex here (default: ask) | [Synchronisation](SYNC.md), [Projects](PROJECTS.md#a-project-removed-in-codex) |
 | `[targets]` | `include_roots`: what under `.codex` takes part in `sync` | [Synchronisation](SYNC.md#what-is-synced) |
 | `[filters]` | `exclude_globs`: what is never copied | [Synchronisation](SYNC.md#what-is-synced) |
 | `[conflict]` | `policy` for a file or chat changed on both sides (default: keep the newer) | [Synchronisation](SYNC.md#conflicts) |
@@ -232,8 +236,10 @@ scheduler settings outside `config.toml` and will be removed. If you installed a
 task with those scripts, uninstall it with them first so that two tasks do not
 run. `automation status` and the Automation page name such a task (the default
 `codexSyncSync`, the LaunchAgent `com.codexsync.sync`, or any task that runs
-`run-codexsync`) with the command that removes it: it runs `codexsync sync`,
-which in 0.2 carries settings only, never chats. It is never removed for you.
+`run-codexsync`) with the command that removes it: it runs `codexsync sync --apply`
+on its own timer, which in 0.2 is a full sync of settings and chats (`[sync] scope
+= "full"`, the default) and, with `[sync] close_codex = true`, asks Codex to quit
+while you work in it. It is never removed for you.
 
 **One task per account, and an executable that moved.** The Windows task is
 registered as `CodexSync Job (<user>)` in the `\CodexSync\` folder: before
@@ -244,6 +250,16 @@ names what the installed task actually runs, so a renamed or moved executable �
 what an upgraded frozen install leaves behind — is reported as
 `EXECUTABLE_MISSING` or `EXECUTABLE_MOVED` instead of a vague "does not match";
 `automation apply` re-registers it for this installation.
+
+**One config per account.** An account has one set of these tasks, whichever
+config installed them. `automation apply` and `automation remove` from another
+config that still exists change nothing and say which config the tasks run
+with: open that config to change them, or pass `--replace-other-config` (the
+*Use this config* button) to make them this config's. A task whose config is
+gone is replaced without asking. Run from a source checkout that is not
+installed for its Python, `automation status` warns that no task could start
+it: a task starts in a folder of the system's choosing, where `python -m
+codexsync` finds nothing — install it (`pip install -e .`) first.
 
 ## Copies of `.codex`
 

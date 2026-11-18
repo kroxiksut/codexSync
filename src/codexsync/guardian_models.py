@@ -125,6 +125,21 @@ class GuardianManifest:
     schema_id: str | None = None
 
 
+def holds_no_projects(project_count: int | None, binding_count: int | None) -> bool:
+    """Whether a state's project list is empty: no project and no binding.
+
+    Such a state commits to no schema. Every adapter reads the schema from the
+    projects and the bindings, so with none of either the legacy adapter claims
+    `{"local-projects": {}, "project-order": []}` only because nothing Electron
+    is left to see. Comparing its schema id with a populated baseline's made the
+    loss of every project read as "Codex changed its format" (CS-487): the
+    shrink went unseen, accept offered to take it as a new format, and restore
+    refused to put the projects back. Callers compare counts, never schema
+    ids, when either side holds no projects.
+    """
+    return project_count == 0 and binding_count == 0
+
+
 @dataclass(slots=True, frozen=True)
 class ValidationReport:
     status: ValidationStatus

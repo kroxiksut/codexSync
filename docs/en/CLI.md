@@ -41,7 +41,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `guardian accept` | no | Take the current state as the new baseline after a real drop | [Guardian](GUARDIAN.md#accepting-a-new-baseline) |
 | `guardian scheduler` | no | Deprecated: use `automation apply` | [Configuration](CONFIGURATION.md#automation) |
 | `automation status` / `run` | no | Show the scheduled task, or run its safe job now | [Configuration](CONFIGURATION.md#automation) |
-| `automation apply` / `remove` | no | Make the OS tasks match `[scheduler]`, `[state_backup]` and `[handoff]`, or remove them | [Configuration](CONFIGURATION.md#automation) |
+| `automation apply` / `remove` | no | Make the OS tasks match `[scheduler]`, `[state_backup]` and `[handoff]`, or remove them; `--replace-other-config` takes over tasks another config installed | [Configuration](CONFIGURATION.md#automation) |
 | `state-backup create` | **yes** | Take one verified copy of `.codex`; `--wait` waits for Codex to close | [Configuration](CONFIGURATION.md#copies-of-codex) |
 | `state-backup list` | no | List the copies in `[state_backup] root_dir` | [Configuration](CONFIGURATION.md#copies-of-codex) |
 | `backups list` | no | Backup snapshots a sync or restore took; the name is what `restore --from` takes | [Recovery](RECOVERY.md#restoring-a-backup) |
@@ -66,6 +66,7 @@ only reads (or writes outside `.codex`) and may run at any time.
 | `projects sync` | **yes** | Merge other machines' project lists into this one, then publish this one's (preview without `--confirm-plan`) | [Projects](PROJECTS.md#projects-between-machines) |
 | `projects files` | no | Whether this machine's project folders hold what other machines last had | [Projects](PROJECTS.md#project-folders) |
 | `projects places` | no | Where each project of another machine is on this one, and what this machine was told | [Projects](PROJECTS.md#on-another-operating-system) |
+| `projects removed` | workspace only | Projects removed in Codex here (waiting for an answer) and, on purpose, elsewhere; `--everywhere` or `--bring-back` answers for one removed here | [Projects](PROJECTS.md#a-project-removed-in-codex) |
 | `projects place` | workspace only | Say where another machine's project is here (`--path`), not to carry it (`--skip`), or forget (`--forget`); remembered for every direction | [Projects](PROJECTS.md#on-another-operating-system) |
 | `repair-projects scan` | no | Build an immutable, hashed repair plan | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
 | `repair-projects apply` | **yes** | Apply one exact plan, quoted by its id | [Projects](PROJECTS.md#repair-after-a-machine-handoff) |
@@ -141,16 +142,21 @@ unknown format — chats Codex keeps in a container this version cannot read, a
 chat list or projects in an unknown shape — is a warning naming the writes
 that are off). Then it checks the configuration and directories, whether Codex is
 running, whether Codex can start (`codex_startup`: a rebuild of its chat list
-left stuck is a failure until `codex repair` sets it back), the global-state
+left stuck is a failure until `codex repair` sets it back), whether Codex can
+run commands in each project (`codex_sandbox`, Windows: a `.codex`, `.agents` or
+`.git` its sandbox cannot protect, with the command that gives it back — see
+[Recovery](RECOVERY.md#when-codex-refuses-every-command)), the global-state
 schema and the latest restorable snapshot, session files and the session index,
 the SQLite thread catalogue, what a sync is allowed to do, the sync manifest,
 leftover temporary files, and whether an unfinished mutation still blocks every
 write (a failure until `recover` closes it).
 
 `doctor --report` prints the same reading as JSON for an issue: codexSync,
-Python, OS and Codex versions, which formats and gates this machine has, each
+Python, OS, Codex and SQLite versions, whether this build reads Codex's
+compressed `.jsonl.zst` chats, which formats and gates this machine has, each
 check's status (not its detail, which names paths) and counts — never a name,
-a path, a title or a chat id, so it can be pasted as it is.
+a path, a title or a chat id, so it can be pasted as it is. It exits like
+`doctor`: `5` when a check failed.
 
 ## The window from the console
 

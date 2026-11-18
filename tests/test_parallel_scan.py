@@ -13,12 +13,14 @@ import json
 import lzma
 from pathlib import Path
 import shutil
+from threading import Event, get_ident
 import unittest
 from unittest.mock import patch
 import uuid
 
 from codexsync import session_catalog
 from codexsync.session_catalog import scan_both_sides, scan_sessions
+from codexsync.work_scheduler import WorkScheduler
 
 
 def _records(session_id: str, lines: int) -> bytes:
@@ -97,6 +99,47 @@ class ParallelScanTests(unittest.TestCase):
         with patch.object(session_catalog, "_scan_jsonl", side_effect=failing):
             with self.assertRaises(RuntimeError):
                 scan_both_sides(self.local, self.mirror, local_machine=None, remote_machine=None)
+
+    def test_pair_shares_workers_without_nested_pools_and_overlaps_plain_reads(self) -> None:
+        """Two roots must not multiply pools, or delay plain reads until xz ends."""
+        expected = (
+            scan_sessions(self.local, source_machine="desktop"),
+            scan_sessions(self.mirror, source_machine="laptop"),
+        )
+        caller = get_ident()
+        packed_started, plain_started = Event(), Event()
+        real = session_catalog._scan_jsonl
+
+        def reading(path, *args, **kwargs):
+            if path.name.endswith(".xz"):
+                packed_started.set()
+                self.assertTrue(plain_started.wait(timeout=5))
+            else:
+                self.assertEqual(get_ident(), caller)
+                self.assertTrue(packed_started.wait(timeout=5))
+                plain_started.set()
+            return real(path, *args, **kwargs)
+
+        with WorkScheduler(io_workers=2, large_file_limit=2) as scheduler:
+            with patch.object(session_catalog, "ThreadPoolExecutor", create=True,
+                              side_effect=AssertionError("nested session pool")):
+                with patch.object(session_catalog, "_scan_jsonl", side_effect=reading):
+                    actual = scan_both_sides(
+                        self.local, self.mirror, local_machine="desktop", remote_machine="laptop",
+                        scheduler=scheduler,
+                    )
+            # The caller owns an injected scheduler and can reuse it afterwards.
+            self.assertEqual(scheduler.map_read(lambda x: x, [1]), [1])
+        self.assertEqual(actual, expected)
+
+    def test_injected_single_worker_keeps_catalog_and_invalid_read_evidence(self) -> None:
+        expected = scan_sessions(self.mirror)
+        with WorkScheduler(io_workers=1, large_file_limit=1) as scheduler:
+            actual = scan_sessions(self.mirror, scheduler=scheduler)
+            self.assertEqual(actual, expected)
+            self.assertIn("READ_ERROR", next(
+                item for item in actual.descriptors if "broken" in item.relative_path
+            ).codes)
 
 
 if __name__ == "__main__":

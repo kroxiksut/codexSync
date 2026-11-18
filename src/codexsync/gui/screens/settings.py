@@ -96,6 +96,8 @@ TABS: tuple[tuple[str, tuple[Field, ...]], ...] = (
         Field("project_files", "secret_patterns", "lines", []),
         Field("sync", "direction", "choice", "bidirectional", ("bidirectional", "to_cloud", "to_local")),
         Field("sync", "scope", "choice", "full", ("full", "settings")),
+        # A project removed in Codex here (D-039).
+        Field("sync", "removed_projects", "choice", "ask", ("ask", "remove", "bring_back")),
         Field("sync", "delete_policy", "choice", "never", ("never", "propagate")),
         Field(
             "sync", "session_mode", "choice", "all", ("all", "last_date_only"),

@@ -133,16 +133,19 @@ class _Job(QRunnable):
         self._call = call
         self._with_progress = with_progress
         self._last_report = 0.0
+        self._pending_report = None
         self.signals = _JobSignals()
 
     def _report(self, phase: str, done: int, total: int) -> None:  # pragma: no cover - worker thread
         now = time.monotonic() * 1000
+        self._pending_report = (self._token, phase, done, total)
         finished = total and done >= total
         if not finished and now - self._last_report < PROGRESS_INTERVAL_MS:
             return
         self._last_report = now
         try:
-            self.signals.progress.emit((self._token, phase, done, total))
+            self.signals.progress.emit(self._pending_report)
+            self._pending_report = None
         except RuntimeError:
             pass
 
@@ -162,6 +165,13 @@ class _Job(QRunnable):
             return self._call(progress=self._report) if self._with_progress else self._call()
         except Exception as exc:  # noqa: BLE001 - reported as a bug, never swallowed
             return Outcome(failure=Failure.UNEXPECTED, message=f"{type(exc).__name__}: {exc}")
+        finally:
+            if self._pending_report is not None:
+                try:
+                    self.signals.progress.emit(self._pending_report)
+                except RuntimeError:
+                    pass
+                self._pending_report = None
 
     def deliver(self, outcome: Outcome) -> None:  # pragma: no cover - worker thread
         try:
@@ -294,6 +304,42 @@ def card(title: str | None = None, summary: QLabel | None = None) -> tuple[QFram
             header.addWidget(summary)
         layout.addLayout(header)
     return frame, layout
+
+
+class _ContentHeight(QObject):
+    """Keeps a frame's minimum height at what its wrapped text needs (CS-484)."""
+
+    def __init__(self, frame: QFrame) -> None:
+        super().__init__(frame)
+        self.frame = frame
+        frame.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt's name
+        if event.type() in (QEvent.Resize, QEvent.LayoutRequest, QEvent.Show):
+            self.update()
+        return False
+
+    def update(self) -> None:
+        layout = self.frame.layout()
+        if layout is None:
+            return
+        needed = layout.totalHeightForWidth(self.frame.width())
+        if needed < 0:
+            needed = layout.totalMinimumSize().height()
+        if needed != self.frame.minimumHeight():
+            self.frame.setMinimumHeight(needed)
+
+
+def keep_content_height(frame: QFrame) -> None:
+    """Never let a parent squeeze ``frame`` below its wrapped text.
+
+    A ``QSplitter`` (and a layout) sizes a child by its minimum size hint,
+    which knows nothing of a label that wrapped onto a second line at the
+    current width; the child is then drawn shorter than its text and its
+    lines overlap. The minimum height here follows ``heightForWidth`` at
+    whatever width the frame has now.
+    """
+    _ContentHeight(frame).update()
 
 
 def row(*widgets: QWidget, stretch_last: bool = True, spacing: int = 10) -> QHBoxLayout:

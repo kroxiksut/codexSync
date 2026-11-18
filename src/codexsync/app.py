@@ -8,6 +8,7 @@ the CLI and the tests.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import logging
 import json
@@ -23,10 +24,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .config import PATH_SUBSTITUTIONS, load_config, preview_path
 from .progress import PHASES, ProgressCallback, report as report_progress
+from .task_items import TaskItem, filter_task_rows, load_latest_session_task, task_rows
 from .mapping_hints import MappingHints, build_mapping_hints
 from .sync_candidates import SyncCandidate, list_sync_candidates
 from .automation import AutomationView, apply_automation, automation_status, remove_automation
 from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK
+from .watcher_stop import StopWatch, WatcherStopping
 from .config_edit import (
     MAPPING_KEYS,
     ConfigChange,
@@ -93,6 +96,7 @@ from .project_sync import (
     MergeKind,
     ProjectMergePlan,
     ProjectSyncUnsupported,
+    Removal as ProjectRemovalRecord,
     RootMappingAmbiguous,
     RootNotPlaced,
     build_project_merge,
@@ -201,8 +205,10 @@ from .semantic_transfer import (
     ResolutionChoice,
     TransferAction,
     TransferPlan,
+    ARCHIVE_FOLLOWS_LOCAL,
     FORMAT_MIGRATION,
     IN_PLACE_DECOMPRESSED,
+    MIRROR_CONTAINER_REPLACED,
     MOVES_BRANCH,
     OLDER_FORMAT_HAS_LATER_RECORDS,
     NEW_CHAT_SAME_PATH,
@@ -231,7 +237,7 @@ from .sqlite_audit import (
     read_thread_names,
     read_thread_placements,
 )
-from .fs_replace import replace_with_retry
+from .fs_replace import replace_with_retry, write_json_atomically
 from .config_locations import cache_dir
 from .chat_archive import ArchivePlan, apply_archive_changes, build_archive_plan, read_archive_back
 from .chat_names import (
@@ -277,9 +283,11 @@ from .session_index import (
     IndexParseResult,
     parse_session_index,
 )
+from .shared_read import read_shared
 from .stable_reader import SourceMissingError, SourceTooLargeError, SourceUnstableError, StableReader
 from .state_locator import locate_local_state_dir, locate_state_dirs
 from .sync_engine import SyncEngine
+from .work_scheduler import WorkScheduler
 from .handoff import (
     Board,
     Delivery,
@@ -288,11 +296,14 @@ from .handoff import (
     HandoffRecord,
     STATE_WORKING,
     awaiting_delivery,
+    case_twin_message as handoff_case_twin_message,
     delivery,
     machine_key,
     mark_working,
     read_board,
     record_handoff,
+    record_path,
+    wanted_keys as handoff_wanted_keys,
 )
 from .notifications import Notifier
 from .codex_closer import CloseOutcome, ask_codex_to_quit
@@ -558,6 +569,8 @@ def build_context(
     enforce_safety: bool = True,
     conflict_policy: str | None = None,
     direction: str | None = None,
+    *,
+    scheduler: WorkScheduler | None = None,
 ) -> AppContext:
     cfg = with_run_choices(load_config(config_path), conflict_policy, direction)
     safety_gate = _make_safety_gate(cfg)
@@ -576,24 +589,28 @@ def build_context(
         # Never "everything": that is where the credentials live (CS-289).
         raise ConfigError("targets.include_roots is not set: there is nothing to synchronise", code="NOTHING_TO_SYNC")
 
-    local_idx, cloud_idx = _build_indexes(cfg, local_dir, cloud_dir)
-    manifest = load_manifest(
-        cfg.state.manifest_file, cfg.state.data_version, machine_id=sync_machine_id(cfg)
-    )
-    plan = build_sync_plan(
-        local_index=local_idx,
-        cloud_index=cloud_idx,
-        local_root=local_dir,
-        cloud_root=cloud_dir,
-        previous_manifest=manifest,
-        compare_mode=cfg.sync.compare,
-        tolerance_seconds=cfg.sync.time_tolerance_seconds,
-        conflict_policy=cfg.conflict.policy,
-        equal_mtime_action=cfg.sync.equal_mtime_action,
-        direction=cfg.sync.direction,
-        delete_policy=cfg.sync.delete_policy,
-        include_roots=cfg.targets.include_roots,
-    )
+    # One owner for the whole preparation, never a pool per file. An injected
+    # scheduler belongs to its caller and may also serve other read operations.
+    with nullcontext(scheduler) if scheduler is not None else WorkScheduler() as work:
+        local_idx, cloud_idx = _build_indexes(cfg, local_dir, cloud_dir, scheduler=work)
+        manifest = load_manifest(
+            cfg.state.manifest_file, cfg.state.data_version, machine_id=sync_machine_id(cfg)
+        )
+        plan = build_sync_plan(
+            local_index=local_idx,
+            cloud_index=cloud_idx,
+            local_root=local_dir,
+            cloud_root=cloud_dir,
+            previous_manifest=manifest,
+            compare_mode=cfg.sync.compare,
+            tolerance_seconds=cfg.sync.time_tolerance_seconds,
+            conflict_policy=cfg.conflict.policy,
+            equal_mtime_action=cfg.sync.equal_mtime_action,
+            direction=cfg.sync.direction,
+            delete_policy=cfg.sync.delete_policy,
+            include_roots=cfg.targets.include_roots,
+            scheduler=work,
+        )
     return AppContext(
         config=cfg,
         local_dir=local_dir,
@@ -783,6 +800,7 @@ def commit_global_state(
     candidate: bytes,
     counts: Mapping[str, int] | None = None,
     origin: str | None = None,
+    superseding: str | None = None,
 ) -> int:
     """Replace `.codex-global-state.json` with `candidate`, or leave it alone.
 
@@ -793,7 +811,10 @@ def commit_global_state(
     before the replace, and a verified rollback if anything after it fails.
 
     A caller decides *what* to write and proves it valid; it does not get to
-    decide how carefully the write happens.
+    decide how carefully the write happens. ``superseding`` is for `recover
+    rollback` only: the open journal it undoes (``JournalStore.begin``).
+    The file is this machine's alone, so another machine's open journal does
+    not block it (``local_state_only``); this machine's own still does.
     """
     _ensure_dir(cfg.paths.backup_dir, "paths.backup_dir")
     _ensure_dir(cfg.paths.temp_dir, "paths.temp_dir")
@@ -809,7 +830,8 @@ def commit_global_state(
         )
         journal = journals.begin(
             family, plan_id, action_count, backup_snapshot=manager.snapshot_name,
-            counts=counts, origin=origin, machine_id=machine,
+            counts=counts, origin=origin, machine_id=machine, superseding=superseding,
+            local_state_only=True,
         )
         original_sha256 = hashlib.sha256(original).hexdigest()
         # Everything up to COMMITTING replaces nothing, so any failure here --
@@ -1234,6 +1256,7 @@ def sync_projects(
             taken_before=[item for item in board.others(machine) if item.machine not in pending_machines],
             skipped=places.skipped_here(machine),
             chats=_chat_folders(local_dir, cfg), native=_native_here,
+            own=_own_list(board, machine), removed_projects=cfg.sync.removed_projects,
         )
     except ProjectSyncUnsupported as exc:
         raise ProjectsNotCarried(f"Projects cannot be carried: {exc}") from exc
@@ -1262,6 +1285,14 @@ def sync_projects(
             "project %s of %s added with that machine's root as it is (%s); `projects place` gives it a folder here",
             item.name or item.peer_project_id, item.peer_machine, ", ".join(item.roots),
         )
+    for item in plan.removed:
+        LOG.info("project %s removed here: %s removed it on purpose", item.name or item.peer_project_id,
+                 item.peer_machine)
+    for removal in plan.waiting:
+        LOG.warning(
+            "project %s was removed in Codex here and is not taken back from the other machines; "
+            "`projects removed` asks whether on purpose", removal.name or removal.project_id,
+        )
     if dry_run:
         LOG.info("project sync dry-run: plan %s would make %d change(s)", plan.plan_id, plan.action_count)
         return result
@@ -1277,7 +1308,10 @@ def sync_projects(
             family="project-sync", plan_id=plan.plan_id, action_count=plan.action_count,
             state_root=local_dir, source=source, original=original, candidate=candidate,
             # What the history shows for this run: numbers only, no names.
-            counts={"projects_added": len(plan.added), "changes": plan.action_count},
+            counts={
+                "projects_added": len(plan.added), "changes": plan.action_count,
+                **({"projects_removed": len(plan.removed)} if plan.removed else {}),
+            },
             origin=origin,
         )
         LOG.info(
@@ -1460,8 +1494,16 @@ def place_project(
     cfg = load_config(config_path)
     machine = _handoff_machine(cfg)
     root = places_root(cfg)
+    board = read_places(root)
+    if f"{machine}.json" in board.unreadable:
+        # Read as empty, the answer would replace every earlier one (CS-527).
+        raise FailSafeError(
+            f"This machine's folder places cannot be read ({board.unreadable[f'{machine}.json']}); "
+            "try again once the cloud client has delivered the file",
+            code="OWN_PLACES_UNREADABLE",
+        )
     # This machine's file says which system wrote it; it is this one, now.
-    current = replace(read_places(root).own(machine), system=this_system())
+    current = replace(board.own(machine), system=this_system())
     report = project_places(config_path)
     matches = [
         item for item in report.projects
@@ -1572,7 +1614,7 @@ def refresh_thread_catalogue(
     applying = confirm_plan is not None or planned_here
     if applying:
         _require_mutation_compatible_config(cfg)
-        gate.require(OperationKind.SESSION_APPLY)
+        gate.require(OperationKind.CODEX_CATALOGUE)
         volatile = False
     else:
         volatile = gate.check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
@@ -1660,11 +1702,10 @@ def _own_catalogue_backup(cfg: AppConfig, config_path: Path, database: str | Non
         if not info.backup_snapshot or not info.backup_snapshot_present:
             return None
         copy = cfg.paths.backup_dir / info.backup_snapshot / Path(database)
-        row = (
-            read_snapshot_backfill_row(copy, cfg.paths.temp_dir / "backfill-read")
-            if copy.is_file()
-            else None
-        )
+        # The scratch copy goes to the system's temporary folder and is removed
+        # at once: `codex check` reads only and leaves nothing in codexSync's
+        # folders either.
+        row = read_snapshot_backfill_row(copy) if copy.is_file() else None
         return (info.backup_snapshot, row) if row is not None else None
     return None
 
@@ -1760,7 +1801,7 @@ def repair_codex(
     if confirm_plan is None:
         return result
     _require_mutation_compatible_config(cfg)
-    gate.require(OperationKind.SESSION_APPLY)
+    gate.require(OperationKind.CODEX_CATALOGUE)
     if plan.plan_id != confirm_plan:
         raise ConfigError(
             "--confirm-plan must match the plan id from `codex repair`; Codex's catalogue changed since "
@@ -1830,7 +1871,7 @@ def sync_chat_names(
     applying = confirm_plan is not None or planned_here
     if applying:
         _require_mutation_compatible_config(cfg)
-        gate.require(OperationKind.SESSION_APPLY)
+        gate.require(OperationKind.CODEX_CATALOGUE)
         volatile = False
     else:
         volatile = gate.check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
@@ -1909,7 +1950,7 @@ def follow_chat_archive(
     applying = confirm_plan is not None or planned_here
     if applying:
         _require_mutation_compatible_config(cfg)
-        gate.require(OperationKind.SESSION_APPLY)
+        gate.require(OperationKind.CODEX_CATALOGUE)
         volatile = False
     else:
         volatile = gate.check(OperationKind.SESSION_SCAN).process_state is not ProcessState.STOPPED
@@ -2080,6 +2121,9 @@ def check_project_files(
                     local_id = by_root.get(root_key(map_root(peer.machine, published["root"])))
                 except RootMappingAmbiguous:
                     local_id = None
+                except RootNotPlaced:
+                    # Carried with that machine's root as it is (D-034, CS-498).
+                    local_id = by_root.get(root_key(published["root"]))
             if local_id is None:
                 continue
             local_root, name = projects[local_id]
@@ -2168,8 +2212,9 @@ def _write_codex_catalogue(
     write, which is a single SQLite transaction: it commits whole or rolls
     back, so a failure inside it closes the journal as replacing nothing. A
     write that committed but does not read back as intended leaves the
-    journal in RECOVERY_REQUIRED; the database is in the snapshot.
-    Returns the snapshot name.
+    journal in RECOVERY_REQUIRED; the database is in the snapshot. Like
+    `commit_global_state`, it is not blocked by another machine's open
+    journal (``local_state_only``). Returns the snapshot name.
     """
     _ensure_dir(cfg.paths.backup_dir, "paths.backup_dir")
     _ensure_dir(cfg.paths.temp_dir, "paths.temp_dir")
@@ -2186,7 +2231,7 @@ def _write_codex_catalogue(
         )
         journal = journals.begin(
             family, plan_id, action_count, backup_snapshot=manager.snapshot_name,
-            counts=counts, origin=origin, machine_id=machine,
+            counts=counts, origin=origin, machine_id=machine, local_state_only=True,
         )
         try:
             for suffix in ("", "-wal", "-shm"):
@@ -2199,7 +2244,7 @@ def _write_codex_catalogue(
                     raise FailSafeError("Verified backup of Codex's catalogue could not be created")
             manager.finalize()
             journal = journals.transition(journal, JournalState.BACKED_UP)
-            gate.require(OperationKind.SESSION_APPLY, final=True)
+            gate.require(OperationKind.CODEX_CATALOGUE, final=True)
             if not still_planned():
                 raise FailSafeError("Codex's catalogue changed after it was read; nothing was written. Run again.", code="STATE_CHANGED_RETRY")
             journal = journals.transition(journal, JournalState.COMMITTING)
@@ -2210,12 +2255,19 @@ def _write_codex_catalogue(
             # Again right before the transaction: the journal write above may
             # have waited seconds on a cloud client, and Codex may have started
             # in them -- the same final check `commit_global_state` makes.
-            gate.require(OperationKind.SESSION_APPLY, final=True)
+            gate.require(OperationKind.CODEX_CATALOGUE, final=True)
             write()
         except Exception as exc:
             _close_journal_after_failure(journals, journal, exc)
             raise
-        if not verify():
+        try:
+            matched = verify()
+        except Exception as exc:
+            # The transaction committed; a read-back that fails proves nothing
+            # either way, so the journal says recovery is needed (CS-523).
+            journals.transition(journal, JournalState.RECOVERY_REQUIRED, failure=exc)
+            raise
+        if not matched:
             failure = FailSafeError(f"{family}: the catalogue did not read back as written")
             journals.transition(journal, JournalState.RECOVERY_REQUIRED, failure=failure)
             raise failure
@@ -2233,15 +2285,145 @@ def _publish_projects(root: Path, board, machine: str, source: Path, plan: Proje
     state = json.loads(source.read_bytes().decode("utf-8-sig"))
     own = board.own(machine)
     accepted = {**(own.accepted if own is not None else {}), **plan.taken}
-    publication = publication_from_state(state, machine, accepted=accepted)
+    publication = publication_from_state(
+        state, machine, accepted=accepted, removed=plan.removals, followed=plan.followed,
+        section_waiting=plan.section_waiting,
+    )
     if (
         own is not None and own.publication_id == publication.publication_id
         and own.accepted == publication.accepted and own.projectless == publication.projectless
+        and _removal_state(own) == _removal_state(publication)
     ):
         return False
     write_publication(root, publication)
     LOG.info("published this machine's project list (%d project(s)) to %s", len(publication.projects), root)
     return True
+
+
+def _removal_state(publication) -> tuple:
+    return (
+        tuple((item.removal_id, item.confirmed) for item in publication.removed),
+        tuple(publication.followed),
+        tuple(publication.section_waiting),
+    )
+
+
+def _own_list(board, machine: str):
+    """This machine's last project list; refuses when it exists but cannot be read.
+
+    It is what tells a project removed in Codex here from one never carried
+    (D-039). Read as absent, every removal here would be taken back from the
+    other machines without a question.
+    """
+    own = board.own(machine)
+    if own is None and f"{machine}.json" in board.unreadable:
+        raise FailSafeError(
+            f"This machine's own project list cannot be read ({board.unreadable[f'{machine}.json']}); "
+            "try again once the cloud client has delivered it",
+            code="OWN_PROJECT_LIST_UNREADABLE",
+        )
+    return own
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRemoval:
+    """A project removed in Codex on some machine, as `projects removed` shows it (D-039)."""
+
+    machine: str
+    project_id: str
+    name: str
+    roots: tuple[str, ...]
+    removed_at_utc: str
+    #: Removed on purpose: the other machines remove it too.
+    confirmed: bool
+    #: Removed on this machine (the person here answers for it).
+    here: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRemovals:
+    machine: str
+    #: What this machine does with a project removed here (`[sync] removed_projects`).
+    policy: str
+    items: tuple[ProjectRemoval, ...]
+
+    @property
+    def waiting(self) -> tuple[ProjectRemoval, ...]:
+        """Removed here, not answered yet."""
+        return tuple(item for item in self.items if item.here and not item.confirmed)
+
+
+def project_removals(config_path: Path) -> ProjectRemovals:
+    """Projects removed in Codex here and, on purpose, elsewhere. Reads only (D-039).
+
+    A removal here appears once a sync has seen it: the sync compares the
+    state with this machine's last published list.
+    """
+    cfg = load_config(config_path)
+    machine = _handoff_machine(cfg)
+    board = read_project_board(projects_root(cfg))
+    own = _own_list(board, machine)
+    items: list[ProjectRemoval] = [
+        ProjectRemoval(machine, item.project_id, item.name, item.roots, item.removed_at_utc, item.confirmed, True)
+        for item in (own.removed if own is not None else ())
+    ]
+    for peer in board.others(machine):
+        items += [
+            ProjectRemoval(peer.machine, item.project_id, item.name, item.roots, item.removed_at_utc, True, False)
+            for item in peer.removed if item.confirmed
+        ]
+    items.sort(key=lambda item: (not item.here, item.confirmed, item.name.casefold(), item.machine))
+    return ProjectRemovals(machine, cfg.sync.removed_projects, tuple(items))
+
+
+def decide_project_removal(config_path: Path, project: str, *, everywhere: bool) -> ProjectRemoval:
+    """Answer for a project removed here: on purpose (``everywhere``) or by mistake (D-039).
+
+    The answer goes into this machine's own project list, not into Codex: on
+    purpose, every other machine removes the project on its next sync; by
+    mistake, this machine's next sync takes it back from them. Either way the
+    question is not asked again.
+    """
+    cfg = load_config(config_path)
+    machine = _handoff_machine(cfg)
+    root = projects_root(cfg)
+    board = read_project_board(root)
+    own = _own_list(board, machine)
+    removed = own.removed if own is not None else ()
+    matches = [
+        item for item in removed
+        if item.project_id == project or (item.name and item.name.casefold() == project.casefold())
+    ]
+    if not matches:
+        raise ConfigError(
+            f"No project removed here matches {project!r}; `projects removed` lists them",
+            code="NO_SUCH_REMOVAL", params={"project": project},
+        )
+    if len(matches) > 1:
+        names = ", ".join(f"{item.name} ({item.project_id})" for item in matches)
+        raise ConfigError(f"{project!r} matches more than one removed project: {names}; name it by its id")
+    chosen = matches[0]
+    if everywhere:
+        kept = tuple(
+            ProjectRemovalRecord(item.removal_id, item.project_id, item.name, item.roots, item.removed_at_utc,
+                                 True if item is chosen else item.confirmed)
+            for item in removed
+        )
+    else:
+        kept = tuple(item for item in removed if item is not chosen)
+    assert own is not None
+    write_publication(root, replace(own, removed=kept, published_at_utc=_utc_now_text()))
+    LOG.info(
+        "project %s: removed here %s", chosen.name or chosen.project_id,
+        "on purpose; the other machines remove it on their next sync" if everywhere
+        else "by mistake; the next sync takes it back from the other machines",
+    )
+    return ProjectRemoval(machine, chosen.project_id, chosen.name, chosen.roots, chosen.removed_at_utc,
+                          everywhere, True)
+
+
+def _utc_now_text() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _one_project(directory: ChatDirectory, reference: str):
@@ -2327,12 +2509,25 @@ def scan_session_transfer(
         mirror_codec=cfg.semantic.mirror_compression,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
         volatile=volatile,
-        scope=scope.session_hashes if scope is not None and not scope.is_empty else None,
+        scope=_hashed_scope(scope),
         path_rules=path_rules(cfg),
         folder_exists=local_folder_exists,
         conflict_rule=conflict_rule_for(cfg.conflict.policy, cfg.sync.direction),
         direction=cfg.sync.direction,
     )
+
+
+def _hashed_scope(scope: SessionScope | None) -> tuple[str, ...] | None:
+    """What a working set hands the plan: ``None`` only when nothing was chosen.
+
+    Emptiness is the choice's, never its expansion's. A set whose projects all
+    vanished (renamed, re-created by Codex under new ids, a typo) expands to
+    no session, and that is ``()`` -- nothing may be written into `.codex` --
+    not ``None``, which writes every chat (CS-495).
+    """
+    if scope is None or scope.is_empty:
+        return None
+    return scope.session_hashes
 
 
 def audit_session_index(config_path: Path) -> dict:
@@ -2516,12 +2711,9 @@ def _write_branch_resolutions(output_path: Path, resolutions: list[BranchResolut
             for entry in sorted(existing.values(), key=lambda value: value.conflict_id)
         ],
     }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    # Atomic: a truncated resolutions file is a ConfigError on every later
+    # full sync, and the recorded decisions are lost with it (CS-517).
+    write_json_atomically(output_path, payload)
 
 
 #: Blocked actions that stop an apply outright, because each one names a
@@ -2546,6 +2738,7 @@ def apply_session_transfer(
     dry_run: bool = False,
     origin: str | None = None,
     progress: Callable[[int, int], None] | None = None,
+    phase_progress: ProgressCallback | None = None,
 ) -> int:
     """Apply one exact session transfer plan with Codex closed.
 
@@ -2673,13 +2866,12 @@ def apply_session_transfer(
             # Staging writes siblings into .codex: re-check first (CS-460).
             before_stage_check=lambda: gate.require(OperationKind.SESSION_APPLY),
             progress=progress,
+            phase_progress=phase_progress,
         )
         try:
             engine.execute(copies, dry_run=False)
             _verify_transferred_branches(cfg, plan, local_dir, cloud_dir)
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
-            _record_semantic_manifest(cfg, plan, local_by_hash, remote_by_hash)
-            mgr.prune()
         except Exception as exc:
             failure = (
                 JournalState.RECOVERY_REQUIRED
@@ -2687,10 +2879,78 @@ def apply_session_transfer(
                 else JournalState.FAILED
             )
             try:
-                current[0] = journals.transition(current[0], failure, failure=exc)
+                item = engine.failure_item
+                if getattr(exc, "code", None) == "TRANSFER_READBACK_MISMATCH":
+                    item = {"phase": "verify_chats", "relative_path": exc.params.get("relative_path", ""),
+                            "session_hash": getattr(exc, "transfer_session_hash", None)}
+                relative = str(item.get("relative_path", "")).replace("\\", "/")
+                parts = relative.split("/")
+                safe_path = relative if relative and all(
+                    part not in {"", ".", ".."} and ":" not in part for part in parts
+                ) else None
+                params = {"staged": engine.staged_count, "applied": engine.applied_count, "deleted": engine.deleted_count,
+                          "copies": len(copies.to_local) + len(copies.to_cloud),
+                          "deletions": len(copies.deletions)}
+                if safe_path is not None:
+                    params["relative_path"] = safe_path
+                if item.get("phase") in {"stage_chats", "backup_chats", "apply_chats", "delete_chat_files", "verify_chats"}:
+                    params["phase"] = item["phase"]
+                if isinstance(item.get("index"), int):
+                    params["index"] = item["index"]
+                phase, index = item.get("phase"), item.get("index")
+                copy_items = [entry for side in ("local", "mirror") for entry in plan.items
+                              if transfer_direction(entry) == side]
+                delete_items = [entry for entry in plan.items if transfer_direction(entry) is not None and
+                                any(code in entry.codes for code in (MOVES_BRANCH, IN_PLACE_DECOMPRESSED,
+                                                                     MIRROR_CONTAINER_REPLACED))]
+                candidates = copy_items if phase in {"stage_chats", "apply_chats"} else (
+                    delete_items if phase == "delete_chat_files" else []
+                )
+                if isinstance(index, int) and 1 <= index <= len(candidates):
+                    params["session_hash"] = candidates[index - 1].session_hash
+                elif phase == "verify_chats" and any(entry.session_hash == item.get("session_hash") for entry in plan.items):
+                    params["session_hash"] = item["session_hash"]
+                code = getattr(exc, "code", None)
+                io_error = exc if isinstance(exc, OSError) else exc.__cause__
+                if code is None and isinstance(io_error, OSError):
+                    code = "FILE_IO_ERROR"
+                    if isinstance(io_error.errno, int):
+                        params["errno"] = io_error.errno
+                    if isinstance(getattr(io_error, "winerror", None), int):
+                        params["winerror"] = io_error.winerror
+                if code == "STATE_CHANGED_RETRY" and item.get("phase") in {"apply_chats", "delete_chat_files"}:
+                    code = "DESTINATION_CHANGED"
+                messages = {
+                    "CODEX_STATE_UNKNOWN": "Could not determine whether Codex is running.",
+                    "DESTINATION_APPEARED": "Destination appeared after backup.",
+                    "DESTINATION_CHANGED": "Destination changed after backup.",
+                    "STATE_CHANGED_RETRY": "A file changed while the operation was running.",
+                    "DESTINATION_VERIFY_FAILED": "Destination verification failed after replacement.",
+                    "TRANSFER_READBACK_MISMATCH": "The written chat did not match the plan on read-back.",
+                    "FILE_IO_ERROR": "The operating system could not complete a file operation.",
+                    "PLAN_CHANGED": "The source no longer matches the plan.",
+                }
+                code = code if code in messages else "SESSION_TRANSFER_FAILED"
+                current[0] = journals.transition(
+                    current[0], failure, failure=exc, failure_code=code, failure_params=params,
+                    failure_message=messages.get(code, "Session transfer stopped; recovery may be required."),
+                )
+                if failure is JournalState.RECOVERY_REQUIRED:
+                    exc.recovery_operation_id = current[0].operation_id
+                    exc.recovery_message = messages.get(code, "Session transfer stopped; recovery may be required.")
             except Exception:
                 LOG.exception("Could not persist terminal session transfer journal state")
             raise
+        # After COMMITTED nothing fails the run (CS-513); an error here used to
+        # attempt COMMITTED -> FAILED and report a finished transfer as failed.
+        try:
+            _record_semantic_manifest(cfg, plan, local_by_hash, remote_by_hash)
+        except Exception:
+            LOG.exception("semantic manifest not recorded; the next transfer records it")
+        try:
+            mgr.prune()
+        except Exception:
+            LOG.exception("old backups not pruned; the next run prunes them")
     return _branches_written(copies)
 
 
@@ -2774,7 +3034,8 @@ def _transfer_copy_actions(
     the backup before replacing or removing anything, and removes it only after
     every copy is in place. A chat Codex compressed and the other machine
     continued (`IN_PLACE_DECOMPRESSED`, CS-430) goes the same way: the plain
-    file is written and the `.zst` removed.
+    file is written and the `.zst` removed. So does a mirror copy kept in a
+    container codexSync never writes (`MIRROR_CONTAINER_REPLACED`, CS-519).
     """
     to_local: list[CopyAction] = []
     to_cloud: list[CopyAction] = []
@@ -2806,9 +3067,15 @@ def _transfer_copy_actions(
                 dst=destination,
                 relative_path=item.target_relative_path,
                 codec=codec,
+                # What the confirmed plan saw on the source side; staging
+                # refuses anything else (CS-515).
+                expected_sha256=(item.remote_sha256 if towards_local else item.local_sha256) or None,
             )
         )
-        if MOVES_BRANCH in item.codes or IN_PLACE_DECOMPRESSED in item.codes:
+        if (
+            MOVES_BRANCH in item.codes or IN_PLACE_DECOMPRESSED in item.codes
+            or MIRROR_CONTAINER_REPLACED in item.codes
+        ):
             old = (local_by_hash if towards_local else remote_by_hash).get(item.session_hash)
             if old is None:
                 raise FailSafeError("A planned move no longer finds the file it moves", code="PLAN_CHANGED")
@@ -2837,9 +3104,16 @@ def _bundle_resolved_conflicts(
     being overwritten, compressed: the other one is what the destination is
     about to hold, and copying all of them was a gigabyte into the cloud.
     """
+    # Only a resolution this apply carries out. One held back -- by the layout
+    # gate, a projected chat, the working set or the sync direction --
+    # overwrites nothing, so there is nothing to keep yet; bundling it anyway
+    # put a new full copy into the cloud on every sync while the item stayed
+    # blocked, and a bundle that could not be written failed the whole apply
+    # (CS-496).
     resolved = [
         item for item in plan.items
-        if "RESOLVED_BY_USER" in item.codes or RESOLVED_BY_RULE in item.codes
+        if item.action.writes
+        and ("RESOLVED_BY_USER" in item.codes or RESOLVED_BY_RULE in item.codes)
     ]
     if not resolved:
         return []
@@ -2851,10 +3125,6 @@ def _bundle_resolved_conflicts(
         if local is None or remote is None:
             raise FailSafeError("A resolved conflict is missing one of its branches")
         if FORMAT_MIGRATION in item.codes:
-            if not item.action.writes:
-                # Held back by the layout gate or the working set: nothing is
-                # overwritten, so there is nothing to keep yet.
-                continue
             losing = (
                 cloud_dir / Path(*remote.relative_path.split("/"))
                 if item.action is TransferAction.FAST_FORWARD_REMOTE
@@ -2934,6 +3204,12 @@ def _record_semantic_manifest(
     return recorded
 
 
+def _transfer_readback_error(message: str, *, code: str, params: dict, session_hash: str) -> FailSafeError:
+    error = FailSafeError(message, code=code, params=params)
+    error.transfer_session_hash = session_hash
+    return error
+
+
 def _verify_transferred_branches(
     cfg: AppConfig, plan: TransferPlan, local_dir: Path, cloud_dir: Path
 ) -> None:
@@ -2956,13 +3232,17 @@ def _verify_transferred_branches(
         except JSONL_READ_ERRORS as exc:
             # A branch that cannot be read back is a failed commit, not an
             # internal error: say so with the exception the recovery path knows.
-            raise FailSafeError(
-                f"Transferred branch could not be read back after writing: {exc}"
+            raise _transfer_readback_error(
+                f"Transferred branch could not be read back after writing: {exc}",
+                code="TRANSFER_READBACK_MISMATCH", params={"relative_path": item.target_relative_path or ""},
+                session_hash=item.session_hash,
             ) from exc
         planned_records = item.remote_records if towards_local else item.local_records
         if digest.hexdigest() != expected or records != planned_records:
-            raise FailSafeError(
-                "Transferred branch does not match the plan after writing; recovery is required"
+            raise _transfer_readback_error(
+                "Transferred branch does not match the plan after writing; recovery is required",
+                code="TRANSFER_READBACK_MISMATCH", params={"relative_path": item.target_relative_path or ""},
+                session_hash=item.session_hash,
             )
 
 
@@ -3013,6 +3293,7 @@ def sync_plan_counts(plan: SyncPlan) -> dict[str, int]:
 def run_sync(
     ctx: AppContext, dry_run: bool, *, origin: str | None = None,
     progress: Callable[[int, int], None] | None = None,
+    scheduler: WorkScheduler | None = None,
 ) -> None:
     """Apply (or dry-run) the plan in `ctx`.
 
@@ -3072,41 +3353,23 @@ def run_sync(
             ctx.safety_gate.require(OperationKind.SYNC, final=True)
             current[0] = journals.transition(current[0], JournalState.COMMITTING)
 
-        engine = SyncEngine(
-            backup_manager=mgr,
-            temp_dir=ctx.config.paths.temp_dir,
-            backup_before_overwrite=True,
-            fail_on_unknown=True,
-            pre_commit_check=pre_commit,
-            before_replace_check=lambda: ctx.safety_gate.require(OperationKind.SYNC, final=True),
-            after_backup=after_backup,
-            before_stage_check=lambda: ctx.safety_gate.require(OperationKind.SYNC),
-            progress=progress,
-        )
         try:
-            engine.execute(ctx.plan, dry_run=False)
-            local_idx, cloud_idx = _build_indexes(ctx.config, ctx.local_dir, ctx.cloud_dir)
-            # The paths this direction did not act on keep their old entry:
-            # recording them now would say the two sides agreed (`D-012`).
-            previous = load_manifest(
-                ctx.config.state.manifest_file, ctx.config.state.data_version,
-                machine_id=sync_machine_id(ctx.config),
-            )
-            manifest = build_manifest(
-                local_idx, cloud_idx, ctx.config.state.data_version,
-                previous=previous, skipped=ctx.plan.skipped,
-            )
+            with nullcontext(scheduler) if scheduler is not None else WorkScheduler() as work:
+                engine = SyncEngine(
+                    backup_manager=mgr,
+                    temp_dir=ctx.config.paths.temp_dir,
+                    backup_before_overwrite=True,
+                    fail_on_unknown=True,
+                    pre_commit_check=pre_commit,
+                    before_replace_check=lambda: ctx.safety_gate.require(OperationKind.SYNC, final=True),
+                    after_backup=after_backup,
+                    before_stage_check=lambda: ctx.safety_gate.require(OperationKind.SYNC),
+                    progress=progress,
+                    scheduler=work,
+                    stage_operation_id=journal.operation_id,
+                )
+                engine.execute(ctx.plan, dry_run=False)
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
-            # Saved only after COMMITTED (CS-440): a rollback of an unfinished
-            # run restores the files, not the manifest, and a baseline naming
-            # the rolled-back content would push old files over new ones. A
-            # stale baseline is safe: equal sides are skipped and a one-sided
-            # change against it reads as a conflict.
-            try:
-                save_manifest(manifest, ctx.config.state.manifest_file)
-            except Exception:
-                LOG.exception("sync manifest not saved; the next run records it")
-            mgr.prune()
         except Exception as exc:
             failure = (
                 JournalState.RECOVERY_REQUIRED
@@ -3118,6 +3381,41 @@ def run_sync(
             except Exception:
                 LOG.exception("Could not persist terminal mutation journal state")
             raise
+        # Every file is in place and the journal says so. Nothing after this
+        # line may turn the run into a failure (CS-513): a rescan that hit a
+        # file a cloud client was replacing made a finished sync
+        # RECOVERY_REQUIRED, and a prune error tried COMMITTED -> FAILED.
+        _save_sync_manifest(ctx)
+        try:
+            mgr.prune()
+        except Exception:
+            LOG.exception("old backups not pruned; the next run prunes them")
+
+
+def _save_sync_manifest(ctx: AppContext) -> None:
+    """Record the baseline after a committed sync; a failure is logged, never raised.
+
+    Saved only after COMMITTED (CS-440): a rollback of an unfinished run
+    restores the files, not the manifest, and a baseline naming the
+    rolled-back content would push old files over new ones. A stale baseline
+    is safe: equal sides are skipped and a one-sided change against it reads
+    as a conflict.
+    """
+    try:
+        local_idx, cloud_idx = _build_indexes(ctx.config, ctx.local_dir, ctx.cloud_dir)
+        # The paths this direction did not act on keep their old entry:
+        # recording them now would say the two sides agreed (`D-012`).
+        previous = load_manifest(
+            ctx.config.state.manifest_file, ctx.config.state.data_version,
+            machine_id=sync_machine_id(ctx.config),
+        )
+        manifest = build_manifest(
+            local_idx, cloud_idx, ctx.config.state.data_version,
+            previous=previous, skipped=ctx.plan.skipped,
+        )
+        save_manifest(manifest, ctx.config.state.manifest_file)
+    except Exception:
+        LOG.exception("sync manifest not saved; the next run records it")
 
 
 # --- handing work between machines (CS-328, `D-018`) -------------------------
@@ -3156,6 +3454,19 @@ class HandoffNotDelivered(FailSafeError):
         )
 
 
+def _held_from_codex(item) -> bool:
+    """A chat the cloud copy would have written into `.codex` that a working
+    set or a one-way `sync.direction` held back -- not loaded, by choice."""
+    if item.action not in {TransferAction.OUT_OF_SCOPE, TransferAction.HELD_BY_DIRECTION}:
+        return False
+    if f"WOULD_BE_{TransferAction.FAST_FORWARD_LOCAL.value}" in item.codes:
+        return True
+    return (
+        f"WOULD_BE_{TransferAction.ARCHIVE_TRANSITION.value}" in item.codes
+        and ARCHIVE_FOLLOWS_LOCAL not in item.codes
+    )
+
+
 #: The steps of a full sync that may fail without failing it, in run order.
 HANDOFF_STEPS = ("projects", "chat_archive", "chat_names", "catalogue")
 
@@ -3185,6 +3496,12 @@ class HandoffResult:
     #: `[semantic] new_chats = "same_path"` (D-020). Codex shows them only once
     #: it takes the files up, which `doctor` reports as `session_visibility`.
     new_chats_written: int = 0
+    #: Chats newer in the cloud copy that the working set or a one-way
+    #: `sync.direction` kept out of `.codex` (CS-503). Not loaded, by choice.
+    chats_held_back: int = 0
+    #: Settings files newer in the cloud copy that `sync.direction = to_cloud`
+    #: did not load (CS-503).
+    files_held_back: int = 0
     #: Chats changed on both machines that the conflict rule decided (D-027);
     #: the copy not kept of each is in the conflict bundle.
     chats_decided_by_rule: int = 0
@@ -3194,6 +3511,10 @@ class HandoffResult:
     project_changes: int = 0
     #: Added projects without a folder on this machine -- reported, not a fault (D-034).
     projects_missing_folders: int = 0
+    #: Projects removed in Codex here waiting for the person's answer (D-039).
+    projects_waiting: int = 0
+    #: Projects removed here because another machine removed them on purpose (D-039).
+    projects_removed: int = 0
     #: Chat files Codex's catalogue does not list that Codex takes up on its
     #: next start, because a rebuild of its own is pending (D-024).
     chats_codex_will_list: int = 0
@@ -3246,7 +3567,10 @@ class HandoffStatus:
 def _handoff_root(cfg: AppConfig) -> Path:
     root = cfg.handoff.root_dir
     if root is None:
-        raise ConfigError("handoff.root_dir is empty: choose a folder inside the synced workspace")
+        raise ConfigError(
+            "the handoff folder is kept beside state.manifest_file, which is empty: set "
+            "state.manifest_file to a file inside the synced workspace"
+        )
     return root
 
 
@@ -3287,8 +3611,9 @@ def handoff_status(config_path: Path, *, check_delivery: bool = False) -> Handof
     pending = board.pending(machine)
     deliveries: tuple[Delivery, ...] = ()
     if check_delivery and pending:
-        current = Fingerprinter().files(cfg)
-        deliveries = tuple(delivery(record, current) for record in awaiting_delivery(pending))
+        checked = awaiting_delivery(pending)
+        current = Fingerprinter().files(cfg, wanted=handoff_wanted_keys(checked))
+        deliveries = tuple(delivery(record, current) for record in checked)
     return HandoffStatus(
         machine=machine,
         root=root,
@@ -3319,8 +3644,9 @@ def _wait_for_delivery(
     """
     waiting = awaiting_delivery(pending)
     started = monotonic()
+    wanted = handoff_wanted_keys(waiting)
     while True:
-        current = fingerprints.files(cfg)
+        current = fingerprints.files(cfg, wanted=wanted)
         late = [item for item in (delivery(record, current) for record in waiting) if not item.delivered]
         waited = monotonic() - started
         if not late:
@@ -3454,6 +3780,12 @@ def run_handoff(
     board = read_board(root)
     for name, reason in sorted(board.unreadable.items()):
         LOG.warning("handoff file %s is not believed: %s", name, reason)
+    twin = board.case_twin(machine)
+    if twin is not None:
+        raise ConfigError(
+            handoff_case_twin_message(machine, twin),
+            code="MACHINE_ID_CASE_TWIN", params={"machine": machine, "other": twin},
+        )
     pending = board.pending(machine)
     fingerprints = Fingerprinter()
     if wait_seconds is None:
@@ -3505,6 +3837,16 @@ def run_handoff(
 
     report_progress(progress, "sync_settings", 0, 0)
     ctx = build_context(config_path, enforce_safety=True, conflict_policy=conflict_policy, direction=direction)
+    # Remember the handoff is owed before the first write to the cloud copy,
+    # and forget it only once the record says so: a run that fails after
+    # writing -- in the chats, a rescan, the record itself -- would otherwise
+    # leave work in the cloud that no handoff announces (CS-504).
+    owed = _handoff_owed_marker(cfg, machine)
+    will_write_cloud = bool(ctx.plan.to_cloud) or any(
+        transfer_direction(item) == "mirror" for item in plan.items
+    )
+    if will_write_cloud:
+        _remember_handoff_owed(owed)
     # "File 3 of 10" while each half writes (CS-339).
     run_sync(
         ctx, dry_run=False, origin=origin,
@@ -3514,6 +3856,7 @@ def run_handoff(
     session_actions = apply_session_transfer(
         config_path, plan_path=plan_path, confirm_plan=plan.plan_id, resolutions_path=resolutions_path,
         origin=origin, progress=lambda done, total: report_progress(progress, "sync_chats", done, total),
+        phase_progress=progress,
     )
     # Projects, names and the catalogue come after both halves and are each
     # applied by the plan they build. Each is re-done by the next sync, so one
@@ -3569,7 +3912,6 @@ def run_handoff(
     # A run that wrote nothing to the cloud hands nothing off: a new id would
     # make every other machine wait for a "delivery" of what it already has --
     # unless an earlier run wrote and could not announce it (CS-464).
-    owed = _handoff_owed_marker(cfg, machine)
     handed_off = to_cloud > 0 or owed.is_file()
     own_files: dict = {}
     if handed_off:
@@ -3582,15 +3924,29 @@ def run_handoff(
             LOG.error("nothing handed off: %s; the next sync hands it off", exc)
             handed_off = False
             _remember_handoff_owed(owed)
-    record = record_handoff(
-        root, machine, files=own_files, taken=pending, new_handoff=handed_off,
-    )
+    # A run that only sends (`sync.direction = to_cloud`) loaded nothing from
+    # anyone: marking their handoffs taken would tell the watcher "you can
+    # start Codex" and stop "not loaded here" for work that never came (CS-503).
+    one_way_out = (direction or cfg.sync.direction) == "to_cloud"
+    taken = () if one_way_out else tuple(pending)
+    try:
+        record = record_handoff(
+            root, machine, files=own_files, taken=taken, new_handoff=handed_off,
+        )
+    except HandoffError as exc:
+        # Settings and chats are written; the owed mark stays, so the next
+        # run announces them once this machine's file reads again (CS-502).
+        _remember_handoff_owed(owed)
+        raise FailSafeError(
+            f"The sync finished, but the handoff was not recorded: {exc}",
+            code="HANDOFF_FILE_UNREADABLE", params={"path": str(record_path(root, machine))},
+        ) from exc
     if handed_off:
         owed.unlink(missing_ok=True)
     LOG.info(
         "handoff finished: %d file(s) and %d chat(s) written; took %s; %s",
         ctx.plan.action_count, session_actions,
-        ", ".join(item.machine for item in pending) or "nothing",
+        ", ".join(item.machine for item in taken) or "nothing",
         f"handed off {record.handoff_id}" if handed_off else "nothing new to hand off",
     )
     left_behind = sum(1 for item in plan.blocked_items if item.action in _CHATS_LEFT_IN_THE_MIRROR)
@@ -3606,6 +3962,8 @@ def run_handoff(
         projects_missing_folders=(
             len(projects.plan.missing_folders) + len(projects.plan.unplaced) if projects else 0
         ),
+        projects_waiting=len(projects.plan.waiting) if projects else 0,
+        projects_removed=len(projects.plan.removed) if projects else 0,
         # Codex has a rebuild of its own pending: it walks the files on its
         # next start. Nothing of this run asked for it (D-032).
         chats_codex_will_list=(
@@ -3636,7 +3994,9 @@ def run_handoff(
         chats_decided_by_rule=sum(
             1 for item in plan.items if item.action.writes and RESOLVED_BY_RULE in item.codes
         ),
-        taken=tuple(item.machine for item in pending),
+        chats_held_back=sum(1 for item in plan.items if _held_from_codex(item)),
+        files_held_back=len(ctx.plan.skipped) if one_way_out else 0,
+        taken=tuple(item.machine for item in taken),
         sync_actions=ctx.plan.action_count,
         session_actions=session_actions,
         handed_off=handed_off,
@@ -3773,9 +4133,10 @@ def preview_full_sync(
     except ProjectsNotCarried as exc:
         LOG.warning("projects would not be carried: %s", exc)
         projects = None
-    current = Fingerprinter().files(cfg) if pending else {}
+    checked = awaiting_delivery(pending)
+    current = Fingerprinter().files(cfg, wanted=handoff_wanted_keys(checked)) if pending else {}
     waiting = tuple(
-        item.machine for item in (delivery(record, current) for record in awaiting_delivery(pending))
+        item.machine for item in (delivery(record, current) for record in checked)
         if not item.delivered
     )
     return FullSyncPreview(machine, source, files, chats, projects, waiting)
@@ -3835,7 +4196,7 @@ def watch_handoff(
     handoff: Callable[..., HandoffResult] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     poll_seconds: float = HANDOFF_WATCH_POLL_SECONDS,
-    should_stop: Callable[[], bool] = lambda: False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
     """Run from sign-in: load while Codex is closed, hand off when it closes.
 
@@ -3848,17 +4209,39 @@ def watch_handoff(
       machine is still working or its handoff has not been taken here.
     - Codex closes: hand off.
 
-    Nothing here ends the loop: an error is logged and reported, and the
-    watcher goes on waiting for the next change.
+    No error ends the loop: it is logged and reported, and the watcher goes
+    on waiting for the next change. What ends it is a stop request
+    (`watcher_stop`: its task was removed or switched off) or, on POSIX, a
+    SIGTERM -- both acted on only between runs, so a write that has begun
+    always finishes (CS-506). A wait for the cloud is not a write: a stop ends
+    it at once.
     """
     cfg = load_config(config_path)
+    if should_stop is None:
+        stop_watch = StopWatch(cfg.paths.temp_dir)
+        deferred = stop_watch.defer_sigterm()
+        try:
+            return watch_handoff(
+                config_path, probe=probe, notifier=notifier, handoff=handoff, sleep=sleep,
+                poll_seconds=poll_seconds, should_stop=stop_watch,
+            )
+        finally:
+            if deferred:
+                stop_watch.restore_sigterm()
     root = _handoff_root(cfg)
     machine = _handoff_machine(cfg)
     notify = notifier if notifier is not None else Notifier(enabled=bool(cfg.handoff.notify))
     sample = probe if probe is not None else (lambda: _codex_state(config_path))
+
+    def stop_waiting(_late) -> None:
+        if should_stop():
+            raise WatcherStopping()
+
     # The watcher never asks Codex to quit: it acts when Codex closes, and at
     # start a Codex that is open is the person's, not a sync's (D-029).
-    act = handoff if handoff is not None else (lambda path: run_handoff(path, close_codex=False))
+    act = handoff if handoff is not None else (
+        lambda path: run_handoff(path, close_codex=False, on_wait=stop_waiting)
+    )
 
     def attempt(closing: bool, retry: bool = False) -> bool:
         """Run once; True when nothing is left to retry while Codex stays closed.
@@ -3868,6 +4251,9 @@ def watch_handoff(
         say = (lambda *a, **k: None) if retry else notify
         try:
             result = act(config_path)
+        except WatcherStopping:
+            LOG.info("handoff watcher: the wait for the cloud ended, the watcher is stopping")
+            return True
         except HandoffNotDelivered as exc:
             LOG.warning("%s", exc)
             late = exc.deliveries[0]
@@ -3891,6 +4277,10 @@ def watch_handoff(
             if result.taken and result.chats_not_loaded:
                 notify(
                     "notify.loaded_partial", machine=", ".join(result.taken), count=result.chats_not_loaded,
+                )
+            elif result.taken and result.chats_held_back:
+                notify(
+                    "notify.loaded_held", machine=", ".join(result.taken), count=result.chats_held_back,
                 )
             elif result.taken:
                 notify("notify.loaded", machine=", ".join(result.taken))
@@ -3962,6 +4352,7 @@ def watch_handoff(
             if wait_polls <= 0:
                 run(closing=pending, retry=True)
         last = state
+    LOG.warning("handoff watcher: stopped as asked")
 
 
 def validate_config_only(config_path: Path) -> tuple[str, ...]:
@@ -4013,6 +4404,12 @@ def run_automation_job(config_path: Path) -> AutomationRun:
         failed = ", ".join(item.name for item in report.failures)
         return AutomationRun(mode, "PASSED" if report.is_ok else "FAILED", failed)
     if mode == "sync_dry_run":
+        # The task runs `sync --dry-run`, which follows `[sync] scope`: at
+        # "full" it previews the whole sync, chats included (CS-544).
+        if cfg.sync.scope == "full":
+            preview = preview_full_sync(config_path)
+            run_sync(preview.files, dry_run=True)
+            return AutomationRun(mode, "DRY_RUN_FINISHED", actions=preview.files.plan.action_count)
         ctx = build_context(config_path, enforce_safety=True)
         run_sync(ctx, dry_run=True)
         return AutomationRun(mode, "DRY_RUN_FINISHED", actions=ctx.plan.action_count)
@@ -4106,7 +4503,7 @@ def _read_live_state(source: Path, config_path: Path) -> bytes:
     fail-safe stop, never a guess.
     """
     try:
-        return source.read_bytes()
+        return read_shared(source)
     except FileNotFoundError as exc:
         raise ConfigError(
             f"No Codex global state at {source}, the folder {config_path} names. "
@@ -4120,7 +4517,14 @@ def _read_state_for_preview(cfg: AppConfig, source: Path) -> bytes | None:
     """The live global state as a preview sees it: a stable read, or nothing."""
     if not source.is_file():
         return None
-    return StableReader(source, max_bytes=cfg.guardian.max_state_bytes).read_once().observation.payload
+    try:
+        return StableReader(source, max_bytes=cfg.guardian.max_state_bytes).read_once().observation.payload
+    except SourceMissingError:
+        return None
+    except SourceTooLargeError as exc:
+        raise ConfigError(f"{source} is larger than guardian.max_state_bytes ({cfg.guardian.max_state_bytes})") from exc
+    except SourceUnstableError as exc:
+        raise FailSafeError(f"{source} kept changing while it was read; close Codex or try again", code="STATE_CHANGED_RETRY") from exc
 
 
 def restore_global_state(
@@ -4162,7 +4566,9 @@ def restore_global_state(
             f"There is no {source.name} to replace, so no verified backup of it can be made. "
             "Start Codex once so it writes the file, close it, and restore again."
         )
-    current = source.read_bytes()
+    # A file a cloud client or antivirus holds is a fail-safe stop, not a
+    # traceback (CS-535, as CS-325 did for the other writers).
+    current = _read_live_state(source, config_path)
     plan, _ = build_guardian_restore_plan(
         root_dir=root, machine_id=machine, snapshot_id=snapshot_id, current_state=current
     )

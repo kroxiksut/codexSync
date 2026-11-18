@@ -349,3 +349,35 @@ class ConflictBundleTests(_Sides):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeldBackResolutionTests(unittest.TestCase):
+    """CS-496: a resolution the apply does not carry out leaves no bundle."""
+
+    def test_a_resolved_conflict_that_writes_nothing_is_not_bundled(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        import codexsync.app as app
+        from codexsync.semantic_transfer import RESOLVED_BY_RULE, TransferAction
+
+        held = [
+            SimpleNamespace(
+                action=action, codes=(RESOLVED_BY_RULE, code), session_hash=f"h{index}",
+                local_sha256="l", remote_sha256="r",
+            )
+            for index, (action, code) in enumerate((
+                (TransferAction.BLOCKED_UNPROVEN_LAYOUT, "IN_PLACE_PROJECTED_REWRITE"),
+                (TransferAction.BLOCKED_UNPROVEN_LAYOUT, "IN_PLACE_HISTORY_UNKNOWN"),
+                (TransferAction.OUT_OF_SCOPE, "WOULD_BE_FAST_FORWARD_LOCAL"),
+                (TransferAction.HELD_BY_DIRECTION, "WOULD_BE_FAST_FORWARD_REMOTE"),
+                (TransferAction.BLOCKED_INVALID_BRANCH, "PAGE_OVERLAP"),
+            ))
+        ]
+        plan = SimpleNamespace(items=held, plan_id="plan")
+        with patch.object(app, "SemanticStore") as store:
+            bundles = app._bundle_resolved_conflicts(
+                SimpleNamespace(), plan, Path("local"), Path("cloud"), {}, {},
+            )
+        self.assertEqual(bundles, [])
+        store.assert_not_called()

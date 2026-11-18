@@ -96,6 +96,22 @@ class IssueReportTests(unittest.TestCase):
         self.assertEqual(report["process"]["gate_state"], "UNKNOWN")
         self.assertIn("layouts", report["gates"])
 
+    def test_it_says_what_this_build_can_read(self) -> None:
+        # CS-553: a build without zstd blocks most chats with no other sign.
+        import sqlite3
+
+        from codexsync import jsonl_codec
+
+        report = build_issue_report(self.config)
+        self.assertEqual(report["readers"]["sqlite"], sqlite3.sqlite_version)
+        self.assertIs(report["readers"]["zstd"], jsonl_codec.ZSTD_READABLE)
+        with mock.patch.object(jsonl_codec, "_zstd", None):
+            self.assertFalse(jsonl_codec.zstd_works())
+        broken = mock.Mock()
+        broken.compress.side_effect = ImportError("no _zstd")
+        with mock.patch.object(jsonl_codec, "_zstd", broken):
+            self.assertFalse(jsonl_codec.zstd_works())
+
     def test_the_command_prints_it(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out), mock.patch("codexsync.cli.configure_logging"):

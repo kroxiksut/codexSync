@@ -46,6 +46,20 @@ except ImportError:  # pragma: no cover - depends on the interpreter
 ZSTD_READABLE = _zstd is not None
 
 
+def zstd_works() -> bool:
+    """Whether a zstd frame actually decompresses here, not only whether the module imports.
+
+    A frozen build can carry `compression.zstd` without the `_zstd` it needs;
+    `doctor --report` says this, and the release checks it (CS-553).
+    """
+    if _zstd is None:
+        return False
+    try:
+        return _zstd.decompress(_zstd.compress(b"codexsync")) == b"codexsync"
+    except Exception:  # noqa: BLE001 - any failure means "cannot read"
+        return False
+
+
 #: Suffix a branch keeps in every container. What precedes it is the logical
 #: name, which is the same on both sides regardless of how the file is stored.
 JSONL_SUFFIX = ".jsonl"
@@ -68,6 +82,14 @@ _COPY_CHUNK = 1024 * 1024
 JSONL_READ_ERRORS: tuple[type[BaseException], ...] = (OSError, EOFError, lzma.LZMAError, zlib.error) + (
     (_zstd.ZstdError,) if _zstd is not None else ()
 )
+
+#: The part of `JSONL_READ_ERRORS` that says a *container* could not be
+#: decoded -- truncated or damaged, typically a cloud client still writing it --
+#: as opposed to a missing file or a full disk. A writer that meets one fails
+#: safe and asks for a retry instead of reporting an internal error (CS-518).
+CONTAINER_DECODE_ERRORS: tuple[type[BaseException], ...] = tuple(
+    error for error in JSONL_READ_ERRORS if not issubclass(error, OSError)
+) + (gzip.BadGzipFile,)
 
 
 class JsonlCodec(str, Enum):

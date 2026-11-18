@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from .guardian_models import SourceObservation
+from .shared_read import open_shared
 
 
 class SourceMissingError(FileNotFoundError):
@@ -66,8 +67,9 @@ class StableReader:
         if before.size is not None and before.size > self.max_bytes:
             raise SourceTooLargeError("Guardian source exceeds configured size limit")
         try:
-            # No write mode and no advisory lock: Codex remains free to update.
-            with self.path.open("rb") as handle:
+            # No write mode and no advisory lock, and on Windows shared for
+            # deletion: Codex remains free to replace the file (CS-500).
+            with open_shared(self.path) as handle:
                 payload = handle.read(self.max_bytes + 1)
         except FileNotFoundError as exc:
             raise SourceMissingError(str(self.path)) from exc

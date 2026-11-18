@@ -21,6 +21,7 @@ from .codex_health import BACKFILL_PENDING, BACKFILL_RUNNING
 from .guardian_restore import carries_project_state
 from .guardian_schema import validate_global_state_references
 from .jsonl_codec import unsupported_container
+from .preflight_observations import GlobalStateObservation, GlobalStateStatus, observe_global_state
 from .session_catalog import UNSUPPORTED_CONTAINER, SessionCatalog
 from .sqlite_audit import CATALOG_SHAPE_UNKNOWN, PlacementStatus, read_backfill_state, read_thread_placements
 from .thread_catalogue import BACKFILL_COMPLETE
@@ -91,11 +92,16 @@ def read_codex_version(state_root: Path) -> str | None:
 
 def check_codex_compat(
     state_root: Path, catalog: SessionCatalog | None, *, max_state_bytes: int,
+    global_state: GlobalStateObservation | None = None,
+    sqlite_observation=None,
 ) -> CompatReport:
     """Which parts of ``state_root`` are in a format this version does not know.
 
     ``catalog`` is a scan of ``state_root`` the caller already made; without it
-    the chat files are reported as not checked.
+    the chat files are reported as not checked. A supplied ``global_state``
+    observation is authoritative, including absence or a failed reading; this
+    function never retries that source. Supplied SQLite facts likewise cover
+    placements and backfill for this compatibility report.
     """
     unknown: list[CompatPart] = []
     unchecked: list[str] = []
@@ -113,7 +119,7 @@ def check_codex_compat(
         if count:
             unknown.append(CompatPart(CHATS, UNSUPPORTED_CONTAINER, count, tuple(containers)))
 
-    placements = read_thread_placements(state_root)
+    placements = read_thread_placements(state_root, observation=sqlite_observation)
     if placements.status is PlacementStatus.INDETERMINATE:
         shape = _SHAPE_CODES.intersection(placements.codes)
         if shape:
@@ -121,7 +127,7 @@ def check_codex_compat(
         else:
             unchecked.append(CHAT_LIST)
 
-    backfill = read_backfill_state(state_root)
+    backfill = read_backfill_state(state_root, observation=sqlite_observation)
     if (
         backfill.status is PlacementStatus.AVAILABLE
         and backfill.backfill is not None
@@ -129,15 +135,13 @@ def check_codex_compat(
     ):
         unknown.append(CompatPart(REBUILD_STATUS, "CATALOGUE_STATUS_UNKNOWN"))
 
-    source = state_root / ".codex-global-state.json"
-    try:
-        if source.is_file() and source.stat().st_size <= max_state_bytes:
-            payload = source.read_bytes()
-            if validate_global_state_references(payload).schema_id is None and carries_project_state(payload):
-                unknown.append(CompatPart(GLOBAL_STATE, "UNKNOWN_SCHEMA"))
-        elif source.is_file():
-            unchecked.append(GLOBAL_STATE)
-    except OSError:
+    if global_state is None:
+        global_state = observe_global_state(state_root / ".codex-global-state.json", max_state_bytes)
+    if global_state.status is GlobalStateStatus.AVAILABLE:
+        payload = global_state.payload
+        if validate_global_state_references(payload).schema_id is None and carries_project_state(payload):
+            unknown.append(CompatPart(GLOBAL_STATE, "UNKNOWN_SCHEMA"))
+    elif global_state.status is not GlobalStateStatus.MISSING:
         unchecked.append(GLOBAL_STATE)
 
     return CompatReport(read_codex_version(state_root), tuple(unknown), tuple(unchecked))

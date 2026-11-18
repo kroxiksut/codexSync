@@ -135,7 +135,8 @@ codexsync -c config.toml handoff sync --conflict-policy prefer_local
 文件冲突仍然是冲突，由 `conflict.policy` 决定。对聊天而言，单向本身也就是决定：
 `to_cloud` 对两台电脑上都改过的聊天保留本机的副本，不向 `.codex` 写入任何内容；`to_local`
 保留云端的副本，不向云端副本写入任何内容。`validate`、`doctor` 和计划报告都会说明
-当前的方向。
+当前的方向。`to_cloud` 的完整同步不载入任何内容，因此也不接收其他机器的交接：它们的工作
+一直是“本机尚未载入”，直到某次运行把它载入；结果里会说明方向挡下了多少。
 
 ## 删除
 
@@ -197,6 +198,10 @@ codexsync -c config.toml handoff watch                    # 登录任务运行�
 它取代“登录后同步”：同时开启 `handoff.enabled` 和 `scheduler.sync_at_login` 属于配置错误。
 它会用系统通知（`notify`）报告所做的事，并且总是写入日志。带着打开的 Codex 关机的电脑会在
 下次登录时交接。
+
+关闭监视器（`enabled = false` 后*应用*，或 `automation remove`）绝不会打断它正在进行的同步。
+任务会被删除，正在运行的监视器会收到停止请求：空闲时几秒内结束，正在同步时则在同步完成后立即结束。
+在 Linux 和 macOS 上，注销也按同样方式处理，以系统结束程序前给出的时间为限。
 
 `--accept-undelivered` 会载入一直未完整到达的交接——只有在你知道原因时才使用，例如它所列出的
 某个文件之后在云端副本中被手动修改过。

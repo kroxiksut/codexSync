@@ -144,6 +144,53 @@ class ReadTests(_Roots):
         self.assertIn(IN_PLACE_DECOMPRESSED, item.codes)
         self.assertNotIn(MOVES_BRANCH, item.codes)
 
+    def test_a_mirror_copy_in_zstd_is_rewritten_in_the_configured_container(self) -> None:
+        """CS-519: codexSync never writes zstd, so the mirror's `.zst` is replaced.
+
+        Keeping the container planned a zstd write that `transcode` refuses,
+        and every apply failed on it.
+        """
+        from codexsync.semantic_transfer import MIRROR_CONTAINER_REPLACED
+
+        (self.local / DAY / NAME).write_bytes(_records(5))
+        (self.mirror / DAY / f"{NAME}.zst").write_bytes(_zstd(_records(3)))
+        (item,) = build_transfer_plan(
+            scan_sessions(self.local), scan_sessions(self.mirror),
+            local_root=self.local, remote_root=self.mirror,
+            source_machine="desktop", target_machine="laptop",
+            layout_id=SAME_PATH_LAYOUT_ID, placements=read_thread_placements(self.local),
+            mirror_codec=JsonlCodec.XZ,
+        ).items
+        self.assertEqual(item.action, TransferAction.FAST_FORWARD_REMOTE, item.codes)
+        self.assertEqual(item.target_relative_path, f"{DAY}/{NAME}.xz")
+        self.assertIn(MIRROR_CONTAINER_REPLACED, item.codes)
+        self.assertNotIn("MIRROR_CONTAINER_KEPT", item.codes)
+
+    def test_the_replaced_zstd_copy_is_removed_by_the_apply(self) -> None:
+        """The new container is written and the `.zst` goes through the deletions."""
+        from codexsync.app import _transfer_copy_actions
+        from codexsync.semantic_transfer import descriptors_by_session_hash
+
+        (self.local / DAY / NAME).write_bytes(_records(5))
+        (self.mirror / DAY / f"{NAME}.zst").write_bytes(_zstd(_records(3)))
+        local, mirror = scan_sessions(self.local), scan_sessions(self.mirror)
+        plan = build_transfer_plan(
+            local, mirror, local_root=self.local, remote_root=self.mirror,
+            source_machine="desktop", target_machine="laptop",
+            layout_id=SAME_PATH_LAYOUT_ID, placements=read_thread_placements(self.local),
+            mirror_codec=JsonlCodec.XZ,
+        )
+        copies = _transfer_copy_actions(
+            plan, self.local, self.mirror,
+            descriptors_by_session_hash(local), descriptors_by_session_hash(mirror),
+        )
+        (copy,) = copies.to_cloud
+        self.assertEqual(copy.dst, self.mirror / DAY / f"{NAME}.xz")
+        self.assertIs(copy.codec, JsonlCodec.XZ)
+        (removal,) = copies.deletions
+        self.assertEqual(removal.path, self.mirror / DAY / f"{NAME}.zst")
+        self.assertEqual(removal.side, "cloud")
+
     def test_a_plain_file_already_at_that_name_is_never_replaced(self) -> None:
         # One the scan did not take for this chat is still a file, and the
         # copy would replace a history nobody compared.

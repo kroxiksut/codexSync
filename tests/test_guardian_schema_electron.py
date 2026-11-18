@@ -181,6 +181,30 @@ class ElectronStateSchemaTests(unittest.TestCase):
         )
 
 
+class AdapterExclusivityTests(unittest.TestCase):
+    """No state may be claimed by two adapters (CS-487 kept the adapters as they are)."""
+
+    def test_the_shapes_a_desktop_state_shrinks_through_are_claimed_once_at_most(self) -> None:
+        from codexsync.guardian_schema import _ADAPTERS
+
+        project = {"id": "p1", "name": "one", "rootPaths": ["C:/a"], "createdAt": 1, "updatedAt": 2}
+        binding = {"projectKind": "local", "projectId": "p1"}
+        host = {"local:C:/x": {"p1": "as-p1"}}
+        shapes = [
+            {"local-projects": {"p1": project}, "project-order": ["p1"], "thread-project-assignments": {"t": binding}},
+            {"local-projects": {"p1": project}, "project-order": ["p1"]},
+            {"local-projects": {}, "project-order": [], "thread-project-assignments": {}},
+            {"local-projects": {}, "project-order": [], "app-server-project-id-by-legacy-project-id-by-host": {}},
+            {"local-projects": {}, "project-order": [], "pinned-project-ids": []},
+            {"local-projects": {}},
+            {"local-projects": {}, "app-server-project-id-by-legacy-project-id-by-host": host},
+        ]
+        for state in shapes:
+            with self.subTest(state=state):
+                claims = [adapter for adapter in _ADAPTERS if adapter.extract(state) is not None]
+                self.assertLessEqual(len(claims), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

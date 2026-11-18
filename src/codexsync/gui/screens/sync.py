@@ -569,6 +569,8 @@ class SyncScreen(Screen):
             parts = []
             if counts.get("projects_added"):
                 parts.append(self.p("sync.count.projects_added", counts["projects_added"]))
+            if counts.get("projects_removed"):
+                parts.append(self.p("sync.count.projects_removed", counts["projects_removed"]))
             if counts.get("changes"):
                 parts.append(self.p("sync.count.changes", counts["changes"]))
             return self.join(parts) if parts else self.t("sync.history.no_changes")
@@ -632,12 +634,22 @@ def full_sync_notes(screen: Screen, result) -> list[str]:
         notes.append(screen.p("sync.note.decided_by_rule", result.chats_decided_by_rule))
     if result.projects_missing_folders:
         notes.append(screen.p("sync.note.missing_folders", result.projects_missing_folders))
+    # A project removed in Codex here waits for the person (D-039).
+    if getattr(result, "projects_waiting", 0):
+        notes.append(screen.p("sync.note.projects_waiting", result.projects_waiting))
+    if getattr(result, "projects_removed", 0):
+        notes.append(screen.p("sync.note.projects_removed", result.projects_removed))
     # The part a setting changes is said apart from the rest (CS-347).
     if result.new_chats_kept_in_cloud:
         notes.append(screen.p("sync.note.new_chats_in_cloud", result.new_chats_kept_in_cloud))
     others = result.chats_not_loaded - result.new_chats_kept_in_cloud
     if others > 0:
         notes.append(screen.p("sync.note.chats_not_loaded", others))
+    # Held back by choice -- the working set or a one-way direction (CS-503).
+    if getattr(result, "chats_held_back", 0):
+        notes.append(screen.p("sync.note.chats_held_back", result.chats_held_back))
+    if getattr(result, "files_held_back", 0):
+        notes.append(screen.p("sync.note.files_held_back", result.files_held_back))
     # Written is not shown: Codex lists a chat only once its catalogue has it (D-024).
     if result.chats_codex_will_list:
         notes.append(screen.p("sync.note.codex_will_list", result.chats_codex_will_list))
@@ -692,6 +704,8 @@ class ResultLinks:
         self.recovery.clicked.connect(lambda: screen.host.go_to("recovery", self.journal))
         self.places = button(screen.t("sync.link.places"))
         self.places.clicked.connect(self.open_places)
+        self.removals = button(screen.t("sync.link.removals"))
+        self.removals.clicked.connect(lambda: screen.host.go_to("projects", "removals"))
         self.new_chats = button(screen.t("sync.link.new_chats"))
         self.new_chats.clicked.connect(lambda: screen.host.go_to("settings", "semantic.new_chats"))
         self.sessions = button(screen.t("sync.decisions.open"))
@@ -700,7 +714,7 @@ class ResultLinks:
         self.files.clicked.connect(self.open_files)
         self.codex = button(screen.t("sync.link.codex"))
         self.codex.clicked.connect(lambda: screen.host.go_to("recovery", "codex"))
-        self.layout = row(self.recovery, self.places, self.new_chats, self.sessions, self.files, self.codex)
+        self.layout = row(self.recovery, self.places, self.removals, self.new_chats, self.sessions, self.files, self.codex)
         self.show(None)
 
     def show_stop(self, outcome) -> None:
@@ -710,12 +724,16 @@ class ResultLinks:
         if outcome.code == RECOVERY_CODE and details.get("operation_id"):
             self.journal = str(details["operation_id"])
             self.recovery.setVisible(True)
+        elif details.get("recovery_operation_id"):
+            self.journal = str(details["recovery_operation_id"])
+            self.recovery.setVisible(True)
 
     def show(self, result) -> None:
         self.result = result
         self.journal = None
         self.recovery.setVisible(False)
         self.places.setVisible(bool(result is not None and result.projects_missing_folders))
+        self.removals.setVisible(bool(result is not None and getattr(result, "projects_waiting", 0)))
         self.new_chats.setVisible(bool(result is not None and result.new_chats_kept_in_cloud))
         self.sessions.setVisible(bool(
             result is not None and result.chats_not_loaded - result.new_chats_kept_in_cloud > 0

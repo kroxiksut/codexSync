@@ -134,3 +134,42 @@ class JournalSurvivesACloudClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AtomicJsonWriteTests(unittest.TestCase):
+    """CS-517: plan, resolution and working-set files are replaced in one step."""
+
+    def setUp(self) -> None:
+        self.root = Path(__file__).resolve().parents[1] / "test-sandbox" / f"json-{uuid.uuid4().hex[:8]}"
+        self.root.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def test_a_failed_replace_leaves_the_old_file_and_no_staging_file(self) -> None:
+        from codexsync.fs_replace import write_json_atomically
+
+        target = self.root / "resolutions.json"
+        write_json_atomically(target, {"kept": 1})
+        with patch("codexsync.fs_replace.os.replace", side_effect=OSError(errno.EIO, "boom")):
+            with self.assertRaises(OSError):
+                write_json_atomically(target, {"kept": 2})
+        self.assertEqual(target.read_text(encoding="utf-8"), '{\n  "kept": 1\n}\n')
+        self.assertEqual(sorted(item.name for item in self.root.iterdir()), ["resolutions.json"])
+
+    def test_the_transfer_plan_and_the_resolutions_go_through_it(self) -> None:
+        """A write that truncated first left a file every later sync refused."""
+        import codexsync.app as app
+        import codexsync.semantic_transfer as transfer
+
+        with patch.object(transfer, "write_json_atomically") as plan_write:
+            transfer.save_transfer_plan(
+                transfer.build_transfer_plan(
+                    transfer.SessionCatalog([], {}), transfer.SessionCatalog([], {}),
+                    local_root=self.root, remote_root=self.root,
+                    source_machine="a", target_machine="b",
+                ),
+                self.root / "plan.json",
+            )
+        plan_write.assert_called_once()
+        with patch.object(app, "write_json_atomically") as resolutions_write:
+            app._write_branch_resolutions(self.root / "resolutions.json", [])
+        resolutions_write.assert_called_once()

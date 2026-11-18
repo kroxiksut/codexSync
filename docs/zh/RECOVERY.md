@@ -32,12 +32,14 @@ compression = "none"             # none | zip
 ```powershell
 codexsync -c config.toml backups list                                  # 列出快照及其名称
 codexsync -c config.toml restore --dry-run                              # 预览，不写入任何内容
-codexsync -c config.toml restore --apply                                # 把最新的备份还原到本地 .codex
+codexsync -c config.toml restore --apply                                # 把这台机器最新的备份还原到本地 .codex
 codexsync -c config.toml restore --from <快照名称> --apply              # 指定某一份备份（目录或 .zip）
 codexsync -c config.toml restore --target cloud --apply                 # 改为还原到云端镜像
 ```
 
 - 还原需要 Codex 关闭，并且会先备份它将替换的一切。
+- 不给 `--from` 时，只考虑这台机器自己的备份，并且只考虑从要还原的那一侧（`--target`）
+  做的备份：备份文件夹是共用的，其中最新的备份可能属于另一台机器，或者是另一侧的备份。
 - 试运行会逐个文件与备份清单核对。
 - 没有清单的旧格式备份需要明确给出 `--from` 以及 `--allow-legacy-snapshot`，并且不能
   还原语义层拥有的状态（会话、会话索引、全局状态）。
@@ -62,12 +64,21 @@ codexsync -c config.toml restore --target cloud --apply                 # 改为
 `RECOVERY_REQUIRED`），以及另一台电脑的操作 —— 日志文件夹位于共享的工作区里，那个操作
 可能还在进行。
 
+**另一台电脑未关闭的日志只拦住与它有关的操作。** 同步、对话传输和恢复会等它，因为它们写入
+共享的副本。对本机自己的 Codex 状态的修改 —— 移动对话、项目列表、`repair-projects`、
+Guardian 恢复、移动项目、对话名称、对话目录和 `codex repair` —— 会继续进行，并在日志里留下
+警告：一台在同步中途停下的笔记本，不会再妨碍这台电脑修复无法启动的 Codex。无法判断属于哪台
+电脑的日志，或无法读取的日志，仍然拦住一切。
+
 **查看哪些还开着**（没有副作用）：
 
 ```powershell
 codexsync -c config.toml recover list           # 未关闭的日志，以及各自怎样收尾
 codexsync -c config.toml recover list --all     # 包括已结束的；--json 供脚本使用
 ```
+
+云同步客户端生成的日志文件副本（例如 `<id> (1).json`）在它所复制的日志可读时不会阻塞
+任何操作，也不会被列出。原件已经不在的副本仍会阻塞；列表会指出它，以便检查后删除。
 
 在窗口里，同一份列表就是 **「恢复」** 页面；被未关闭日志挡住的同步会提供
 **「打开恢复页面」** 按钮，直接跳到那条日志。
@@ -96,6 +107,11 @@ codexsync -c config.toml recover rollback <操作标识>
 codexsync -c config.toml recover rollback <操作标识> --apply
 ```
 
+- 只有执行该操作的机器才能回滚它：它的备份保存的是那台机器的文件，而这里的本地一侧是
+  另一个 `.codex`。另一台机器的日志在这里只能用 `resume` 关闭，而且要在确定那个操作已经
+  结束之后。
+- 备份中的每个文件都会放回，即使今天的 `include_roots` 或 `exclude_globs` 会把它排除在外：
+  回滚撤销的是该操作在当时的设置下替换的内容。
 - 每个文件都回到它被备份时所在的一侧：一次同步会备份两侧的文件，而备份记录了每个文件
   属于哪一侧。`--target`（`local` 或 `cloud`）可以不给；给出时，它必须是备份中唯一的
   一侧，否则回滚会被拒绝，而不是把文件写进错误的根目录。只有当一次 `restore` 的备份写于
@@ -107,8 +123,9 @@ codexsync -c config.toml recover rollback <操作标识> --apply
 - `sessions apply` 不做回滚：请用 `resume`，然后重新 scan 和 apply。一次传输只会延长一段
   历史，或者把被替换的分支保存在冲突包里，所以重做不会丢失任何东西。
 - 两条命令都默认是试运行，并且都要求 Codex 关闭。
-- `rollback` 会在释放日志之前检查一切可能导致拒绝的东西 —— 备份对照它已提交的清单、侧别、
-  全局状态是否有效 —— 因此跑不起来的回滚会让阻塞原样保留。
+- `rollback` 会在写入任何内容之前检查一切可能导致拒绝的东西 —— 备份对照它已提交的清单、
+  侧别、全局状态是否有效 —— 并且只在所有文件都放回之后才关闭日志。跑不起来的回滚，或被
+  Codex 启动打断的回滚，会让阻塞原样保留；等 Codex 关闭后再运行一次即可。
 - 如果日志指名的备份已经不在了（被保留期限删除，可能是共用备份文件夹的另一台机器删的），
   回滚会被拒绝：已经无法证明替换过什么。`resume` 仍然可以关闭日志。
 - 从未进入提交阶段的日志，或者没有已提交清单的备份，都证明什么也没有被替换 —— 两者都在
@@ -145,3 +162,26 @@ codexsync -c config.toml codex repair --confirm-plan <plan-id>
 所有写入一样记录日志（类别 `codex-repair`）。如果重建是 codexSync 自己请求的，会放回当时备份
 中的那一行。之后 Codex 会带着已列出的聊天启动；当你可以让 Codex 一直打开直到完成时，再用
 `sessions catalogue` 请求重建。`doctor` 在 `codex_startup` 中报告同一状态。
+
+## Codex 拒绝所有命令时
+
+在 Windows 上，Codex 在沙盒中运行代理的命令。每次运行命令前，它会在代理不得触碰的项目文件夹
+（`.codex`、`.agents`、`.git`）上添加拒绝项，而这要求你有权更改这些文件夹的权限。由沙盒*内*
+命令创建的文件夹属于沙盒账户（`CodexSandboxOffline`），在以管理员身份运行的命令行中创建的文件夹
+属于 Administrators；这时你无权更改其权限，沙盒设置失败，过一段时间后 Codex 会拒绝该项目所有
+聊天中的每条命令（`setup refresh had errors`）。
+
+`doctor` 检查每个项目的 `.codex`、`.agents` 和 `.git`，并在 `codex_sandbox` 中报告 Codex 无法
+保护的文件夹及其所有者；如果 Codex 自己的沙盒日志也这样说，也会注明。在窗口中，“概览”会列出它们，
+*复制命令* 会把修复命令放到剪贴板。codexSync 自己不更改任何权限：这些文件夹是你的。请在以管理员
+身份运行的 PowerShell 中执行这些命令；每条只更改所有者，`/L` 作用于链接本身而不是它指向的位置。名称放在单引号中，PowerShell 在单引号中不展开任何内容，
+因此文件夹名中的 `$` 或反引号仍是名称的一部分：
+
+```powershell
+icacls 'D:\Projects\app\.codex' /setowner 'PC\you' /C /L
+icacls 'D:\Projects\app\.git' /setowner 'PC\you' /T /C /L
+```
+
+只有 `.git` 会递归更改：`.agents` 和 `.codex` 中可能有指向其他代理所用文件夹的 junction
+（Claude Code 读取 `.agents/skills`）。收回这样的文件夹要更改所有者——切勿删除或重新创建。
+设置成功后 Codex 留在这些文件夹上的拒绝项是它的保护在起作用：它们拒绝的是沙盒，而不是你。

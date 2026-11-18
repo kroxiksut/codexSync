@@ -9,7 +9,9 @@
 # file needs is missing (`ldd`), the window starts offscreen and stays up, the
 # package manager removes it, nothing is left in /opt or /usr/bin, and no home
 # directory gained or lost a file. The AppImage and the tar.gz carry the same
-# folder and declare nothing; on a bare container only their start is checked.
+# folder and declare nothing; on a bare container their start is checked. Every
+# format also writes a config into a scratch home and runs `doctor --report`,
+# which imports sqlite3, ssl and zstd and must say it reads `.jsonl.zst`.
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 
@@ -34,15 +36,37 @@ check_version() {
 # (evdev), GL buffer sharing on Wayland. Their gaps are reported, not refused.
 OPTIONAL_PLUGINS='/plugins/platformthemes/|/plugins/generic/|/plugins/wayland-graphics-integration-client/'
 
+# The bootloader puts the bundle's top folder (`_internal`) on LD_LIBRARY_PATH
+# before Python starts, and PyInstaller collects a bundled library there (or a
+# link to it): that is how `_sqlite3` finds the libsqlite3 it brought, with no
+# RUNPATH of its own. `ldd` runs the same way, or every such library reads as
+# missing on a system that has no copy of its own (CS-489).
 check_libraries() {
+    bundle="$1/_internal"
+    [ -d "$bundle" ] || fail "no _internal folder in $1"
     report="$(find "$1" -type f \( -name '*.so*' -o -perm -u+x \) -print0 \
-        | xargs -0 -r sh -c 'for f; do file -b "$f" | grep -q ELF || continue; ldd "$f" 2>/dev/null | grep "not found" | sed "s|^|$f: |"; done' sh \
+        | LD_LIBRARY_PATH="$bundle" xargs -0 -r sh -c 'for f; do file -b "$f" | grep -q ELF || continue; ldd "$f" 2>/dev/null | grep "not found" | sed "s|^|$f: |"; done' sh \
         | sort -u || true)"
     optional="$(echo "$report" | grep -E "$OPTIONAL_PLUGINS" || true)"
     missing="$(echo "$report" | grep -v -E "$OPTIONAL_PLUGINS" | grep . || true)"
     [ -z "$optional" ] || { echo "note: optional plugins without their libraries here:"; echo "$optional"; }
     [ -z "$missing" ] || { echo "$missing" >&2; fail "libraries missing on this system"; }
     echo "ok: every library the programs and the xcb/wayland/offscreen platforms need resolves"
+}
+
+check_report() {
+    # A scratch home: nothing of this check may land in /root or /home.
+    smoke="$(mktemp -d)"
+    mkdir -p "$smoke/codex" "$smoke/ws"
+    HOME="$smoke" "$1" init-config --output "$smoke/c.toml" --machine-id smoke \
+        --local-state-dir "$smoke/codex" --workspace-root "$smoke/ws" >/dev/null || fail "$1 init-config"
+    status=0
+    HOME="$smoke" "$1" -c "$smoke/c.toml" doctor --report >"$smoke/report.json" 2>"$smoke/report.log" || status=$?
+    # 5 is "a check failed", which a bare container may well do; 1 is a crash.
+    [ "$status" = 0 ] || [ "$status" = 5 ] || { cat "$smoke/report.log" >&2; fail "$1 doctor --report exited $status"; }
+    grep -q '"zstd": true' "$smoke/report.json" || { cat "$smoke/report.json" >&2; fail "$1 cannot read .jsonl.zst chats"; }
+    echo "ok: $1 writes a config and reports; it reads .jsonl.zst ($(grep '"sqlite"' "$smoke/report.json" | tr -d ' ,'))"
+    rm -rf "$smoke"
 }
 
 check_window() {
@@ -64,6 +88,7 @@ case "$kind" in
         apt-get install -y -qq "$file" >/dev/null
         check_version /usr/bin/codexsync /usr/bin/codexsync-gui
         check_libraries /opt/codexsync
+        check_report /usr/bin/codexsync
         [ -f /usr/share/applications/codexsync.desktop ] || fail "no menu entry"
         check_window /usr/bin/codexsync-gui
         apt-get remove -y -qq codexsync >/dev/null
@@ -74,6 +99,7 @@ case "$kind" in
         dnf install -y -q "$file" >/dev/null
         check_version /usr/bin/codexsync /usr/bin/codexsync-gui
         check_libraries /opt/codexsync
+        check_report /usr/bin/codexsync
         [ -f /usr/share/applications/codexsync.desktop ] || fail "no menu entry"
         check_window /usr/bin/codexsync-gui
         dnf remove -y -q codexsync >/dev/null
@@ -87,6 +113,7 @@ case "$kind" in
         cd "$work"
         "$file" --appimage-extract >/dev/null
         check_version "$work/squashfs-root/AppRun"
+        check_report "$work/squashfs-root/AppRun"
         [ "$(APPIMAGE_EXTRACT_AND_RUN=1 "$file" --version)" = "$expected" ] || fail "the AppImage itself"
         echo "ok: the AppImage runs"
         exit 0
@@ -98,6 +125,7 @@ case "$kind" in
         tar -xzf "$file" -C "$work"
         folder="$(find "$work" -mindepth 1 -maxdepth 1 -type d)"
         check_version "$folder/codexsync" "$folder/codexsync-gui"
+        check_report "$folder/codexsync"
         echo "ok: the tar.gz runs"
         # A tar.gz installs no menu entry; `shortcut install` makes one in the
         # user's own folder, starting this very program (CS-399).

@@ -82,7 +82,8 @@ each full sync carries the **project part** of it:
 - the next machine **merges** it in: a project is matched by id, then by its
   folder (through [`[[path_mappings]]`](CONFIGURATION.md#path_mappings)); one
   this machine lacks is added exactly as Codex wrote it on the other machine;
-- **nothing is removed** — a project only this machine has stays where it was;
+- **a merge removes nothing** — a project only this machine has stays where it was
+  (a project removed in Codex is the one exception, [below](#a-project-removed-in-codex));
 - for projects both machines have, the other machine's pins, order and chat
   bindings win, but only from a list this machine has not taken yet, so an
   unchanged list is never applied again over a change made here since;
@@ -105,6 +106,32 @@ state: Codex closed, a verified backup first, and a rollback through
 [`recover`](RECOVERY.md#interrupted-mutations) if anything fails. Codex also
 keeps projects in `state_*.sqlite`, whose project records codexSync never
 modifies; the sidebar follows the JSON file.
+
+### A project removed in Codex
+
+A project you remove from Codex's list on one machine is not brought back by
+the next sync (`D-039`). What happens next is the setting
+[`[sync] removed_projects`](CONFIGURATION.md#sections) (Settings → Sync):
+
+- `ask` (default) — the project stays removed here and is kept on the other
+  machines. The sync says so, and you answer once: **on purpose** — the other
+  machines remove it too on their next sync; **by mistake** — the next sync
+  here puts it back from them;
+- `remove` — every removal here is on purpose, without a question;
+- `bring_back` — every removal here is a mistake: the next sync puts it back.
+
+```powershell
+codexsync -c config.toml projects removed                        # removals here (waiting) and elsewhere
+codexsync -c config.toml projects removed --everywhere <project> # on purpose: removed on the other machines too
+codexsync -c config.toml projects removed --bring-back <project> # by mistake: the next sync puts it back
+```
+
+In the window this is **Projects → Projects removed in Codex**. A machine
+that follows a removal takes the project out of Codex's list with its chat
+bindings, pins and sidebar entries, once: a project you make again later for
+that folder stays, and travels like any new one. Folders and chats are never
+deleted. Guardian sees the removal as a drop on each machine, so
+[accept it there](GUARDIAN.md) as you would any drop you made yourself.
 
 ### On another operating system
 

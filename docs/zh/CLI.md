@@ -40,7 +40,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `guardian accept` | 否 | 在确实发生减少之后，把当前状态作为新基准 | [守护](GUARDIAN.md#接受新的基准) |
 | `guardian scheduler` | 否 | 已废弃：请用 `automation apply` | [配置](CONFIGURATION.md#自动化) |
 | `automation status` / `run` | 否 | 显示计划任务，或立即执行它的安全作业 | [配置](CONFIGURATION.md#自动化) |
-| `automation apply` / `remove` | 否 | 让系统任务与 `[scheduler]`、`[state_backup]` 和 `[handoff]` 一致，或删除它们 | [配置](CONFIGURATION.md#自动化) |
+| `automation apply` / `remove` | 否 | 让系统任务与 `[scheduler]`、`[state_backup]` 和 `[handoff]` 一致，或删除它们；`--replace-other-config` 接管另一个配置安装的任务 | [配置](CONFIGURATION.md#自动化) |
 | `state-backup create` | **是** | 制作一个经过校验的 `.codex` 副本；`--wait` 会等待 Codex 关闭 | [配置](CONFIGURATION.md#codex-副本) |
 | `state-backup list` | 否 | 列出 `[state_backup] root_dir` 中的副本 | [配置](CONFIGURATION.md#codex-副本) |
 | `backups list` | 否 | 同步或恢复前做的备份快照；名称即 `restore --from` 的参数 | [恢复](RECOVERY.md#还原一份备份) |
@@ -65,6 +65,7 @@ exe 究竟是什么版本。在任何命令或子命令后加 `-h` 会打印它�
 | `projects sync` | **是** | 把其他电脑的项目列表合并到本机，再发布本机的列表（不带 `--confirm-plan` 时只是预览） | [项目](PROJECTS.md#机器之间的项目) |
 | `projects files` | 否 | 本机的项目文件夹是否包含其他机器上次的内容 | [项目](PROJECTS.md#项目文件夹) |
 | `projects places` | 否 | 其他机器的每个项目在本机的位置，以及本机已得到的回答 | [项目](PROJECTS.md#在另一种操作系统上) |
+| `projects removed` | 仅共享文件夹 | 在本机 Codex 中移除的项目（等待答复）以及在其他机器上有意移除的项目；`--everywhere` 或 `--bring-back` 答复本机移除的项目 | [项目](PROJECTS.md#在-codex-中移除的项目) |
 | `projects place` | 仅共享文件夹 | 说明其他机器的项目在本机的位置（`--path`）、不带到本机（`--skip`）或忘记回答（`--forget`）；对所有方向都有效 | [项目](PROJECTS.md#在另一种操作系统上) |
 | `repair-projects scan` | 否 | 构建一份不可变的、带哈希的修复计划 | [项目](PROJECTS.md#换机之后的修复) |
 | `repair-projects apply` | **是** | 按标识执行某一份确切的计划 | [项目](PROJECTS.md#换机之后的修复) |
@@ -129,11 +130,12 @@ codexsync -c config.toml doctor
 聊天列表或项目 —— 会作为警告列出哪些写入被关闭）。然后它会检查配置和各个目录、Codex 是否在运行、全局状态的结构与最近一张可还原的
 快照、会话文件与会话索引、SQLite 线程目录、一次同步被允许做什么、同步清单、遗留的
 临时文件、Codex 能否启动（`codex_startup`：卡住的聊天列表重建在 `codex repair` 把它设回之前
-算作失败），以及是否有未完成的写操作仍在阻止一切写入（在 `recover` 关闭它之前算作失败）。
+算作失败）、Codex 能否在每个项目中运行命令（`codex_sandbox`，Windows：沙盒无法保护的 `.codex`、
+`.agents` 或 `.git`，并附上收回它的命令——见[恢复](RECOVERY.md#codex-拒绝所有命令时)），以及是否有未完成的写操作仍在阻止一切写入（在 `recover` 关闭它之前算作失败）。
 
-`doctor --report` 以 JSON 打印同一次读取的结果，供提交 issue 使用：codexSync、Python、操作系统和
-Codex 的版本，本机有哪些格式和闸门，每项检查的状态（不含详情，详情里有路径）以及各项计数 ——
-不含任何名称、路径、标题或聊天 id，可以原样粘贴。
+`doctor --report` 以 JSON 打印同一次读取的结果，供提交 issue 使用：codexSync、Python、操作系统、
+Codex 和 SQLite 的版本，此构建能否读取 Codex 压缩的 `.jsonl.zst` 聊天，本机有哪些格式和闸门，每项检查的状态（不含详情，详情里有路径）以及各项计数 ——
+不含任何名称、路径、标题或聊天 id，可以原样粘贴。退出码与 `doctor` 相同：有检查失败时为 `5`。
 
 ## 窗口与控制台
 

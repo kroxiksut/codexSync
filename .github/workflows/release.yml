@@ -153,6 +153,18 @@ jobs:
           $expected = "codexsync ${{ needs.meta.outputs.version }}"
           $actual = (& dist/codexsync.exe --version).Trim()
           if ($actual -ne $expected) { Write-Error "codexsync.exe reports '$actual', expected '$expected'"; exit 1 }
+          # The frozen program reads what the interpreter did (CS-553): without
+          # zstd most chats of Codex 0.163 are blocked, with no other sign.
+          # `doctor --report` exits 0, or 5 when a check fails on a bare runner.
+          $smoke = Join-Path $env:RUNNER_TEMP "frozen-smoke"
+          New-Item -ItemType Directory -Force "$smoke/codex", "$smoke/ws" | Out-Null
+          & dist/codexsync.exe init-config --output "$smoke/c.toml" --machine-id smoke --local-state-dir "$smoke/codex" --workspace-root "$smoke/ws"
+          if ($LASTEXITCODE -ne 0) { Write-Error "init-config failed"; exit 1 }
+          $text = & dist/codexsync.exe -c "$smoke/c.toml" doctor --report | Out-String
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 5) { Write-Error "doctor --report exited $LASTEXITCODE"; exit 1 }
+          $report = $text | ConvertFrom-Json
+          if ($report.readers.zstd -ne $true) { Write-Error "codexsync.exe cannot read .jsonl.zst chats"; exit 1 }
+          Write-Output "frozen readers: sqlite $($report.readers.sqlite), zstd $($report.readers.zstd)"
           $exes = @("dist/codexsync.exe")
           if ("${{ matrix.gui }}" -eq "true") { $exes += "dist/codexsync-gui.exe" }
           python scripts/check_exe_version.py @exes
@@ -221,6 +233,15 @@ jobs:
             actual="$("$program" --version)"
             test "$actual" = "$expected" || { echo "$program reports '$actual', expected '$expected'"; exit 1; }
           done
+          # As on Windows (CS-553): the frozen folder reads .jsonl.zst. Both
+          # programs share `_internal`, so one of them proves it for both.
+          smoke="$(mktemp -d)"
+          mkdir -p "$smoke/codex" "$smoke/ws"
+          HOME="$smoke" dist/codexsync/codexsync init-config --output "$smoke/c.toml" --machine-id smoke             --local-state-dir "$smoke/codex" --workspace-root "$smoke/ws"
+          status=0
+          HOME="$smoke" dist/codexsync/codexsync -c "$smoke/c.toml" doctor --report >"$smoke/report.json" || status=$?
+          test "$status" = 0 || test "$status" = 5 || { echo "doctor --report exited $status"; exit 1; }
+          python -c "import json,sys; r=json.load(open(sys.argv[1]))['readers']; print('frozen readers:', r); sys.exit(0 if r['zstd'] is True else 1)" "$smoke/report.json"             || { echo "the frozen programs cannot read .jsonl.zst chats"; exit 1; }
       - name: Pack
         run: python scripts/linux_packages.py --tag "$RELEASE_TAG" --dist dist/codexsync --out release
       - uses: actions/upload-artifact@v4
@@ -326,9 +347,9 @@ jobs:
       - name: Install and run
         shell: bash
         run: |
-          launcher="$(ls npm/codexsync-*.tgz | grep -Ev -- '-(win32|linux)-(x64|arm64)\.tgz$')"
+          launcher="$(ls npm/kroxut-codexsync-*.tgz | grep -Ev -- '-(win32|linux)-(x64|arm64)\.tgz$')"
           npm install -g "./$launcher"
-          npm install -g "codexsync-${{ matrix.key }}@file:./$(ls npm/codexsync-*-${{ matrix.key }}.tgz)"
+          npm install -g "codexsync-${{ matrix.key }}@file:./$(ls npm/kroxut-codexsync-*-${{ matrix.key }}.tgz)"
           for program in codexsync codexsync-gui; do
             actual="$("$program" --version)"
             test "$actual" = "codexsync $VERSION" || { echo "$program reports '$actual', expected 'codexsync $VERSION'"; exit 1; }
@@ -345,7 +366,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: npm
-      url: https://www.npmjs.com/package/codexsync
+      url: https://www.npmjs.com/package/@kroxut/codexsync
     permissions:
       id-token: write
     steps:

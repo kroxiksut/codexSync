@@ -24,7 +24,7 @@ The screenshots show invented demo data. They are rendered offscreen by
 ## Starting it
 
 ```powershell
-python -m pip install --upgrade --pre "codexsync[gui]"
+python -m pip install --upgrade "codexsync[gui]"
 codexsync-gui                      # opens the config it used last
 codexsync-gui -c config.toml       # or: python -m codexsync.gui -c config.toml
 ```
@@ -92,12 +92,13 @@ path or a title. A part that cannot be read is one tile saying why.
 
 A manual check of this machine; it authorises no write. The banner says whether
 Codex looks closed. The table is the `doctor` report: configuration, state
-directories, the Codex process, whether Codex can start, the detected global-state schema, the latest
+directories, the Codex process, whether Codex can start, whether it can run commands in each project, the detected global-state schema, the latest
 restorable snapshot, session files, the session index, the SQLite thread
 catalogue, what a sync is allowed to do, where projects are stored, and the sync
 manifest — each line said in the window's language; hover it for the English
 line `doctor` prints. Click a column to sort it (the status by severity, errors
-first); select rows and press Ctrl+C, or right-click, to copy them. Below it: a dry run of the sync, the last synchronisation with a link to its
+first); select rows and press Ctrl+C, or right-click, to copy them. When Codex's sandbox cannot protect a project's folder, a banner above the table says so and
+*Copy commands* puts the fix on the clipboard ([Recovery](RECOVERY.md#when-codex-refuses-every-command)). Below it: a dry run of the sync, the last synchronisation with a link to its
 history, and the state of the scheduled task with a link to the *Automation* page.
 
 ## First run
@@ -225,6 +226,10 @@ only), plus chats under no project. Select a project to **show its chats**,
 - **Move its folder…** copies the project into a new folder, verifies every
   file, and only then points Codex at the new root. The old folder is never
   modified or deleted.
+- **Projects removed in Codex** lists a project removed from Codex's list on
+  this machine, which the sync does not bring back while you decide: **on
+  purpose** removes it on the other machines too, **by mistake** puts it
+  back here. *Change what a removal does* opens the setting.
 - **Other machines' projects on this one** lists the projects that have no
   folder here (another operating system, or no folder by that path). They
   come with their chats anyway; to work on one's files here, select it and
@@ -295,7 +300,9 @@ it is resumed or rolled back — that block is the protection.
   run the interrupted command again, which re-plans from what is on disk.
 - **Roll back into** restores the snapshot the operation created, then closes the
   journal. Each file goes back to the side it was backed up from; choosing a side
-  is needed only for an older restore whose snapshot does not record it.
+  is needed only for an older restore whose snapshot does not record it. Another
+  machine's journal cannot be rolled back here, since its backup holds that
+  machine's files: roll it back there.
 
 Each action has its own check (dry run) that must pass first.
 
@@ -331,6 +338,10 @@ removes what is off.
   `handoff` folder beside the sync manifest. See
   [Synchronisation → Handing work over](SYNC.md#handing-work-over).
 
+When the tasks were installed from another config that still exists, nothing is
+changed and the page names that config; **Use this config** makes them this
+config's, after asking.
+
 See [Configuration → Automation](CONFIGURATION.md#automation) and
 [Copies of `.codex`](CONFIGURATION.md#copies-of-codex).
 
@@ -352,7 +363,8 @@ written until you save.
 A save rewrites only the values that changed and keeps every comment, is
 validated by the same loader the command line uses, shows the difference, is
 refused if the file changed on disk since it was opened, and keeps the replaced
-version under `<workspace>/config-history/`. Open plans are discarded afterwards.
+version under `<workspace>/config-history/`; the history lists the versions of this
+machine's config (by its `machine_id`). Open plans are discarded afterwards.
 A setting the rules forbid is shown with its reason.
 
 **A config from an earlier version** is announced at the top of this screen:

@@ -45,7 +45,6 @@ anonymous.
 
 | Version | Fixes |
 |---|---|
-| 0.2.0 pre-releases (alphas, release candidates) and main | yes |
-| 0.1.x | yes, until 0.2.0 is released |
+| 0.2.x and main | yes |
+| 0.1.x | no — upgrade to 0.2 |
 
-<!-- At the 0.2.0 release: "0.2.x | yes" and "0.1.x | no — upgrade to 0.2". -->

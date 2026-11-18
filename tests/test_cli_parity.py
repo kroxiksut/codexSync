@@ -46,6 +46,7 @@ WINDOW_ONLY = {
     "session_pair_name": "names the window's plan files for a pair; the console takes --plan",
     "preview_path": "shows where a folder typed into a form would resolve; the console reads the file",
     "remember_state_stats": "the window keeps a chat scan's counts for Home; `summary --recount` does it here",
+    "frozen_program": "About names the window's own program file; `automation status` prints the program each task runs",
 }
 
 

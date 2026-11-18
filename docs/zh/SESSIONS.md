@@ -53,7 +53,10 @@ codexsync -c config.toml sessions scan --source-machine desktop --target-machine
 被留下的会话会报告为 `OUT_OF_SCOPE`。它不阻止任何事，并且带着「本来会是什么」
 （`WOULD_BE_…`），所以汇总会说明什么被留下了，而不是把它略去。一个一个会话都不覆盖的
 工作集——比如一个还没有对话的项目——不会往 `.codex` 写入任何东西，并被标记为
-`WORKING_SET_MATCHES_NOTHING`；镜像仍然会被完整写入。
+`WORKING_SET_MATCHES_NOTHING`；镜像仍然会被完整写入。所选项目或对话已不再对应任何内容的
+工作集也是如此——项目被改名、被 Codex 以新 id 重新创建，或名称输错：工作集仍然是一个选择，
+绝不会变成「带走全部」。这些名称会留在已保存的工作集中；`sessions scope --expand` 把它们列为
+「目前未找到」，`sessions scan` 在 `working_set.not_found` 中统计它们的数量，窗口会在工作集下方列出它们。
 
 工作文件夹在本机不存在的对话——通常是放在同步文件夹之外的项目——会被标记为
 `CWD_ABSENT_HERE`，`sessions scan` 会在 `cwd_absent_here` 中统计这类对话的数量。

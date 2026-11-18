@@ -102,7 +102,9 @@ class GuardianModelsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             guardian_root = root / "данные" / "守护者"
-            config_path = self._write_config(root, guardian_root=guardian_root, machine_id="машина 1")
+            # A Cyrillic machine id is refused since CS-494 (it would be stored
+            # as "1"); the folder names are what this test is about.
+            config_path = self._write_config(root, guardian_root=guardian_root, machine_id="machine-1")
 
             cfg = load_config(config_path)
 

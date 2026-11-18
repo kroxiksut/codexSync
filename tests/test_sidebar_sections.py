@@ -125,6 +125,28 @@ class MergeTests(unittest.TestCase):
         merge_sections(here, published_sections(_state([_section("x", "X")])), projects=SAME, fresh=True)
         self.assertEqual({item["id"] for item in _store(here)["sections"]}, {"mine", "x"})
 
+    def test_a_chat_that_arrives_after_the_list_was_taken_joins_its_section(self) -> None:
+        # CS-528: the list was taken while the chat was not here yet.
+        peer = published_sections(_state([_section("s", "Work", "codex:thread:local:t9")]))
+        state = _state()
+        waiting: set[str] = set()
+        merge_sections(state, peer, projects=SAME, fresh=True, chats=["t1"], waiting=waiting)
+        self.assertEqual(_store(state)["sections"][0]["itemKeys"], [])
+        self.assertEqual(waiting, {"codex:thread:local:t9"})
+
+        later: set[str] = set()
+        changes = merge_sections(state, peer, projects=SAME, fresh=False, chats=["t1", "t9"],
+                                 deferred=waiting, waiting=later)
+        self.assertEqual(changes, 1)
+        self.assertEqual(_store(state)["sections"][0]["itemKeys"], ["codex:thread:local:t9"])
+        self.assertEqual(later, set())
+
+    def test_a_chat_taken_out_of_a_section_here_is_not_put_back(self) -> None:
+        peer = published_sections(_state([_section("s", "Work", "codex:thread:local:t1")]))
+        state = _state([_section("s", "Work")])  # the person took t1 out here
+        self.assertEqual(merge_sections(state, peer, projects=SAME, fresh=False, chats=["t1"]), 0)
+        self.assertEqual(_store(state)["sections"][0]["itemKeys"], [])
+
     def test_the_second_merge_changes_nothing(self) -> None:
         peer = published_sections(_state([_section("s", "Work", "codex:project:p1")]))
         state = _state()

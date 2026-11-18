@@ -26,7 +26,10 @@ temp_dir = "${workspace_root}/.tmp"
 ```
 
 - **`machine_id`** 唯一且长期不变。备份、快照、计划以及另一台机器上的映射规则都靠它
-  来指认；两台机器同名会把各自的数据混在一起。
+  来指认；两台机器同名会把各自的数据混在一起。它只能由拉丁字母、数字、`.`、`_` 和 `-`
+  组成，因为它要用作文件名：含其他字符的名字（`My PC`、`Ноутбук`）会被拒绝，并告诉你它会被
+  保存成什么样；两个只差大小写的名字（`Laptop`、`laptop`）同样会被拒绝，因为 Windows 和
+  大多数云文件夹会把它们的文件当作同一个。
 - **`workspace_root_dir`** 是由云客户端在机器之间同步的文件夹。其他任何路径里的
   `${workspace_root}` 都代表它。
 - **`local_state_dir`** 是 Codex 自己的状态目录。它会被读取，只有在冷操作时才被写入，
@@ -48,7 +51,7 @@ temp_dir = "${workspace_root}/.tmp"
 
 | 节 | 控制什么 | 参见 |
 |---|---|---|
-| `[sync]` | 比较方式、方向、删除、默认试运行 | [同步](SYNC.md) |
+| `[sync]` | 比较方式、方向、删除、默认试运行；`removed_projects`：在本机 Codex 中移除的项目（默认：询问） | [同步](SYNC.md)、[项目](PROJECTS.md#在-codex-中移除的项目) |
 | `[targets]` | `include_roots`：`.codex` 下哪些内容参与 `sync` | [同步](SYNC.md#同步哪些内容) |
 | `[filters]` | `exclude_globs`：哪些内容永不复制 | [同步](SYNC.md#同步哪些内容) |
 | `[conflict]` | 两侧都被改过的文件或聊天适用的 `policy`（默认：保留较新的） | [同步](SYNC.md#冲突) |
@@ -203,8 +206,9 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
 设置放在 `config.toml` 之外，将来会被移除。如果你曾用那些脚本装过任务，请先用它们卸载，
 以免两个任务同时运行。`automation status` 和“自动化”页面会指出这样的任务（默认名
 `codexSyncSync`、LaunchAgent `com.codexsync.sync`，或任何运行 `run-codexsync` 的任务），
-并给出删除它的命令：它运行的是 `codexsync sync`，而在 0.2 中这只同步设置、不含对话。
-它不会被自动删除。
+并给出删除它的命令：它按自己的计时器运行 `codexsync sync --apply`，而在 0.2 中这是
+设置和对话的完整同步（`[sync] scope = "full"`，默认值），并且在 `[sync] close_codex = true`
+时会在你工作时请 Codex 退出。它不会被自动删除。
 
 **每个账户一个任务，以及搬了家的可执行文件。** Windows 任务注册在 `\CodexSync\`
 文件夹下，名字是 `CodexSync Job (<用户>)`：在 0.2 之前所有账户共用一个名字，于是
@@ -213,6 +217,13 @@ codexsync -c config.toml automation run      # 立即执行一次配置好的作
 已安装的任务实际运行什么，因此被改名或移动过的可执行文件 —— 升级打包版之后留下的
 正是这种情况 —— 会报成 `EXECUTABLE_MISSING` 或 `EXECUTABLE_MOVED`，而不是含糊的
 「与配置不符」；`automation apply` 会把它按这次安装重新注册。
+
+**每个账户一个配置。** 一个账户只有一组这样的任务，无论是哪个配置安装的。从另一个仍然存在的
+配置运行 `automation apply` 或 `automation remove` 不会改动任何东西，并会说明这些任务使用的是
+哪个配置：打开那个配置去修改它们，或者加上 `--replace-other-config`（*使用此配置*按钮）把它们
+改为此配置的任务。配置已不存在的任务会直接被替换。如果从没有为其 Python 安装的源码目录运行，
+`automation status` 会提醒没有任务能启动它：任务从系统选定的文件夹启动，`python -m codexsync`
+在那里什么也找不到——请先安装（`pip install -e .`）。
 
 ## `.codex` 副本
 

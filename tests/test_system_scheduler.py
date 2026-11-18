@@ -198,6 +198,19 @@ class ScheduledJobTests(SandboxCase):
 
 
 class JobCommandTests(SandboxCase):
+    def test_a_package_not_installed_for_this_python_is_named(self) -> None:
+        """CS-546: `python -m codexsync` from a bare checkout fails in a task (cwd System32)."""
+        import importlib.metadata
+
+        missing = mock.patch.object(
+            ss.importlib.metadata, "distribution", side_effect=importlib.metadata.PackageNotFoundError("codexsync"),
+        )
+        with missing:
+            self.assertEqual(ss.job_command_problem(frozen=False), ss.PACKAGE_NOT_INSTALLED)
+            self.assertIsNone(ss.job_command_problem(frozen=True), "a frozen build is its own program")
+        with mock.patch.object(ss.importlib.metadata, "distribution", return_value=object()):
+            self.assertIsNone(ss.job_command_problem(frozen=False))
+
     def test_frozen_build_is_its_own_cli(self) -> None:
         exe = self.root / "codexsync.exe"
         self.assertEqual(job_command(exe, frozen=True, platform="win32"), [str(exe)])
@@ -1369,6 +1382,95 @@ class StateBackupJobTests(SandboxCase):
                                        systemctl="systemctl", slot=ss.STATE_BACKUP_SLOT)
         adapter.install(backup_job(3600, False), command=self.command, config_path=self.config, log_dir=self.logs)
         self.assertEqual([argv[2] for argv in run.calls], ["daemon-reload", "enable", "restart"])
+
+
+def watcher_job() -> ScheduledJob:
+    return ScheduledJob(ss.HANDOFF_MODE, None, True, 30, 0)
+
+
+class WatcherNeverEndedTests(WindowsRenderTests):
+    """CS-506: removing the watcher's task never ends a sync it is running.
+
+    The watcher ends itself on the stop request the removal leaves
+    (`watcher_stop`); every adapter only takes the task away.
+    """
+
+    def windows(self, run) -> WindowsTaskScheduler:
+        return WindowsTaskScheduler(
+            run=run, user_id=USER_ID, now=lambda: self.NOW, temp_dir=self.root,
+            protected_roots=[self.root / ".codex"], schtasks="schtasks.exe",
+            powershell="powershell.exe", slot=ss.HANDOFF_SLOT,
+        )
+
+    def test_windows_deletes_the_task_without_ending_it(self) -> None:
+        run = FakeRun(lambda argv: FakeResult(0, "<Task/>") if "/Query" in argv else FakeResult(0))
+        self.assertTrue(self.windows(run).remove())
+        self.assertEqual([argv for argv in run.calls if "/End" in argv], [])
+        self.assertTrue([argv for argv in run.calls if "/Delete" in argv])
+
+    def test_a_read_only_job_is_still_ended_on_removal(self) -> None:
+        # CS-448 stays right for the jobs that write nothing of Codex's.
+        run = FakeRun(lambda argv: FakeResult(0, "<Task/>") if "/Query" in argv else FakeResult(0))
+        adapter = WindowsTaskScheduler(
+            run=run, user_id=USER_ID, now=lambda: self.NOW, temp_dir=self.root,
+            protected_roots=[self.root / ".codex"], schtasks="schtasks.exe",
+            powershell="powershell.exe", slot=ss.STATE_BACKUP_SLOT,
+        )
+        adapter.remove()
+        self.assertTrue([argv for argv in run.calls if "/End" in argv])
+
+    def test_systemd_disables_the_timer_and_leaves_the_running_service(self) -> None:
+        run = FakeRun()
+        adapter = SystemdUserScheduler(run=run, home=self.root / "home",
+                                       protected_roots=[self.root / "home" / ".codex"], systemctl="systemctl",
+                                       slot=ss.HANDOFF_SLOT)
+        adapter.unit_dir.mkdir(parents=True, exist_ok=True)
+        for name in (adapter.timer, adapter.service):
+            (adapter.unit_dir / name).write_text("[Unit]" + chr(10), encoding="utf-8")
+        self.assertTrue(adapter.remove())
+        self.assertNotIn(["systemctl", "--user", "stop", adapter.service], run.calls)
+        self.assertIn(["systemctl", "--user", "disable", "--now", adapter.timer], run.calls)
+
+    def test_launchd_never_boots_out_the_watcher_or_the_sign_in_sync(self) -> None:
+        for slot, job in ((ss.HANDOFF_SLOT, watcher_job()), (ss.LOGIN_SYNC_SLOT, login_job())):
+            with self.subTest(slot=slot):
+                run = FakeRun()
+                adapter = LaunchdScheduler(run=run, home=self.root / "home" / slot, uid=501,
+                                           protected_roots=[self.root / "home" / ".codex"],
+                                           launchctl="launchctl", slot=slot)
+                adapter.install(job, command=self.command, config_path=self.config, log_dir=self.logs)
+                adapter.install(job, command=self.command, config_path=self.config, log_dir=self.logs)
+                self.assertTrue(adapter.plist_path.is_file())
+                self.assertTrue(adapter.remove())
+                self.assertFalse(adapter.plist_path.exists())
+                # CS-548: a second apply booted the watcher out until the next sign-in.
+                self.assertEqual([argv for argv in run.calls if argv[1] in ("bootout", "bootstrap")], [])
+
+
+class LaunchdBootstrapRetryTests(SandboxCase):
+    """CS-548: `bootstrap` right after `bootout` may fail while launchd tears the old one down."""
+
+    def adapter(self, run, sleeps) -> LaunchdScheduler:
+        return LaunchdScheduler(run=run, home=self.root / "home", uid=501,
+                                protected_roots=[self.root / "home" / ".codex"], launchctl="launchctl",
+                                sleep=sleeps.append)
+
+    def test_a_bootstrap_that_fails_once_is_retried(self) -> None:
+        answers = iter([FakeResult(5, "", "Bootstrap failed: 5: Input/output error"), FakeResult(0)])
+        run = FakeRun(lambda argv: next(answers) if argv[1] == "bootstrap" else FakeResult(0))
+        sleeps: list[float] = []
+        self.adapter(run, sleeps).install(ScheduledJob("preflight", 60, False), command=self.command,
+                                          config_path=self.config, log_dir=self.logs)
+        self.assertEqual(sum(1 for argv in run.calls if argv[1] == "bootstrap"), 2)
+        self.assertEqual(len(sleeps), 1)
+
+    def test_a_bootstrap_that_keeps_failing_still_raises(self) -> None:
+        run = FakeRun(lambda argv: FakeResult(5, "", "Bootstrap failed: 5") if argv[1] == "bootstrap" else FakeResult(0))
+        sleeps: list[float] = []
+        with self.assertRaises(SchedulerError):
+            self.adapter(run, sleeps).install(ScheduledJob("preflight", 60, False), command=self.command,
+                                              config_path=self.config, log_dir=self.logs)
+        self.assertEqual(sum(1 for argv in run.calls if argv[1] == "bootstrap"), ss._BOOTSTRAP_ATTEMPTS)
 
 
 if __name__ == "__main__":

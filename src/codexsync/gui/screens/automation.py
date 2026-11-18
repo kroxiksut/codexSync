@@ -72,6 +72,10 @@ HANDOFF_FIELDS: tuple[Field, ...] = (
 LEGACY_SCHEDULER_KEYS = ("kind", "interval_minutes")
 #: How many copies the table lists; the folder may hold other machines' too.
 COPIES_SHOWN = 20
+#: Core's refusal when the tasks belong to another config (CS-545).
+OTHER_CONFIG_CODE = "AUTOMATION_OTHER_CONFIG"
+#: `AutomationView.command_problem` when no task could start this program (CS-546).
+PACKAGE_NOT_INSTALLED = "PACKAGE_NOT_INSTALLED"
 
 
 class AutomationModel(ConfigFormModel):
@@ -206,6 +210,11 @@ class AutomationScreen(ConfigFormScreen):
         tasks_layout.addLayout(row(self.task_apply, self.task_remove, self.task_refresh))
         self.task_status = label("", wrap=True)
         tasks_layout.addWidget(self.task_status)
+        #: Offered when the tasks belong to another config (CS-545).
+        self.task_replace = button(self.t("automation.replace"))
+        self.task_replace.clicked.connect(self.replace_tasks)
+        self.task_replace.setVisible(False)
+        tasks_layout.addLayout(row(self.task_replace))
         self.body.addWidget(tasks)
 
         self.build_form_actions()
@@ -361,7 +370,30 @@ class AutomationScreen(ConfigFormScreen):
             return
         self._start_task("run")
 
-    def _start_task(self, kind: str) -> None:
+    def _other_config(self) -> str | None:
+        """The config the tasks belong to, when the last apply/remove was refused for that."""
+        result = self.model.task_result
+        if result is None or result.ok or result.code != OTHER_CONFIG_CODE:
+            return None
+        if self.model.task_kind not in ("apply", "remove"):
+            return None
+        params = result.details if isinstance(result.details, dict) else {}
+        return str(params.get("path", ""))
+
+    def replace_tasks(self) -> None:
+        """Do the refused apply/remove again, taking the tasks over from the other config."""
+        other = self._other_config()
+        if other is None or self.model.task_busy:
+            return
+        if not self.host.confirm(
+            self.t("automation.replace.confirm.title"),
+            self.t("automation.replace.confirm.body", path=other),
+            self.t("automation.replace"),
+        ):
+            return
+        self._start_task(self.model.task_kind, replace=True)
+
+    def _start_task(self, kind: str, *, replace: bool = False) -> None:
         model = self.model
         if model.task_busy:
             # Reached without a click too: a save continues here, and the
@@ -374,8 +406,8 @@ class AutomationScreen(ConfigFormScreen):
         self.render()
         controller = self.host.controller
         calls = {
-            "apply": controller.apply_automation,
-            "remove": controller.remove_automation,
+            "apply": lambda: controller.apply_automation(replace_other_config=replace),
+            "remove": lambda: controller.remove_automation(replace_other_config=replace),
             "run": controller.run_automation_now,
         }
         call = calls[kind]
@@ -481,6 +513,7 @@ class AutomationScreen(ConfigFormScreen):
         self.task_status.setText(text)
         set_tone(self.task_status, tone, palette)
         self.task_status.setVisible(bool(text))
+        self.task_replace.setVisible(not busy and self._other_config() is not None)
         self._render_login_task(view, bool(self._value("scheduler", "sync_at_login")))
         self._render_backup_task(view)
 
@@ -526,6 +559,8 @@ class AutomationScreen(ConfigFormScreen):
         if view.ignored:
             names = ", ".join(self.t(f"settings.field.scheduler.{name}") for name in view.ignored)
             lines.append(self.t("automation.ignored", settings=names))
+        if view.command_problem == PACKAGE_NOT_INSTALLED:
+            lines.append(self.t("automation.command_problem.not_installed"))
         # A task 0.1 installed: named with the command that removes it, never touched.
         for task in getattr(view, "legacy_tasks", ()):
             lines.append(self.t("automation.task.legacy_01", name=task.name, command=task.remove_command))

@@ -14,20 +14,25 @@ from __future__ import annotations
 
 from collections import Counter
 import platform
+import sqlite3
 import sys
 from pathlib import Path
 
 from .codex_closer import PROVEN_CLOSERS
 from .codex_compat import check_codex_compat, read_codex_version
 from .guardian_schema import validate_global_state_references
+from .jsonl_codec import zstd_works
 from .preflight import run_preflight, visibility_counts
+from .preflight_observations import (
+    FormatObservation, GlobalStateObservation, GlobalStateStatus, observe_formats, observe_global_state,
+)
 from .process_detector import PROVEN_DETECTORS
 from .process_knowledge import default_background_process_names
 from .process_report import build_process_report, os_key
 from .project_registry import PROVEN_PROJECT_REGISTRY
 from .safety_gate import OperationKind
 from .semantic_transfer import PROVEN_LAYOUTS
-from .session_catalog import SessionState, peek_record_formats
+from .session_catalog import SessionState
 from .session_index import PROVEN_CONTRACTS
 from .sqlite_audit import PlacementStatus, read_backfill_state, read_thread_placements
 from .version import __version__
@@ -46,6 +51,9 @@ def build_issue_report(config_path: Path, operation: OperationKind = OperationKi
         "python": platform.python_version(),
         "os": {"system": platform.system(), "release": platform.release(), "machine": platform.machine(),
                "key": os_key()},
+        # What this build can read: without zstd most of Codex 0.163's chats
+        # are blocked (CS-394), and a frozen build could lose it silently (CS-553).
+        "readers": {"zstd": zstd_works(), "sqlite": sqlite3.sqlite_version},
         # Name and status only: a check's detail names paths.
         "checks": {item.name: item.status for item in preflight.checks},
         "gates": {
@@ -74,14 +82,33 @@ def build_issue_report(config_path: Path, operation: OperationKind = OperationKi
     else:
         markers = default_background_process_names().get(os_key(), [])
         names, source = [], "built-in"
+    # This separate inventory includes roles and matches absent from the
+    # preflight safety decision. It is a fresh reading, not that snapshot.
     report["process"] = _process(names, markers, source)
+    sandbox = facts.get("sandbox")
+    if sandbox is not None and sandbox.applicable:
+        # Counts and owner kinds only: a finding names a folder.
+        report["codex_sandbox"] = {
+            "checked": sandbox.checked,
+            "unchecked": sandbox.unchecked,
+            "owners": dict(sandbox.owners),
+            "unprotectable": dict(sorted(Counter(item.name for item in sandbox.findings).items())),
+            "unprotectable_owners": dict(sorted(Counter(item.owner_kind.value for item in sandbox.findings).items())),
+            "confirmed_by_codex": sum(1 for item in sandbox.findings if item.confirmed),
+            "failing_elsewhere": sandbox.failing_elsewhere,
+            "setup_error": sandbox.setup_error,
+            "probe_failed": sandbox.error is not None,
+        }
 
     local_dir = facts.get("local_dir")
     if local_dir is None:
         return report
     catalog = facts.get("catalog")
     report["codex_version"] = read_codex_version(local_dir)
-    compat = check_codex_compat(local_dir, catalog, max_state_bytes=cfg.guardian.max_state_bytes)
+    global_state = facts["observations"].global_state
+    compat = check_codex_compat(
+        local_dir, catalog, max_state_bytes=cfg.guardian.max_state_bytes, global_state=global_state,
+    )
     report["formats"] = {
         "compatible": compat.compatible,
         "unknown": [
@@ -90,9 +117,14 @@ def build_issue_report(config_path: Path, operation: OperationKind = OperationKi
         ],
         "unchecked": list(compat.unchecked),
     }
-    report["sessions"] = _sessions(local_dir, facts.get("cloud_dir"), catalog, cfg.semantic.max_jsonl_line_bytes)
+    report["sessions"] = _sessions(
+        local_dir, facts.get("cloud_dir"), catalog, cfg.semantic.max_jsonl_line_bytes,
+        cloud_formats=facts["observations"].cloud_formats,
+    )
     report["chat_list"] = _chat_list(local_dir, catalog)
-    report["global_state"] = _global_state(local_dir, cfg.guardian.max_state_bytes)
+    report["global_state"] = _global_state(
+        local_dir, cfg.guardian.max_state_bytes, global_state=global_state,
+    )
     return report
 
 
@@ -113,7 +145,10 @@ def _process(names: list[str], markers: list[str], source: str) -> dict:
     }
 
 
-def _sessions(local_dir: Path, cloud_dir: Path | None, catalog, max_line_bytes: int) -> dict:
+def _sessions(
+    local_dir: Path, cloud_dir: Path | None, catalog, max_line_bytes: int, *,
+    cloud_formats: FormatObservation | None = None,
+) -> dict:
     result: dict = {}
     if catalog is not None:
         states = Counter(item.state.value for item in catalog.descriptors)
@@ -126,10 +161,12 @@ def _sessions(local_dir: Path, cloud_dir: Path | None, catalog, max_line_bytes: 
         ).items()))
         result["codes"] = dict(sorted(codes.items()))
         result["graph_codes"] = list(catalog.codes)
-    try:
-        cloud = peek_record_formats(cloud_dir, max_line_bytes=max_line_bytes) if cloud_dir is not None else {}
+    if cloud_formats is None:
+        cloud_formats = observe_formats(cloud_dir, max_line_bytes)
+    if cloud_formats.error is None:
+        cloud = cloud_formats.formats
         result["mirror_record_formats"] = dict(sorted(Counter(cloud.values()).items()))
-    except OSError:
+    else:
         result["mirror_record_formats"] = None
     return result
 
@@ -149,16 +186,18 @@ def _chat_list(local_dir: Path, catalog) -> dict:
     return result
 
 
-def _global_state(local_dir: Path, max_state_bytes: int) -> dict:
-    source = local_dir / ".codex-global-state.json"
-    try:
-        if not source.is_file():
-            return {"present": False}
-        if source.stat().st_size > max_state_bytes:
-            return {"present": True, "too_large": True}
-        validated = validate_global_state_references(source.read_bytes())
-    except OSError:
+def _global_state(
+    local_dir: Path, max_state_bytes: int, *, global_state: GlobalStateObservation | None = None,
+) -> dict:
+    if global_state is None:
+        global_state = observe_global_state(local_dir / ".codex-global-state.json", max_state_bytes)
+    if global_state.status is GlobalStateStatus.MISSING:
+        return {"present": False}
+    if global_state.status is GlobalStateStatus.TOO_BIG:
+        return {"present": True, "too_large": True}
+    if global_state.status is GlobalStateStatus.UNREADABLE:
         return {"present": True, "readable": False}
+    validated = validate_global_state_references(global_state.payload)
     return {
         "present": True,
         "status": validated.status.value,

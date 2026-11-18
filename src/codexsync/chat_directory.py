@@ -46,6 +46,7 @@ import json
 from pathlib import Path
 
 from .guardian_schema import binding_project_id, detect_state_schema
+from .jsonl_codec import JSONL_READ_ERRORS, open_jsonl
 from .path_mapping import PathMappingError, PathMappingRule, apply_path_mapping
 from .progress import ProgressCallback, report
 from .session_catalog import (
@@ -397,11 +398,14 @@ def _under(path: str, root: str) -> bool:
 
 
 def _read_meta(path: Path, max_line_bytes: int) -> dict:
+    # Through the codec: most chats Codex has not touched for a while are
+    # `.jsonl.zst`, and reading the raw bytes found no meta in 338 of 414 here,
+    # so a spawned thread read as a chat (CS-499).
     try:
-        with path.open("rb") as handle:
+        with open_jsonl(path) as handle:
             line = handle.readline(max_line_bytes + 1)
         record = json.loads(line)
-    except (OSError, ValueError):
+    except (*JSONL_READ_ERRORS, ValueError):
         return {}
     payload = record.get("payload") if isinstance(record, dict) else None
     return payload if isinstance(payload, dict) else {}
@@ -417,7 +421,7 @@ def _read_title(path: Path, max_line_bytes: int) -> str | None:
     """
     fallback: str | None = None
     try:
-        with path.open("rb") as handle:
+        with open_jsonl(path) as handle:
             for _ in range(TITLE_SCAN_RECORDS):
                 line = handle.readline(max_line_bytes + 1)
                 if not line:
@@ -452,8 +456,9 @@ def _read_title(path: Path, max_line_bytes: int) -> str | None:
                     text = _clean(_first_text(payload.get("content")))
                     if text and not text.startswith("<"):
                         fallback = text
-    except OSError:
-        return None
+    except JSONL_READ_ERRORS:
+        # A damaged or half-written container: whatever was found so far.
+        return fallback
     return fallback
 
 

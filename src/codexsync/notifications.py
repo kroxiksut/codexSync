@@ -35,6 +35,7 @@ _FALLBACK: dict[str, str] = {
     "notify.handed_off": "Your work is in the cloud copy. You can continue on another machine once it has synced.",
     "notify.loaded": "Work from {machine} is loaded. You can start Codex.",
     "notify.loaded_partial": "Work from {machine} is loaded except {count} chat(s), which stay in the cloud copy: codexSync cannot place chats in Codex yet.",
+    "notify.loaded_held": "Work from {machine} is loaded except {count} chat(s) your working set keeps in the cloud copy.",
     "notify.not_delivered": "The handoff from {machine} has not fully arrived ({arrived} of {total} files). Nothing was loaded; do not start Codex here yet.",
     "notify.conflict": "The handoff stopped on a conflict; nothing was written. Open CodexSync to decide.",
     "notify.failed": "The handoff did not finish: {reason}. Open CodexSync for details.",

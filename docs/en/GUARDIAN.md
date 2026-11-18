@@ -98,6 +98,11 @@ codexsync -c config.toml guardian accept --confirm <plan-id>
   (a new Codex build, a baseline older than schema tracking), the watcher cannot
   compare the two and holds every state back. Such a state can be accepted when it
   passes every check under its own schema (`BASELINE_SCHEMA_CHANGED`).
+- A state with no project and no binding has no schema to compare: once every
+  project is gone the file looks like the oldest shape, simply because nothing
+  of the newer one is left in it. So losing every project is compared by counts
+  and held back as a drop, never offered as a schema change, and `guardian
+  restore` may put the projects back from a snapshot taken before.
 - The plan id pins the drop, not the file's bytes, so it can be confirmed while
   Codex keeps rewriting the file.
 - The snapshot is marked `SHRINK_ACCEPTED` (or `SCHEMA_CHANGE_ACCEPTED`), and

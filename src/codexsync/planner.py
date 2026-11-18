@@ -4,7 +4,16 @@ from collections.abc import Sequence
 import hashlib
 from pathlib import Path
 
-from .models import CopyAction, DeleteAction, FileMeta, SnapshotFingerprint, SyncManifest, SyncPlan
+from .models import (
+    CopyAction,
+    DeleteAction,
+    DestinationPrecondition,
+    FileMeta,
+    SnapshotFingerprint,
+    SyncManifest,
+    SyncPlan,
+)
+from .work_scheduler import WorkScheduler
 
 #: Directions a plan may be built for (`D-012`).
 DIRECTIONS = ("bidirectional", "to_cloud", "to_local")
@@ -23,6 +32,8 @@ def build_sync_plan(
     direction: str = "bidirectional",
     delete_policy: str = "never",
     include_roots: Sequence[str] = (),
+    *,
+    scheduler: WorkScheduler | None = None,
 ) -> SyncPlan:
     """Build the copy plan, with conflict detection.
 
@@ -45,6 +56,21 @@ def build_sync_plan(
     prev_files = previous_manifest.files if previous_manifest else {}
     case_collisions = _case_collisions(all_paths)
     plan.conflicts.extend(sorted(case_collisions))
+    # Only the ambiguous content reads fan out. Decisions and action ordering
+    # stay on the caller, before any journal or mutation stage is created.
+    same_content: dict[str, bool] = {}
+    if scheduler is not None and compare_mode == "mtime_hash_fallback":
+        ambiguous = [
+            rel for rel in all_paths
+            if rel not in case_collisions and rel in local_index and rel in cloud_index
+            and local_index[rel].size == cloud_index[rel].size
+            and abs(local_index[rel].mtime_ns - cloud_index[rel].mtime_ns) <= tolerance_ns
+        ]
+
+        def compare(rel: str) -> tuple[str, bool]:
+            return rel, _same_content(local_index[rel].abs_path, cloud_index[rel].abs_path)
+
+        same_content = dict(scheduler.map_read(compare, ambiguous, large_file=lambda _rel: True))
 
     for rel in all_paths:
         if rel in case_collisions:
@@ -55,26 +81,27 @@ def build_sync_plan(
 
         if local_meta and not cloud_meta:
             if _deletion_is_proven(local_meta, prev_entry, tolerance_ns, delete_policy, side="cloud"):
-                plan.deletions.append(DeleteAction(local_meta.abs_path, rel, "local"))
+                plan.deletions.append(_delete_action(local_meta, rel, "local"))
             elif _deletion_is_disputed(prev_entry, delete_policy, side="cloud"):
                 plan.conflicts.append(rel)
             else:
-                plan.to_cloud.append(CopyAction(local_meta.abs_path, cloud_root / rel, rel))
+                plan.to_cloud.append(_copy_action(local_meta, cloud_root / rel, rel, cloud_meta))
             continue
 
         if cloud_meta and not local_meta:
             if _deletion_is_proven(cloud_meta, prev_entry, tolerance_ns, delete_policy, side="local"):
-                plan.deletions.append(DeleteAction(cloud_meta.abs_path, rel, "cloud"))
+                plan.deletions.append(_delete_action(cloud_meta, rel, "cloud"))
             elif _deletion_is_disputed(prev_entry, delete_policy, side="local"):
                 plan.conflicts.append(rel)
             else:
-                plan.to_local.append(CopyAction(cloud_meta.abs_path, local_root / rel, rel))
+                plan.to_local.append(_copy_action(cloud_meta, local_root / rel, rel, local_meta))
             continue
 
         if not local_meta or not cloud_meta:
             continue
 
-        if _same_file(local_meta, cloud_meta, tolerance_ns, compare_mode):
+        if (same_content[rel] if rel in same_content
+                else _same_file(local_meta, cloud_meta, tolerance_ns, compare_mode)):
             continue
 
         if prev_entry:
@@ -96,11 +123,11 @@ def build_sync_plan(
                 continue
 
             if local_changed:
-                plan.to_cloud.append(CopyAction(local_meta.abs_path, cloud_root / rel, rel))
+                plan.to_cloud.append(_copy_action(local_meta, cloud_root / rel, rel, cloud_meta))
                 continue
 
             if cloud_changed:
-                plan.to_local.append(CopyAction(cloud_meta.abs_path, local_root / rel, rel))
+                plan.to_local.append(_copy_action(cloud_meta, local_root / rel, rel, local_meta))
                 continue
 
         if abs(local_meta.mtime_ns - cloud_meta.mtime_ns) <= tolerance_ns:
@@ -118,9 +145,9 @@ def build_sync_plan(
             continue
 
         if local_meta.mtime_ns > cloud_meta.mtime_ns:
-            plan.to_cloud.append(CopyAction(local_meta.abs_path, cloud_root / rel, rel))
+            plan.to_cloud.append(_copy_action(local_meta, cloud_root / rel, rel, cloud_meta))
         else:
-            plan.to_local.append(CopyAction(cloud_meta.abs_path, local_root / rel, rel))
+            plan.to_local.append(_copy_action(cloud_meta, local_root / rel, rel, local_meta))
 
     _hold_deletions_from_empty_roots(plan, local_index, cloud_index, include_roots)
     return _apply_direction(plan, direction)
@@ -263,16 +290,16 @@ def _resolve_conflict(
     conflict_policy: str,
 ) -> bool:
     if conflict_policy == "prefer_cloud":
-        plan.to_local.append(CopyAction(cloud_meta.abs_path, local_root / rel, rel))
+        plan.to_local.append(_copy_action(cloud_meta, local_root / rel, rel, local_meta))
         return True
     if conflict_policy == "prefer_local":
-        plan.to_cloud.append(CopyAction(local_meta.abs_path, cloud_root / rel, rel))
+        plan.to_cloud.append(_copy_action(local_meta, cloud_root / rel, rel, cloud_meta))
         return True
     if conflict_policy == "prefer_newer_mtime":
         if local_meta.mtime_ns > cloud_meta.mtime_ns:
-            plan.to_cloud.append(CopyAction(local_meta.abs_path, cloud_root / rel, rel))
+            plan.to_cloud.append(_copy_action(local_meta, cloud_root / rel, rel, cloud_meta))
         else:
-            plan.to_local.append(CopyAction(cloud_meta.abs_path, local_root / rel, rel))
+            plan.to_local.append(_copy_action(cloud_meta, local_root / rel, rel, local_meta))
         return True
     return False
 
@@ -289,10 +316,10 @@ def _resolve_equal_mtime(
     if equal_mtime_action == "skip":
         return True
     if equal_mtime_action == "prefer_local":
-        plan.to_cloud.append(CopyAction(local_meta.abs_path, cloud_root / rel, rel))
+        plan.to_cloud.append(_copy_action(local_meta, cloud_root / rel, rel, cloud_meta))
         return True
     if equal_mtime_action == "prefer_cloud":
-        plan.to_local.append(CopyAction(cloud_meta.abs_path, local_root / rel, rel))
+        plan.to_local.append(_copy_action(cloud_meta, local_root / rel, rel, local_meta))
         return True
     if equal_mtime_action == "manual_abort":
         return False
@@ -308,6 +335,46 @@ def _same_file(local_meta: FileMeta, cloud_meta: FileMeta, tolerance_ns: int, co
     if compare_mode == "mtime_hash_fallback":
         return _same_content(local_meta.abs_path, cloud_meta.abs_path)
     return True
+
+
+def _precondition(meta: FileMeta | None) -> DestinationPrecondition | None:
+    if meta is None:
+        return DestinationPrecondition(exists=False)
+    # Production indexes come from ``scan_tree`` and always carry filesystem
+    # identity. Synthetic/legacy FileMeta values do not; binding an action to
+    # their invented timestamp would turn compatibility callers into failures.
+    if meta.device is None or meta.inode is None:
+        return None
+    return DestinationPrecondition(
+        exists=True,
+        mtime_ns=meta.mtime_ns,
+        size=meta.size,
+        device=meta.device,
+        inode=meta.inode,
+    )
+
+
+def _copy_action(
+    source: FileMeta,
+    destination: Path,
+    relative_path: str,
+    destination_meta: FileMeta | None,
+) -> CopyAction:
+    return CopyAction(
+        source.abs_path,
+        destination,
+        relative_path,
+        destination_precondition=_precondition(destination_meta),
+    )
+
+
+def _delete_action(meta: FileMeta, relative_path: str, side: str) -> DeleteAction:
+    return DeleteAction(
+        meta.abs_path,
+        relative_path,
+        side,
+        destination_precondition=_precondition(meta),
+    )
 
 
 def _has_side_changed(meta: FileMeta, previous: SnapshotFingerprint | None, tolerance_ns: int) -> bool:

@@ -63,7 +63,13 @@ A session held back is reported as `OUT_OF_SCOPE`. It blocks nothing, and it
 carries what it would have been (`WOULD_BE_…`), so the summary says what is held
 back instead of omitting it. A set that covers no session at all — a project
 with no chats yet — writes nothing into `.codex` and is marked
-`WORKING_SET_MATCHES_NOTHING`; the mirror is still written in full.
+`WORKING_SET_MATCHES_NOTHING`; the mirror is still written in full. So does
+a set whose projects or chats no longer match anything — a project renamed,
+re-created by Codex under a new id, or a name typed wrong: the set stays a
+choice and never turns into "carry everything". Such names stay in the stored
+set; `sessions scope --expand` lists them as "not found now", `sessions scan`
+counts them in `working_set.not_found`, and the window says them under the
+working set.
 
 A chat whose working folder does not exist on this machine — usually a project
 kept outside the synced folder — is marked `CWD_ABSENT_HERE`, and

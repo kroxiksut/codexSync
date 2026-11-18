@@ -326,6 +326,27 @@ class FullSyncTests(_Workspace):
         shutil.copy2(on_desktop / "chapter.md", on_laptop / "chapter.md")
         self.assertEqual(check_project_files(laptop).warnings, ())
 
+    def test_a_project_kept_under_the_other_systems_root_does_not_stop_the_check(self) -> None:
+        # CS-498: the mapper says "not placed" for such a root; the project was
+        # carried with it as it is (D-034), so it is compared, and the check
+        # still publishes.
+        foreign = "D:\\work\\book" if os.name != "nt" else "/home/u/book"
+        desktop, desktop_codex = self.machine("desktop")
+        laptop, laptop_codex = self.machine("laptop")
+        for codex, project_id in ((desktop_codex, "book-there"), (laptop_codex, "book-here")):
+            state = {
+                "local-projects": {project_id: {"id": project_id, "name": "book", "rootPaths": [foreign]}},
+                "project-order": [project_id], "pinned-project-ids": [], "thread-project-assignments": {},
+            }
+            (codex / ".codex-global-state.json").write_text(json.dumps(state), encoding="utf-8")
+        check_project_files(desktop, publish=True)
+
+        report = check_project_files(laptop, publish=True)
+
+        self.assertTrue(report.published)
+        self.assertIn("laptop", read_files_board(self.workspace / "project-files").publications)
+        self.assertEqual([(item.project_id, item.peer) for item in report.items], [("book-here", "desktop")])
+
     def test_files_and_folders_that_come_and_go_are_followed(self) -> None:
         desktop, desktop_codex = self.machine("desktop")
         laptop, laptop_codex = self.machine("laptop")

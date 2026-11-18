@@ -69,12 +69,38 @@ class MenuEntryTests(unittest.TestCase):
             if key != "Exec":
                 self.assertEqual(written[key], value, key)
 
-    def test_an_appimage_entry_starts_the_appimage_file(self) -> None:
-        image = self.root / "CodexSync.AppImage"
+    def _appimage(self, name: str = "CodexSync") -> tuple[Path, Path]:
+        image = self.root / f"{name}.AppImage"
         image.write_bytes(b"")
+        mount = self.root / "tmp" / f".mount_{name}"
+        (mount / "usr" / "lib").mkdir(parents=True)
+        return image, mount
+
+    def test_an_appimage_entry_starts_the_appimage_file(self) -> None:
+        image, mount = self._appimage()
         self.env["APPIMAGE"] = str(image)
-        status = self.call(shortcut.install_shortcut, frozen=True, executable="/tmp/.mount_x/usr/lib/codexsync-gui")
+        self.env["APPDIR"] = str(mount)
+        inner = mount / "usr" / "lib" / "codexsync-gui"
+        status = self.call(shortcut.install_shortcut, frozen=True, executable=str(inner))
         self.assertEqual(status.program, image)
+
+    def test_an_appimage_variable_inherited_from_another_program_is_not_believed(self) -> None:
+        # A terminal inside an editor that is itself an AppImage (CS-505): its
+        # APPIMAGE/APPDIR name the editor, and this codexsync is not inside it.
+        image, mount = self._appimage("Cursor")
+        self.env["APPIMAGE"] = str(image)
+        self.env["APPDIR"] = str(mount)
+        for frozen in (False, True):
+            with self.subTest(frozen=frozen):
+                status = self.call(shortcut.install_shortcut, frozen=frozen)
+                self.assertEqual(status.program, self.program)
+                self.assertNotIn("Cursor", self.entry()["Exec"])
+
+    def test_an_appimage_without_its_mount_folder_is_not_believed(self) -> None:
+        image, _mount = self._appimage()
+        self.env["APPIMAGE"] = str(image)
+        status = self.call(shortcut.install_shortcut)
+        self.assertEqual(status.program, self.program)
 
     def test_install_again_updates_its_own_entry(self) -> None:
         self.call(shortcut.install_shortcut)
@@ -141,6 +167,44 @@ class MenuEntryTests(unittest.TestCase):
         status.icon.write_bytes(b"someone else's icon")
         self.call(shortcut.remove_shortcut)
         self.assertEqual(status.icon.read_bytes(), b"someone else's icon")
+
+    def test_an_icon_of_that_name_written_by_someone_else_is_never_overwritten(self) -> None:
+        # CS-547: the icon used to be written before any ownership check.
+        icon = self.data / "icons" / "hicolor" / "256x256" / "apps" / "codexsync.png"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"another program's icon")
+        status = self.call(shortcut.install_shortcut)
+        self.assertEqual(icon.read_bytes(), b"another program's icon")
+        self.assertTrue(status.ours)
+        self.assertEqual(self.entry()["X-CodexSync-Icon-SHA256"], "")
+        self.call(shortcut.remove_shortcut)
+        self.assertEqual(icon.read_bytes(), b"another program's icon")
+
+    def test_an_update_replaces_the_icon_its_own_entry_recorded(self) -> None:
+        status = self.call(shortcut.install_shortcut)
+        old = b"the icon an older version wrote"
+        status.icon.write_bytes(old)
+        text = status.entry.read_text(encoding="utf-8")
+        fresh = hashlib.sha256((shortcut.PACKAGED / "codexsync.png").read_bytes()).hexdigest()
+        status.entry.write_text(text.replace(fresh, hashlib.sha256(old).hexdigest()), encoding="utf-8")
+        self.call(shortcut.install_shortcut)
+        self.assertEqual(status.icon.read_bytes(), (shortcut.PACKAGED / "codexsync.png").read_bytes())
+        self.assertEqual(self.entry()["X-CodexSync-Icon-SHA256"], fresh)
+
+    def test_the_marks_stay_in_the_desktop_entry_group(self) -> None:
+        packaged = (shortcut.PACKAGED / "codexsync.desktop").read_text(encoding="utf-8")
+        with_action = packaged + "\n[Desktop Action Sync]\nName=Sync\nExec=codexsync-gui sync\n"
+        original = shortcut._packaged
+        shortcut._packaged = lambda name: with_action.encode("utf-8") if name.endswith(".desktop") else original(name)
+        try:
+            text = shortcut.render_entry(PurePosixPath("/opt/c/codexsync-gui"), "ab" * 32)
+        finally:
+            shortcut._packaged = original
+        main, action = text.split("[Desktop Action Sync]")
+        self.assertIn("X-CodexSync-Shortcut=true", main)
+        self.assertNotIn("X-CodexSync", action)
+        self.assertIn("Exec=codexsync-gui sync", action, "an action's Exec is not ours to change")
+        self.assertNotIn("TryExec", action)
 
     def test_a_relative_data_home_is_ignored_as_the_spec_says(self) -> None:
         self.assertEqual(shortcut.data_home({"XDG_DATA_HOME": "relative"}), Path.home() / ".local" / "share")

@@ -45,12 +45,11 @@ an error.
 ## Install
 
 The core and the command line have no dependencies. The window is an optional
-extra. While 0.2 is an alpha, pip needs `--pre`; without it, it installs 0.1.
-`--upgrade` makes the same command replace an installed 0.1.
+extra. `--upgrade` makes the same command replace an installed 0.1.
 
 ```powershell
-python -m pip install --upgrade --pre "codexsync[gui]"    # the command line and the window (PySide6)
-python -m pip install --upgrade --pre codexsync           # the command line only
+python -m pip install --upgrade "codexsync[gui]"    # the command line and the window (PySide6)
+python -m pip install --upgrade codexsync           # the command line only
 ```
 
 On Windows you can instead download a build from
@@ -65,11 +64,11 @@ needs Python installed:
 There is no 32-bit build: Codex itself is published for x64 and ARM64 only.
 
 **With Node.js**, on Windows or Linux (x64 and ARM64), the same builds come
-through npm from the next release on, the way Codex CLI is installed:
+through npm, the way Codex CLI is installed:
 
 ```sh
-npm install -g codexsync      # both programs, codexsync and codexsync-gui; the same command updates
-npm uninstall -g codexsync    # remove
+npm install -g @kroxut/codexsync      # both programs, codexsync and codexsync-gui; the same command updates
+npm uninstall -g @kroxut/codexsync    # remove
 ```
 
 Install it globally rather than running it through `npx`: a scheduled task
@@ -92,23 +91,25 @@ Every way below works and none is preferred; choose what suits the machine.
 With root and `apt` or `dnf`, a package; without root, the AppImage or the
 `tar.gz`; with Python 3.11 or later, `pipx` or a virtual environment. The
 packages, the AppImage and the `tar.gz` are on the
-[release page](https://github.com/kroxiksut/codexSync/releases) from the next
-release on, for x64 (glibc 2.35 or later: Ubuntu 22.04, Debian 12, Fedora 36
+[release page](https://github.com/kroxiksut/codexSync/releases), for x64 (glibc 2.35 or later: Ubuntu 22.04, Debian 12, Fedora 36
 and newer) and ARM64 (glibc 2.39 or later: Ubuntu 24.04, Debian 13 and newer).
 Each holds both programs, `codexsync` and `codexsync-gui`.
+A file is named after the release tag and the processor, such as
+`codexsync-v0.2.0-linux-amd64.deb` (`arm64` for ARM64); below, `<tag>` stands for
+the tag.
 
 **A .deb package** (Ubuntu, Debian and their relatives) installs into
 `/opt/codexsync` with both commands on `PATH` and a menu entry:
 
 ```sh
-sudo apt install ./codexsync-<version>-linux-amd64.deb   # install; the same with a newer file updates
+sudo apt install ./codexsync-<tag>-linux-amd64.deb   # install; the same with a newer file updates
 sudo apt remove codexsync                                # remove
 ```
 
 **An .rpm package** (Fedora and its relatives), the same way:
 
 ```sh
-sudo dnf install ./codexsync-<version>-linux-amd64.rpm   # install; the same with a newer file updates
+sudo dnf install ./codexsync-<tag>-linux-amd64.rpm   # install; the same with a newer file updates
 sudo dnf remove codexsync                                # remove
 ```
 
@@ -116,9 +117,9 @@ sudo dnf remove codexsync                                # remove
 given a command, the command line:
 
 ```sh
-chmod +x codexsync-<version>-linux-amd64.AppImage
-./codexsync-<version>-linux-amd64.AppImage                          # the window
-./codexsync-<version>-linux-amd64.AppImage -c config.toml doctor    # the command line
+chmod +x codexsync-<tag>-linux-amd64.AppImage
+./codexsync-<tag>-linux-amd64.AppImage                          # the window
+./codexsync-<tag>-linux-amd64.AppImage -c config.toml doctor    # the command line
 ```
 
 To update, put the new file at the same path under the same name (scheduled
@@ -131,7 +132,7 @@ name:
 
 ```sh
 mkdir -p ~/.local/opt/codexsync
-tar -xzf codexsync-<version>-linux-amd64.tar.gz -C ~/.local/opt/codexsync --strip-components=1   # install
+tar -xzf codexsync-<tag>-linux-amd64.tar.gz -C ~/.local/opt/codexsync --strip-components=1   # install
 rm -rf ~/.local/opt/codexsync/* && tar -xzf <newer file> -C ~/.local/opt/codexsync --strip-components=1   # update
 rm -rf ~/.local/opt/codexsync                                                                     # remove
 ```
@@ -144,9 +145,9 @@ call them by name, link both into `~/.local/bin`
 pipx` or `sudo dnf install pipx`, then `pipx ensurepath`):
 
 ```sh
-pipx install --pip-args=--pre "codexsync[gui]"   # the window and the command line; without [gui], the command line only
-pipx upgrade --pip-args=--pre codexsync          # update
-pipx uninstall codexsync                         # remove
+pipx install "codexsync[gui]"   # the window and the command line; without [gui], the command line only
+pipx upgrade codexsync          # update
+pipx uninstall codexsync        # remove
 ```
 
 **A virtual environment by hand** — the system Python refuses a plain
@@ -155,13 +156,12 @@ first:
 
 ```sh
 python3 -m venv ~/.venvs/codexsync
-~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"            # install
-~/.venvs/codexsync/bin/pip install --upgrade --pre "codexsync[gui]"  # update
-rm -rf ~/.venvs/codexsync                                            # remove
+~/.venvs/codexsync/bin/pip install "codexsync[gui]"            # install
+~/.venvs/codexsync/bin/pip install --upgrade "codexsync[gui]"  # update
+rm -rf ~/.venvs/codexsync                                      # remove
 ```
 
 Put `~/.venvs/codexsync/bin` on `PATH`, or call the commands by that path.
-`--pre` is needed while 0.2 is a pre-release.
 
 **The applications menu.** A `.deb` or `.rpm` puts CodexSync in it; pipx, a
 virtual environment, the AppImage and the `tar.gz` do not. For those,

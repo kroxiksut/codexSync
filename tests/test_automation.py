@@ -52,7 +52,10 @@ class FakeScheduler:
         matches = None
         if expected is not None:
             matches = (expected.job, expected.command, expected.config_path, expected.log_dir) == (job, command, config_path, log_dir)
-        return SchedulerStatus(installed=True, enabled=True, definition_matches=matches)
+        return SchedulerStatus(
+            installed=True, enabled=True, definition_matches=matches,
+            installed_command=(*command, "-c", str(config_path)),
+        )
 
 
 class AutomationTests(unittest.TestCase):
@@ -218,6 +221,59 @@ class AutomationTests(unittest.TestCase):
             apply_automation(self.config, scheduler=fake, login_scheduler=self.login, backup_scheduler=self.backup, handoff_scheduler=self.handoff)
             self.assertEqual(fake.installed[0].mode, "preflight")
 
+    def _other_config(self) -> Path:
+        other = self.root / "other" / "config.toml"
+        (self.root / "other" / "codex").mkdir(parents=True)
+        create_config(
+            other, machine_id="laptop", local_state_dir=str(self.root / "other" / "codex"),
+            workspace_root_dir=str(self.root / "other" / "workspace"),
+        )
+        return other
+
+    def _adapters(self, periodic=None) -> dict:
+        return {
+            "scheduler": periodic or FakeScheduler(), "login_scheduler": self.login,
+            "backup_scheduler": self.backup, "handoff_scheduler": self.handoff,
+        }
+
+    def test_tasks_another_existing_config_installed_are_not_taken_over_silently(self) -> None:
+        """CS-545: one set of tasks per account; apply from a second config removed the first's watcher."""
+        other = self._other_config()
+        self.handoff.installed = (mock.Mock(), ("/usr/bin/codexsync",), other.resolve(), self.root / "logs")
+        for call in (apply_automation, remove_automation):
+            with self.subTest(call=call.__name__):
+                with self.assertRaises(FailSafeError) as caught:
+                    call(self.config, **self._adapters())
+                self.assertEqual(caught.exception.code, "AUTOMATION_OTHER_CONFIG")
+                self.assertEqual(caught.exception.params, {"path": str(other.resolve())})
+                self.assertIsNotNone(self.handoff.installed, "refused before any task was touched")
+                self.assertEqual(self.handoff.removed, 0)
+        apply_automation(self.config, replace_other_config=True, **self._adapters())
+        self.assertIsNone(self.handoff.installed, "asked for: this config's tasks now")
+
+    def test_a_task_whose_config_is_gone_is_replaced_without_asking(self) -> None:
+        gone = self.root / "gone" / "config.toml"
+        self.handoff.installed = (mock.Mock(), ("/usr/bin/codexsync",), gone, self.root / "logs")
+        apply_automation(self.config, **self._adapters())
+        self.assertIsNone(self.handoff.installed)
+
+    def test_removing_the_watcher_asks_it_to_end_instead_of_ending_it(self) -> None:
+        """CS-506: the running watcher ends itself between runs, in both configs' temp folders."""
+        from codexsync.config import load_config
+        from codexsync.watcher_stop import stop_request_path
+
+        other = self._other_config()
+        self.handoff.installed = (mock.Mock(), ("/usr/bin/codexsync",), other.resolve(), self.root / "logs")
+        remove_automation(self.config, replace_other_config=True, **self._adapters())
+        for config in (self.config, other):
+            self.assertTrue(stop_request_path(load_config(config).paths.temp_dir).is_file(), config)
+
+        # Nothing installed: nothing to ask, and nothing is written.
+        here = stop_request_path(load_config(self.config).paths.temp_dir)
+        here.unlink()
+        apply_automation(self.config, **self._adapters())
+        self.assertFalse(here.exists())
+
     def test_run_now_calls_what_the_scheduled_command_calls(self) -> None:
         self._set(mode="preflight")
         with mock.patch("codexsync.app.run_preflight") as preflight:
@@ -227,6 +283,7 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(preflight.call_args.kwargs["operation"].name, "SYNC")
 
         self._set(mode="sync_dry_run")
+        self._scope("settings")
         context = mock.Mock()
         context.plan.action_count = 7
         with mock.patch("codexsync.app.build_context", return_value=context) as build, \
@@ -235,6 +292,36 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(build.call_args.kwargs["enforce_safety"], True, "a scheduled dry run still goes through the gate")
         self.assertEqual(sync.call_args.kwargs["dry_run"], True)
         self.assertEqual((ran.status, ran.actions), ("DRY_RUN_FINISHED", 7))
+
+    def _scope(self, scope: str) -> None:
+        text = set_value(self.config.read_text(encoding="utf-8"), "sync", "scope", scope)
+        self.config.write_text(text, encoding="utf-8")
+
+    def test_run_now_of_a_dry_run_follows_the_sync_scope_like_the_task(self) -> None:
+        """CS-544: at scope "full" the task's `sync --dry-run` previews the whole sync."""
+        self._set(mode="sync_dry_run")
+        self._scope("full")
+        preview = mock.Mock()
+        preview.files.plan.action_count = 3
+        with mock.patch("codexsync.app.preview_full_sync", return_value=preview) as full, \
+                mock.patch("codexsync.app.build_context") as build, \
+                mock.patch("codexsync.app.run_sync") as sync:
+            ran = run_automation_job(self.config)
+        full.assert_called_once()
+        build.assert_not_called()
+        self.assertIs(sync.call_args.args[0], preview.files)
+        self.assertEqual(sync.call_args.kwargs["dry_run"], True)
+        self.assertEqual((ran.status, ran.actions), ("DRY_RUN_FINISHED", 3))
+
+        self._scope("settings")
+        context = mock.Mock()
+        context.plan.action_count = 2
+        with mock.patch("codexsync.app.preview_full_sync") as full, \
+                mock.patch("codexsync.app.build_context", return_value=context), \
+                mock.patch("codexsync.app.run_sync"):
+            ran = run_automation_job(self.config)
+        full.assert_not_called()
+        self.assertEqual(ran.actions, 2)
 
 
 if __name__ == "__main__":

@@ -8,42 +8,50 @@ directory.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 import json
 import logging
 from pathlib import Path
 
 from .codex_compat import CHAT_LIST, CHATS, GLOBAL_STATE, REBUILD_STATUS, CompatPart, check_codex_compat
 from .codex_health import Severity, diagnose_catalogue, measure_chat_files
-from .config import load_config
+from .codex_sandbox import SHARED_FOLDER_NAMES, OwnerKind, SandboxReport, check_sandbox_folders
+from .config import load_config_text
 from .guardian_models import (
     GUARDIAN_COMMITTED_NAME,
     GUARDIAN_LATEST_GOOD_DIR_NAME,
     GUARDIAN_SNAPSHOTS_DIR_NAME,
     ValidationStatus,
+    normalize_machine_id,
 )
-from .guardian_schema import validate_global_state_references
+from .guardian_schema import detect_state_schema, project_root_paths, validate_global_state_references
+from .guardian_shrink import BASELINE_SCHEMA_MISMATCH, BINDING_COUNT_DROP, PROJECT_COUNT_DROP, UNKNOWN_SCHEMA
 from .jsonl_codec import logical_relative_path
 from .manifest import load_manifest
 from .models import AppConfig
-from .config_migrate import BLOCKER, inspect_config, read_config_source
+from .config_migrate import inspect_config
 from .exceptions import FailSafeError
 from .mutation_journal import JournalStore
 from .runtime import _make_safety_gate
 from .process_knowledge import CLI_DAEMON_STOP_COMMAND
-from .safety_gate import OperationKind, ProcessState
+from .preflight_observations import (
+    ConfigObservation, FormatObservation, GlobalStateObservation, GlobalStateStatus, IndexObservation,
+    SessionObservation, collect_preflight_observations, observe_config_source, observe_formats,
+    observe_global_state, observe_session_index,
+)
+from .safety_gate import OperationKind, ProcessState, SafetyDecision
 from .session_catalog import (
     RECORD_FORMAT_UNSUPPORTED,
     SessionCatalog,
     SessionState,
     latest_page,
-    peek_record_formats,
-    scan_sessions,
 )
-from .session_index import SESSION_INDEX_FILE, parse_session_index
+from .session_index import SESSION_INDEX_FILE
 from .sqlite_audit import PlacementStatus, audit_sqlite, read_backfill_state, read_thread_placements
 from .project_registry import PROVEN_PROJECT_REGISTRY, registry_note
 from .state_locator import locate_local_state_dir
 from .sync_engine import STAGE_DIR_PREFIXES
+from .work_scheduler import WorkScheduler
 
 LOG = logging.getLogger(__name__)
 
@@ -69,6 +77,10 @@ DETAIL_CODES = frozenset({
     "codex_process.cli_daemon",
     "codex_startup.not_checked", "codex_startup.state", "codex_startup.finding", "codex_startup.broken",
     "codex_startup.warning",
+    "codex_sandbox.not_applicable", "codex_sandbox.not_checked", "codex_sandbox.clear",
+    "codex_sandbox.owned_by_sandbox", "codex_sandbox.owned_by_admins", "codex_sandbox.owned_by_other",
+    "codex_sandbox.unreadable", "codex_sandbox.confirmed", "codex_sandbox.consequence", "codex_sandbox.fix",
+    "codex_sandbox.shared", "codex_sandbox.elsewhere", "codex_sandbox.setup_error", "codex_sandbox.unchecked",
     "session_catalog.counts", "session_catalog.unavailable",
     "session_visibility.no_catalogue", "session_visibility.unreadable", "session_visibility.hidden",
     "session_visibility.all_listed",
@@ -79,17 +91,18 @@ DETAIL_CODES = frozenset({
     "global_state_schema.no_file", "global_state_schema.too_big", "global_state_schema.unreadable",
     "global_state_schema.ok", "global_state_schema.codes", "global_state_schema.rejected",
     "guardian_latest_good.no_machine", "guardian_latest_good.no_pointer", "guardian_latest_good.pointer_unreadable",
-    "guardian_latest_good.missing_snapshot", "guardian_latest_good.stuck", "guardian_latest_good.ok",
+    "guardian_latest_good.missing_snapshot", "guardian_latest_good.stuck", "guardian_latest_good.stuck_schema",
+    "guardian_latest_good.ok",
     "mutation_journal.unreadable_journal", "mutation_journal.not_read", "mutation_journal.pending",
     "mutation_journal.none",
     "orphan_temp_files.no_folder", "orphan_temp_files.found", "orphan_temp_files.none",
 })
 
 
-def _part(code: str, **params: object) -> Part:
-    if code not in DETAIL_CODES:
-        raise ValueError(f"unknown check detail code: {code}")
-    return code, params
+def _part(key: str, **params: object) -> Part:
+    if key not in DETAIL_CODES:
+        raise ValueError(f"unknown check detail code: {key}")
+    return key, params
 
 
 @dataclass(slots=True, frozen=True)
@@ -125,15 +138,23 @@ class PreflightReport:
 
 def run_preflight(
     config_path: Path, operation: OperationKind = OperationKind.DOCTOR, *, facts: dict | None = None,
+    scheduler: WorkScheduler | None = None,
 ) -> PreflightReport:
     """``facts``, when given, receives what the checks read (`cfg`, `local_dir`,
-    `cloud_dir`, `catalog`), so `doctor --report` counts from the same reading
-    instead of scanning every chat file a second time (CS-393)."""
+    `cloud_dir`, `catalog`, `observations`), so `doctor --report` counts from
+    the same reading instead of scanning every chat file a second time
+    (CS-393). Observations freeze config, process safety, global state and
+    session files. SQLite and Guardian have independent capture boundaries.
+    Observation-backed checks may share the caller's bounded scheduler after
+    capture; live reads and dependent checks stay on the coordinator thread."""
     checks: list[PreflightCheckResult] = []
     facts = facts if facts is not None else {}
 
+    config_source = observe_config_source(config_path)
     try:
-        cfg = load_config(config_path)
+        if config_source.error is not None:
+            raise ValueError(config_source.error)
+        cfg = load_config_text(config_path, config_source.text)
         facts["cfg"] = cfg
         checks.append(PreflightCheckResult(
             "config", "PASS", f"Loaded config from {config_path}", (_part("config.loaded", path=str(config_path)),),
@@ -159,9 +180,6 @@ def run_preflight(
             cloud_dir = cfg.paths.cloud_root_dir.expanduser()
     facts["local_dir"], facts["cloud_dir"] = local_dir, cloud_dir
 
-    checks.append(_check_config_compat(config_path))
-    checks.append(_check_sync_rules(cfg))
-    checks.append(_check_project_registry())
     if local_dir is not None:
         checks.append(_check_path_available("local_state", local_dir))
     if cloud_dir is not None:
@@ -181,52 +199,78 @@ def run_preflight(
             "manifest", "FAIL", f"Manifest check failed: {exc}", (_part("manifest.failed", error=str(exc)),),
         ))
 
-    checks.append(_check_process_state(cfg, operation))
+    observations = collect_preflight_observations(
+        local_dir, cfg.guardian.max_state_bytes,
+        process_check=lambda: _make_safety_gate(cfg).check(operation),
+        config=config_source, cloud_dir=cloud_dir, max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
+    )
+    facts["observations"] = observations
+    # The provider capture above is deliberately serial. Only checks that
+    # consume its immutable observations (or config-derived values) are put on
+    # the shared bounded pool. The coordinator owns facts and report ordering.
+    def safe_check(name: str, function):
+        try:
+            return function()
+        except Exception as exc:
+            return PreflightCheckResult(name, "WARN", f"Check not available: {exc}")
+
+    parallel: dict[str, PreflightCheckResult] = {}
+    tasks = [
+        ("config_compat", lambda: _check_config_compat(config_path, config=config_source)),
+        ("sync_rules", lambda: _check_sync_rules(cfg)),
+        ("project_registry", _check_project_registry),
+        ("codex_process", lambda: _check_process_state(cfg, operation, decision=observations.process.decision)),
+    ]
     if local_dir is not None:
-        checks.append(_check_codex_startup(cfg, local_dir))
-        catalog: SessionCatalog | None = None
-        try:
-            catalog = scan_sessions(local_dir, volatile=True, max_line_bytes=cfg.semantic.max_jsonl_line_bytes)
-            facts["catalog"] = catalog
-            invalid = sum(1 for item in catalog.descriptors if item.state.value in {"INVALID", "AMBIGUOUS"})
-            status = "WARN" if invalid or catalog.codes else "PASS"
-            checks.append(PreflightCheckResult(
-                "session_catalog", status,
-                f"sessions={len(catalog.descriptors)} invalid_or_ambiguous={invalid} graph_codes={len(catalog.codes)}",
-                (_part(
-                    "session_catalog.counts",
-                    count=len(catalog.descriptors), invalid=invalid, codes=len(catalog.codes),
-                ),),
-            ))
-            checks.append(_check_session_visibility(local_dir, catalog))
-        except Exception as exc:
-            checks.append(PreflightCheckResult(
-                "session_catalog", "WARN", f"Session audit unavailable: {exc}",
-                (_part("session_catalog.unavailable", error=str(exc)),),
-            ))
-        checks.append(_check_session_format(local_dir, cloud_dir, cfg.semantic.max_jsonl_line_bytes))
-        try:
-            sqlite_reports = audit_sqlite(local_dir, cold=False)
-            indeterminate = sum(1 for item in sqlite_reports if item.status != "PASS")
-            checks.append(PreflightCheckResult(
-                "sqlite_audit", "WARN" if indeterminate else "PASS",
-                f"database_sets={len(sqlite_reports)} indeterminate={indeterminate}",
-                (_part(
-                    "sqlite_audit.unclear" if indeterminate else "sqlite_audit.clear",
-                    count=len(sqlite_reports), unclear=indeterminate,
-                ),),
-            ))
-        except Exception as exc:
-            checks.append(PreflightCheckResult(
-                "sqlite_audit", "WARN", f"SQLite audit unavailable: {exc}",
-                (_part("sqlite_audit.unavailable", error=str(exc)),),
-            ))
+        tasks.extend([
+            ("codex_startup", lambda: _check_codex_startup(
+                cfg, local_dir, process=observations.process.decision.process_state, sessions=observations.sessions,
+                sqlite_observation=observations.sqlite,
+            )),
+            ("session_catalog", lambda: _session_catalog_result(observations.sessions)),
+            ("session_format", lambda: _check_session_format(
+                local_dir, cloud_dir, cfg.semantic.max_jsonl_line_bytes,
+                sessions=observations.sessions, cloud_formats=observations.cloud_formats,
+            )),
+            ("sqlite_audit", lambda: _check_sqlite_audit(local_dir, observations.sqlite)),
+            ("session_index", lambda: _check_session_index(local_dir, index=observations.session_index)),
+            ("global_state_schema", lambda: _check_global_state_schema(
+                local_dir, cfg, global_state=observations.global_state,
+            )),
+        ])
+    with nullcontext(scheduler) if scheduler is not None else WorkScheduler() as work:
+        results = work.map_read(lambda item: (
+            item[0], item[1]() if item[0] == "session_catalog" else safe_check(item[0], item[1]),
+        ), tasks, pool="io")
+    catalog, catalog_available = None, False
+    for name, result in results:
+        if name == "session_catalog":
+            catalog, catalog_available, parallel[name] = result
+        else:
+            parallel[name] = result
+    checks[2:2] = [parallel[name] for name in ("config_compat", "sync_rules", "project_registry")]
+    if local_dir is not None:
+        facts["catalog"] = catalog if catalog_available else None
+    checks.append(parallel["codex_process"])
+    if local_dir is not None:
+        checks.append(parallel["codex_startup"])
+        checks.append(_check_codex_sandbox(local_dir, cfg, facts, global_state=observations.global_state))
+        checks.append(parallel["session_catalog"])
+        if catalog_available and catalog is not None:
+            checks.append(safe_check("session_visibility", lambda: _check_session_visibility(
+                local_dir, catalog, sqlite_observation=observations.sqlite,
+            )))
+        checks.append(parallel["session_format"])
+        checks.append(parallel["sqlite_audit"])
     if local_dir is not None:
         # The one answer to "can codexSync write to this Codex", placed right
         # after the config so it is read first (CS-394).
-        checks.insert(min(2, len(checks)), _check_codex_compat(local_dir, catalog, cfg))
-        checks.append(_check_session_index(local_dir))
-        checks.append(_check_global_state_schema(local_dir, cfg))
+        checks.insert(min(2, len(checks)), _check_codex_compat(
+            local_dir, catalog, cfg, global_state=observations.global_state,
+            sqlite_observation=observations.sqlite,
+        ))
+        checks.append(parallel["session_index"])
+        checks.append(parallel["global_state_schema"])
         checks.append(_check_guardian_latest_good(cfg))
     checks.append(_check_orphan_temp_files(cfg.paths.temp_dir))
     checks.append(_check_mutation_journals(cfg.paths.temp_dir))
@@ -268,8 +312,50 @@ def _check_cloud_dir(local_dir: Path, cloud: Path) -> PreflightCheckResult:
     )
 
 
+def _session_catalog_result(observation: SessionObservation | None):
+    """Build the catalogue check from its captured session scan only."""
+    try:
+        if observation is None or observation.error is not None:
+            raise ValueError(observation.error if observation is not None else "no local state directory")
+        catalog = observation.catalog
+        if catalog is None:
+            raise ValueError("session catalogue unavailable")
+        invalid = sum(1 for item in catalog.descriptors if item.state.value in {"INVALID", "AMBIGUOUS"})
+        status = "WARN" if invalid or catalog.codes else "PASS"
+        result = PreflightCheckResult(
+            "session_catalog", status,
+            f"sessions={len(catalog.descriptors)} invalid_or_ambiguous={invalid} graph_codes={len(catalog.codes)}",
+            (_part("session_catalog.counts", count=len(catalog.descriptors), invalid=invalid, codes=len(catalog.codes)),),
+        )
+        return catalog, True, result
+    except Exception as exc:
+        return None, False, PreflightCheckResult(
+            "session_catalog", "WARN", f"Session audit unavailable: {exc}",
+            (_part("session_catalog.unavailable", error=str(exc)),),
+        )
+
+
+def _check_sqlite_audit(local_dir: Path, observation) -> PreflightCheckResult:
+    try:
+        sqlite_reports = audit_sqlite(local_dir, cold=False, observation=observation)
+        indeterminate = sum(1 for item in sqlite_reports if item.status != "PASS")
+        return PreflightCheckResult(
+            "sqlite_audit", "WARN" if indeterminate else "PASS",
+            f"database_sets={len(sqlite_reports)} indeterminate={indeterminate}",
+            (_part("sqlite_audit.unclear" if indeterminate else "sqlite_audit.clear",
+                   count=len(sqlite_reports), unclear=indeterminate),),
+        )
+    except Exception as exc:
+        return PreflightCheckResult(
+            "sqlite_audit", "WARN", f"SQLite audit unavailable: {exc}",
+            (_part("sqlite_audit.unavailable", error=str(exc)),),
+        )
+
+
 def _check_codex_compat(
-    local_dir: Path, catalog: SessionCatalog | None, cfg: AppConfig
+    local_dir: Path, catalog: SessionCatalog | None, cfg: AppConfig, *,
+    global_state: GlobalStateObservation | None = None,
+    sqlite_observation=None,
 ) -> PreflightCheckResult:
     """Codex's version, and whether every format codexSync writes into is known (CS-394).
 
@@ -277,7 +363,10 @@ def _check_codex_compat(
     of a sync still runs, so the answer names which writes are off.
     """
     try:
-        report = check_codex_compat(local_dir, catalog, max_state_bytes=cfg.guardian.max_state_bytes)
+        report = check_codex_compat(
+            local_dir, catalog, max_state_bytes=cfg.guardian.max_state_bytes, global_state=global_state,
+            sqlite_observation=sqlite_observation,
+        )
     except Exception as exc:
         return PreflightCheckResult(
             "codex_compat", "WARN", f"Codex's formats not checked: {exc}",
@@ -336,7 +425,9 @@ def _describe_unknown(part: CompatPart) -> str:
     return f"{part.part} ({part.code})"
 
 
-def _check_config_compat(config_path: Path) -> PreflightCheckResult:
+def _check_config_compat(
+    config_path: Path, *, config: ConfigObservation | None = None,
+) -> PreflightCheckResult:
     """Say whether this config is one every mutating command will refuse.
 
     Without it `doctor` reports `config: PASS` for a file written by 0.1 and
@@ -345,8 +436,11 @@ def _check_config_compat(config_path: Path) -> PreflightCheckResult:
     it is a FAIL in practice: nothing can be written until it is settled.
     """
     try:
-        text, source_sha256 = read_config_source(config_path)
-        plan = inspect_config(text, source_sha256=source_sha256)
+        if config is None:
+            config = observe_config_source(config_path)
+        if config.error is not None:
+            raise ValueError(config.error)
+        plan = inspect_config(config.text, source_sha256=config.source_sha256)
     except Exception as exc:  # unreadable config: `config` already said so
         return PreflightCheckResult(
             "config_compat", "WARN", f"Cannot inspect config: {exc}",
@@ -433,7 +527,10 @@ def _check_path_available(name: str, directory: Path) -> PreflightCheckResult:
             (_part("path.unreadable", path=str(directory), error=str(exc)),),
         )
 
-def _check_session_format(local_dir: Path, cloud_dir: Path | None, max_line_bytes: int) -> PreflightCheckResult:
+def _check_session_format(
+    local_dir: Path, cloud_dir: Path | None, max_line_bytes: int, *,
+    sessions: SessionObservation | None = None, cloud_formats: FormatObservation | None = None,
+) -> PreflightCheckResult:
     """Whether a record-format rewrite reached this machine and not the mirror, or the reverse.
 
     The desktop build of September 2026 rewrote every session file into
@@ -443,11 +540,12 @@ def _check_session_format(local_dir: Path, cloud_dir: Path | None, max_line_byte
     two hundred unexplained conflicts.
     """
     try:
-        local = peek_record_formats(local_dir, max_line_bytes=max_line_bytes)
-        cloud = (
-            peek_record_formats(cloud_dir, max_line_bytes=max_line_bytes)
-            if cloud_dir is not None and cloud_dir.is_dir() else {}
-        )
+        local_formats = sessions if sessions is not None else observe_formats(local_dir, max_line_bytes)
+        if cloud_formats is None:
+            cloud_formats = observe_formats(cloud_dir, max_line_bytes)
+        if local_formats.error is not None or cloud_formats.error is not None:
+            raise ValueError(local_formats.error or cloud_formats.error)
+        local, cloud = local_formats.formats, cloud_formats.formats
     except Exception as exc:
         return PreflightCheckResult(
             "session_format", "WARN", f"Session format audit unavailable: {exc}",
@@ -479,7 +577,7 @@ def _check_session_format(local_dir: Path, cloud_dir: Path | None, max_line_byte
     return PreflightCheckResult("session_format", "PASS", message, (sides,))
 
 
-def _check_session_visibility(local_dir: Path, catalog: SessionCatalog) -> PreflightCheckResult:
+def _check_session_visibility(local_dir: Path, catalog: SessionCatalog, *, sqlite_observation=None) -> PreflightCheckResult:
     """How many chat files here Codex's own catalogue does not list.
 
     Codex shows a chat from its `threads` table, not from the folder, so a file
@@ -488,7 +586,7 @@ def _check_session_visibility(local_dir: Path, catalog: SessionCatalog) -> Prefl
     up (D-020); this is what turns "it did not appear" into a number instead of
     a silence. Only counts are reported: ids and titles are the user's.
     """
-    placements = read_thread_placements(local_dir)
+    placements = read_thread_placements(local_dir, observation=sqlite_observation)
     if placements.status is PlacementStatus.ABSENT:
         return PreflightCheckResult(
             "session_visibility", "PASS",
@@ -542,7 +640,10 @@ def visibility_counts(catalog: SessionCatalog, placements) -> tuple[int, int, in
     return len(chats), unlisted, elsewhere
 
 
-def _check_codex_startup(cfg: AppConfig, local_dir: Path) -> PreflightCheckResult:
+def _check_codex_startup(
+    cfg: AppConfig, local_dir: Path, *, process: ProcessState | None = None,
+    sessions: SessionObservation | None = None, sqlite_observation=None,
+) -> PreflightCheckResult:
     """Whether Codex's chat-list rebuild will let it start (D-032).
 
     A rebuild marked ``running`` with no Codex process is one nobody is doing,
@@ -551,9 +652,13 @@ def _check_codex_startup(cfg: AppConfig, local_dir: Path) -> PreflightCheckResul
     the start that runs it is long and ending it part-way leads to the FAIL.
     """
     try:
-        reading = read_backfill_state(local_dir)
-        process = _make_safety_gate(cfg).check(OperationKind.DOCTOR).process_state
-        findings = diagnose_catalogue(reading, process, measure_chat_files(local_dir))
+        if sessions is not None and sessions.files_error is not None:
+            raise ValueError(sessions.files_error)
+        reading = read_backfill_state(local_dir, observation=sqlite_observation)
+        if process is None:
+            process = _make_safety_gate(cfg).check(OperationKind.DOCTOR).process_state
+        files = sessions.files if sessions is not None else measure_chat_files(local_dir)
+        findings = diagnose_catalogue(reading, process, files)
     except Exception as exc:
         return PreflightCheckResult(
             "codex_startup", "WARN", f"Codex's chat-list state not checked: {exc}",
@@ -585,8 +690,112 @@ def _check_codex_startup(cfg: AppConfig, local_dir: Path) -> PreflightCheckResul
     return PreflightCheckResult("codex_startup", "PASS", f"{item.code} {counts}".strip(), (finding,))
 
 
-def _check_process_state(cfg: AppConfig, operation: OperationKind) -> PreflightCheckResult:
-    decision = _make_safety_gate(cfg).check(operation)
+def _project_roots(
+    local_dir: Path, max_state_bytes: int, *, global_state: GlobalStateObservation | None = None,
+) -> list[str]:
+    """Every project root the global state names; none when it cannot be read."""
+    if global_state is None:
+        global_state = observe_global_state(local_dir / ".codex-global-state.json", max_state_bytes)
+    if global_state.status is not GlobalStateStatus.AVAILABLE:
+        return []
+    try:
+        state = json.loads(global_state.payload.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError):
+        return []
+    if not isinstance(state, dict):
+        return []
+    schema_id = detect_state_schema(state)
+    projects = state.get("local-projects")
+    if not schema_id or not isinstance(projects, dict):
+        return []
+    return [root for entry in projects.values() if isinstance(entry, dict)
+            for root in project_root_paths(schema_id, entry)]
+
+
+_OWNER_CODES = {
+    OwnerKind.SANDBOX: "codex_sandbox.owned_by_sandbox",
+    OwnerKind.ADMINISTRATORS: "codex_sandbox.owned_by_admins",
+}
+
+
+def _check_codex_sandbox(
+    local_dir: Path, cfg: AppConfig, facts: dict, *, global_state: GlobalStateObservation | None = None,
+) -> PreflightCheckResult:
+    """Project folders Codex's Windows sandbox cannot protect (CS-483).
+
+    A WARN, not a FAIL: it stops Codex running commands, not codexSync
+    writing. codexSync changes no permission; the check names the folder, its
+    owner and the `icacls` line that gives it back.
+    """
+    try:
+        report = check_sandbox_folders(local_dir, _project_roots(
+            local_dir, cfg.guardian.max_state_bytes, global_state=global_state,
+        ))
+    except Exception as exc:
+        report = SandboxReport(applicable=True, error=str(exc))
+    facts["sandbox"] = report
+    if not report.applicable:
+        return PreflightCheckResult(
+            "codex_sandbox", "PASS", "Not applicable: Codex sets folder permissions for its sandbox only on Windows",
+            (_part("codex_sandbox.not_applicable"),),
+        )
+    if report.error is not None and not report.checked:
+        return PreflightCheckResult(
+            "codex_sandbox", "WARN", f"Folder permissions not checked: {report.error}",
+            (_part("codex_sandbox.not_checked", error=report.error),),
+        )
+    parts: list[Part] = []
+    lines: list[str] = []
+    for item in report.findings:
+        if item.owner is None:
+            parts.append(_part("codex_sandbox.unreadable", folder=item.folder))
+            lines.append(f"{item.folder}: its permissions cannot be read")
+        else:
+            parts.append(_part(_OWNER_CODES.get(item.owner_kind, "codex_sandbox.owned_by_other"),
+                               folder=item.folder, owner=item.owner))
+            lines.append(f"{item.folder} belongs to {item.owner} ({item.owner_kind.value})")
+    if report.findings:
+        confirmed = sum(1 for item in report.findings if item.confirmed)
+        if confirmed:
+            parts.append(_part("codex_sandbox.confirmed", count=confirmed))
+            lines.append(f"Codex's sandbox log reports {confirmed} of them failing")
+        parts.append(_part("codex_sandbox.consequence"))
+        lines.append(
+            "Codex cannot protect these folders and may refuse every command in their projects; "
+            "in PowerShell as administrator (only the owner changes, codexSync changes no permission)"
+        )
+        for item in report.findings:
+            if item.command is not None:
+                parts.append(_part("codex_sandbox.fix", command=item.command))
+                lines.append(item.command)
+        if any(item.name in SHARED_FOLDER_NAMES for item in report.findings):
+            parts.append(_part("codex_sandbox.shared"))
+            lines.append(".agents is shared with other agents (Claude Code): change its owner, never recreate it")
+    if report.failing_elsewhere:
+        parts.append(_part("codex_sandbox.elsewhere", count=report.failing_elsewhere))
+        lines.append(f"Codex's sandbox log reports {report.failing_elsewhere} more folder(s) outside the projects")
+    if report.unchecked:
+        # Some folders were read, others not: the ones read cannot vouch for
+        # the rest (CS-522).
+        parts.append(_part("codex_sandbox.unchecked", count=report.unchecked, error=report.error or ""))
+        lines.append(f"{report.unchecked} folder(s) could not be checked: {report.error}")
+    if report.setup_error:
+        parts.append(_part("codex_sandbox.setup_error"))
+        lines.append("Codex recorded an error from its last sandbox setup (.sandbox/setup_error.json)")
+    if not parts:
+        return PreflightCheckResult(
+            "codex_sandbox", "PASS",
+            f"{report.checked} protected folder(s) in the projects; Codex's sandbox can protect each",
+            (_part("codex_sandbox.clear", count=report.checked),),
+        )
+    return PreflightCheckResult("codex_sandbox", "WARN", "; ".join(lines), tuple(parts))
+
+
+def _check_process_state(
+    cfg: AppConfig, operation: OperationKind, *, decision: SafetyDecision | None = None,
+) -> PreflightCheckResult:
+    if decision is None:
+        decision = _make_safety_gate(cfg).check(operation)
     if decision.process_state is ProcessState.STOPPED:
         return PreflightCheckResult("codex_process", "PASS", decision.reason, (_part("codex_process.stopped"),))
     status = "FAIL" if operation in {OperationKind.SYNC, OperationKind.RESTORE, OperationKind.REPAIR_APPLY} else "WARN"
@@ -607,7 +816,7 @@ def _check_process_state(cfg: AppConfig, operation: OperationKind) -> PreflightC
         "codex_process", status, decision.reason, (_part("codex_process.unknown", reason=decision.reason),),
     )
 
-def _check_session_index(local_dir: Path) -> PreflightCheckResult:
+def _check_session_index(local_dir: Path, *, index: IndexObservation | None = None) -> PreflightCheckResult:
     """Say what the index holds, and never that it is wrong for holding it.
 
     A repeated id and a session with no line at all are both normal in an
@@ -617,12 +826,14 @@ def _check_session_index(local_dir: Path) -> PreflightCheckResult:
     ran backwards. An absent index is reported as absent, because it does not
     mean the sessions are absent.
     """
-    try:
-        result = parse_session_index(local_dir / SESSION_INDEX_FILE)
-    except OSError as exc:
+    if index is None:
+        index = observe_session_index(local_dir / SESSION_INDEX_FILE)
+    if index.error is not None:
         return PreflightCheckResult(
-            "session_index", "WARN", f"Index unreadable: {exc}", (_part("session_index.unreadable", error=str(exc)),),
+            "session_index", "WARN", f"Index unreadable: {index.error}",
+            (_part("session_index.unreadable", error=index.error),),
         )
+    result = index.result
     if "MISSING_INDEX" in result.codes:
         return PreflightCheckResult(
             "session_index", "PASS", f"No {SESSION_INDEX_FILE}; sessions are read from disk",
@@ -649,32 +860,35 @@ def _check_session_index(local_dir: Path) -> PreflightCheckResult:
     )
 
 
-def _check_global_state_schema(local_dir: Path, cfg: AppConfig) -> PreflightCheckResult:
+def _check_global_state_schema(
+    local_dir: Path, cfg: AppConfig, *, global_state: GlobalStateObservation | None = None,
+) -> PreflightCheckResult:
     """Report whether Guardian can recognise this machine's state at all.
 
     An unrecognised schema means every snapshot is quarantined and `latest-good`
     never appears, so the protection is silently inert. Without this check the
     only symptom is an exit code from a command the user may never run.
     """
-    source = local_dir / ".codex-global-state.json"
-    if not source.is_file():
+    if global_state is None:
+        global_state = observe_global_state(local_dir / ".codex-global-state.json", cfg.guardian.max_state_bytes)
+    source = global_state.boundary.source
+    if global_state.status is GlobalStateStatus.MISSING:
         return PreflightCheckResult(
             "global_state_schema", "WARN", f"No state file at {source}",
             (_part("global_state_schema.no_file", path=str(source)),),
         )
-    try:
-        if source.stat().st_size > cfg.guardian.max_state_bytes:
-            return PreflightCheckResult(
-                "global_state_schema", "WARN",
-                f"State file exceeds guardian.max_state_bytes ({cfg.guardian.max_state_bytes})",
-                (_part("global_state_schema.too_big", limit=cfg.guardian.max_state_bytes),),
-            )
-        report = validate_global_state_references(source.read_bytes())
-    except OSError as exc:
+    if global_state.status is GlobalStateStatus.TOO_BIG:
         return PreflightCheckResult(
-            "global_state_schema", "WARN", f"Cannot read state file: {exc}",
-            (_part("global_state_schema.unreadable", error=str(exc)),),
+            "global_state_schema", "WARN",
+            f"State file exceeds guardian.max_state_bytes ({cfg.guardian.max_state_bytes})",
+            (_part("global_state_schema.too_big", limit=cfg.guardian.max_state_bytes),),
         )
+    if global_state.status is GlobalStateStatus.UNREADABLE:
+        return PreflightCheckResult(
+            "global_state_schema", "WARN", f"Cannot read state file: {global_state.error}",
+            (_part("global_state_schema.unreadable", error=global_state.error),),
+        )
+    report = validate_global_state_references(global_state.payload)
 
     codes = ", ".join(report.codes) or "none"
     if report.status in {ValidationStatus.PASS, ValidationStatus.PASS_WITH_WARNING}:
@@ -700,7 +914,8 @@ def _check_global_state_schema(local_dir: Path, cfg: AppConfig) -> PreflightChec
 
 def _check_guardian_latest_good(cfg: AppConfig) -> PreflightCheckResult:
     """Confirm a restorable snapshot actually exists for this machine."""
-    machine = cfg.identity.machine_id
+    # The name Guardian files this machine under (CS-536).
+    machine = normalize_machine_id(cfg.identity.machine_id, allow_unknown=False)
     if not machine:
         return PreflightCheckResult(
             "guardian_latest_good", "WARN", "identity.machine_id is not set", (_part("guardian_latest_good.no_machine"),),
@@ -726,7 +941,7 @@ def _check_guardian_latest_good(cfg: AppConfig) -> PreflightCheckResult:
             "latest-good points at a snapshot that is missing or uncommitted",
             (_part("guardian_latest_good.missing_snapshot"),),
         )
-    stuck = _shrinks_quarantined_since(cfg.guardian.root_dir, machine, snapshot)
+    stuck, schema = _held_back_since(cfg.guardian.root_dir, machine, snapshot)
     if stuck:
         return PreflightCheckResult(
             "guardian_latest_good", "WARN",
@@ -735,29 +950,41 @@ def _check_guardian_latest_good(cfg: AppConfig) -> PreflightCheckResult:
             "counts fell and can take the current state as the new baseline",
             (_part("guardian_latest_good.stuck", snapshot=str(snapshot_id), count=stuck),),
         )
+    if schema:
+        # A state in another format than the baseline's is held back as well,
+        # and froze latest-good the same way without a word here (CS-533).
+        return PreflightCheckResult(
+            "guardian_latest_good", "WARN",
+            f"Restorable snapshot {snapshot_id}, but {schema} newer state(s) went to quarantine because their "
+            "format differs from that snapshot's, so latest-good is no longer advancing; `guardian accept` "
+            "shows whether the new format can be taken as the baseline",
+            (_part("guardian_latest_good.stuck_schema", snapshot=str(snapshot_id), count=schema),),
+        )
     return PreflightCheckResult(
         "guardian_latest_good", "PASS", f"Restorable snapshot {snapshot_id}",
         (_part("guardian_latest_good.ok", snapshot=str(snapshot_id)),),
     )
 
 
-_SHRINK_CODES = frozenset({"PROJECT_COUNT_DROP", "BINDING_COUNT_DROP"})
+_SHRINK_CODES = frozenset({PROJECT_COUNT_DROP, BINDING_COUNT_DROP})
+_SCHEMA_CODES = frozenset({BASELINE_SCHEMA_MISMATCH, UNKNOWN_SCHEMA})
 
 
-def _shrinks_quarantined_since(root: Path, machine: str, snapshot: Path) -> int:
-    """Quarantine events newer than latest-good that were rejected only as a shrink.
+def _held_back_since(root: Path, machine: str, snapshot: Path) -> tuple[int, int]:
+    """Quarantine events newer than latest-good: (held back as a shrink, held back by format).
 
-    Reads manifests only. Timestamps are compared as the store writes them
-    (fixed-width UTC ISO strings), so string order is time order.
+    Either keeps latest-good where it is. Reads manifests only. Timestamps are
+    compared as the store writes them (fixed-width UTC ISO strings), so string
+    order is time order.
     """
     try:
         created = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))["created_at_utc"]
     except (OSError, KeyError, TypeError, ValueError):
-        return 0
+        return 0, 0
     base = root / "quarantine" / machine
     if not isinstance(created, str) or not base.is_dir():
-        return 0
-    count = 0
+        return 0, 0
+    shrinks = schema = 0
     for event in base.iterdir():
         try:
             raw = json.loads((event / "manifest.json").read_text(encoding="utf-8"))
@@ -765,9 +992,14 @@ def _shrinks_quarantined_since(root: Path, machine: str, snapshot: Path) -> int:
             continue
         codes = raw.get("reason_codes") if isinstance(raw, dict) else None
         when = raw.get("created_at_utc") if isinstance(raw, dict) else None
-        if isinstance(codes, list) and isinstance(when, str) and when > created and _SHRINK_CODES & set(codes):
-            count += 1
-    return count
+        if not (isinstance(codes, list) and isinstance(when, str) and when > created):
+            continue
+        if _SHRINK_CODES & set(codes):
+            shrinks += 1
+        elif codes and codes[-1] in _SCHEMA_CODES:
+            # The shrink assessment appends exactly one such code, last.
+            schema += 1
+    return shrinks, schema
 
 
 def _check_mutation_journals(temp_dir: Path) -> PreflightCheckResult:

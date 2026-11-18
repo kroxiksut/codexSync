@@ -127,7 +127,10 @@ class StatusTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("Task left by codexSync 0.1: \\codexSyncSync", text)
         self.assertIn('schtasks /Delete /TN "\\codexSyncSync" /F', text)
-        self.assertIn("never chats", text)
+        # It is a full sync now, and may ask Codex to quit (CS-507).
+        self.assertIn("full sync of settings and chats", text)
+        self.assertIn("close_codex", text)
+        self.assertNotIn("never chats", text)
 
 
 if __name__ == "__main__":

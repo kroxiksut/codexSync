@@ -7,8 +7,8 @@ on:
   pull_request:
 
 # Linux is experimental (D-031): its jobs run on every push, but a red one
-# does not fail the run, until the Linux process detector has been observed
-# against a live Codex and recorded in PROVEN_DETECTORS.
+# does not fail the run. Its process detector is proven (PROVEN_DETECTORS,
+# 2026-10-09); the jobs become required when Linux stops being experimental.
 jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}${{ matrix.os == 'ubuntu-latest' && ' (experimental)' || '' }}

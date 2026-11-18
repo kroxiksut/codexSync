@@ -86,6 +86,34 @@ class ScopeExpansionTests(unittest.TestCase):
         )
         self.assertEqual(scope.chat_count, 0)
 
+    def test_a_set_whose_every_name_matches_nothing_is_still_a_set(self) -> None:
+        """CS-495: a renamed project, a re-created id or a typo covers nothing.
+
+        Emptiness is judged on the choice. Judged on the expansion, the set
+        became "no working set", and every chat was written into `.codex`.
+        """
+        from codexsync.app import _hashed_scope
+
+        scope = build_session_scope(
+            directory(chat("a", "p1"), projects={"p1": "orion"}),
+            projects=("gone-project",), chats=("gone-chat",),
+        )
+        self.assertFalse(scope.is_empty)
+        self.assertEqual(scope.session_hashes, ())
+        self.assertEqual(scope.unresolved_projects, ("gone-project",))
+        self.assertEqual(scope.unresolved_chats, ("gone-chat",))
+        self.assertEqual(_hashed_scope(scope), ())
+        self.assertIsNone(_hashed_scope(build_session_scope(directory(chat("a", "p1")))))
+        self.assertIsNone(_hashed_scope(None))
+
+    def test_a_name_that_still_matches_is_not_reported_missing(self) -> None:
+        scope = build_session_scope(
+            directory(chat("a", "p1"), projects={"p1": "orion"}),
+            projects=("orion", "typo"), chats=("a",),
+        )
+        self.assertEqual(scope.projects, ("p1",))
+        self.assertEqual(scope.unresolved, ("typo",))
+
     def test_a_chat_can_be_added_on_its_own(self) -> None:
         scope = build_session_scope(
             directory(chat("a", "p1"), chat("loose", None), projects={"p1": "orion"}),
@@ -180,6 +208,34 @@ class ScopeFileTests(unittest.TestCase):
         payload = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(payload["projects"], ["p1"])
         self.assertNotIn("session_hashes", payload)
+
+    def test_a_name_that_matches_nothing_is_kept_in_the_stored_set(self) -> None:
+        """Stored as given, so the next run still holds every chat back (CS-495)."""
+        scope = build_session_scope(
+            directory(chat("a", "p1"), projects={"p1": "orion"}), projects=("orion", "typo"),
+        )
+        path = save_session_scope(scope, self.root / "set.json")
+        again = load_session_scope(path)
+        self.assertEqual(set(again.projects), {"p1", "typo"})
+        self.assertFalse(again.is_empty)
+        # The stored id of a project Codex re-created resolves to nothing, and
+        # the set then holds everything back instead of carrying everything.
+        rebuilt = build_session_scope(
+            directory(chat("a", "p9"), projects={"p9": "renamed"}), projects=again.projects,
+        )
+        self.assertFalse(rebuilt.is_empty)
+        self.assertEqual(rebuilt.session_hashes, ())
+
+    def test_saving_leaves_no_staging_file_and_survives_an_old_one(self) -> None:
+        """CS-517: a staging file a killed run left never blocks the next save."""
+        path = self.root / "set.json"
+        (self.root / "set.json.tmp").write_text("{", encoding="utf-8")
+        scope = build_session_scope(directory(chat("a", "p1"), projects={"p1": "orion"}), projects=("p1",))
+        save_session_scope(scope, path)
+        save_session_scope(scope, path)
+        self.assertEqual(load_session_scope(path).projects, ("p1",))
+        leftovers = [item.name for item in self.root.iterdir() if item.name.endswith(".codexsync.tmp")]
+        self.assertEqual(leftovers, [])
 
     def test_a_missing_file_is_an_empty_set_and_not_an_error(self) -> None:
         self.assertTrue(load_session_scope(self.root / "absent.json").is_empty)

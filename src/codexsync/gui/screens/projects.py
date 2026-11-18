@@ -54,6 +54,8 @@ QUIET_KINDS = {"KEEP_PROJECT", "KEEP_BINDING", "SKIP_UNMAPPED"}
 #: How a project of another machine stands here (`app.PlaceStatus`).
 #: Without a folder here is a state, not a fault (D-034), so it has no tone.
 PLACE_TONES = {"HERE": "ok", "COMING": "ok", "AMBIGUOUS": "danger"}
+#: The setting a removed project follows (D-039), as a Settings field: section, key.
+REMOVED_SETTING = ("sync", "removed_projects")
 KIND_TONES = {"REMAP_ROOT": "attention", "ADD_BINDING": "ok", "ADD_PROJECT": "ok", "SKIP_NO_PROJECT": "attention", "AMBIGUOUS_PROJECT": "danger", "UNSUPPORTED_BACKEND": "danger"}
 
 
@@ -87,6 +89,10 @@ class ProjectsModel(Model):
         self.places_all = False
         self.places_whole_folder = True
         self.place_result: Outcome | None = None
+        #: Projects removed in Codex, here and on purpose elsewhere, and the last answer (D-039).
+        self.removals: Outcome | None = None
+        self.removals_busy = False
+        self.removal_result: Outcome | None = None
 
     def receive(self, kind: str, outcome: Outcome) -> None:
         if kind == "chat_list":
@@ -155,6 +161,35 @@ class ProjectsScreen(Screen):
             self.show_chats_button, self.move_here_button, self.open_folder_button,
         ))
         self.body.addWidget(frame)
+
+        # A project removed in Codex here waits for the person: on purpose, the
+        # other machines remove it too; by mistake, it comes back (D-039).
+        self.removals_summary = label()
+        removals, removals_inner = card(self.t("projects.removed.title"), self.removals_summary)
+        removals_inner.addWidget(label(self.t("projects.removed.caption"), "muted", wrap=True))
+        self.removals_table = table([
+            self.t("projects.column.name"),
+            self.t("projects.removed.column.machine"),
+            self.t("projects.removed.column.state"),
+            self.t("projects.column.root"),
+        ], selectable=True)
+        self.removals_table.setMinimumHeight(140)
+        self.removals_table.itemSelectionChanged.connect(self._render_removal_buttons)
+        removals_inner.addWidget(self.removals_table, stretch=1)
+        self.removals_button = button(self.t("projects.removed.check"))
+        self.removals_button.clicked.connect(self.check_removals)
+        self.removal_everywhere = button(self.t("projects.removed.everywhere"), primary=True)
+        self.removal_everywhere.clicked.connect(lambda: self.decide_removal(everywhere=True))
+        self.removal_bring_back = button(self.t("projects.removed.bring_back"))
+        self.removal_bring_back.clicked.connect(lambda: self.decide_removal(everywhere=False))
+        self.removals_setting = button(self.t("projects.removed.setting"))
+        self.removals_setting.clicked.connect(lambda: self.host.go_to("settings", ".".join(REMOVED_SETTING)))
+        removals_inner.addLayout(row(
+            self.removals_button, self.removal_everywhere, self.removal_bring_back, self.removals_setting,
+        ))
+        self.removal_status = label("", wrap=True)
+        removals_inner.addWidget(self.removal_status)
+        self.body.addWidget(removals)
 
         # A folder rarely has one path on Windows, Linux and macOS (D-033):
         # answered once here, kept in the shared folder for every direction.
@@ -378,6 +413,122 @@ class ProjectsScreen(Screen):
             self.show_widget(self.files_tree)
         elif target == "places":
             self.show_widget(self.places_table)
+        elif target == "removals":
+            # Sent here by a sync that found a removal: the button is the request.
+            self.show_widget(self.removals_table)
+            self.check_removals()
+
+    # --- projects removed in Codex (D-039) -----------------------------------
+
+    def check_removals(self) -> None:
+        if self.model.removals_busy:
+            return
+        self.model.removals_busy = True
+        self.render()
+
+        def apply(model: ProjectsModel, outcome: Outcome) -> None:
+            model.removals_busy = False
+            model.removals = outcome
+
+        self.read(lambda: self.host.controller.project_removals(), apply, kind="project_removals")
+
+    def _chosen_removal(self):
+        chosen = selected_data(self.removals_table)
+        item = chosen[0] if chosen else None
+        return item if item is not None and item.here and not item.confirmed else None
+
+    def decide_removal(self, *, everywhere: bool) -> None:
+        item = self._chosen_removal()
+        if item is None or self.model.removals_busy:
+            return
+        which = "everywhere" if everywhere else "bring_back"
+        if not self.host.confirm(
+            self.t("projects.removed.confirm.title"),
+            self.t(f"projects.removed.confirm.{which}", name=item.name or item.project_id),
+            self.t(f"projects.removed.{which}"),
+        ):
+            return
+        self.model.removals_busy = True
+        self.render()
+
+        def call() -> Outcome:
+            answered = self.host.controller.decide_project_removal(item.project_id, everywhere=everywhere)
+            if not answered.ok:
+                return answered
+            return self.host.controller.project_removals()
+
+        def apply(model: ProjectsModel, outcome: Outcome) -> None:
+            model.removals_busy = False
+            model.removal_result = outcome
+            if outcome.ok:
+                model.removals = outcome
+
+        self.run(call, apply, kind="project_removal")
+
+    def _render_removal_buttons(self) -> None:
+        busy = self.model.removals_busy
+        chosen = self._chosen_removal() is not None
+        self.removals_button.setEnabled(not busy)
+        self.removal_everywhere.setEnabled(chosen and not busy)
+        self.removal_bring_back.setEnabled(chosen and not busy)
+
+    def _render_removals(self) -> None:
+        model = self.model
+        palette = self.palette_
+        self._render_removal_buttons()
+        result = model.removal_result
+        if result is not None and not result.ok:
+            self.removal_status.setText(self.failure_text(result))
+            set_tone(self.removal_status, "danger", palette)
+        elif result is not None:
+            self.removal_status.setText(self.t("projects.removed.saved"))
+            set_tone(self.removal_status, "ok", palette)
+        else:
+            self.removal_status.setText("")
+        outcome = model.removals
+        drawn = (outcome, model.removals_busy)
+        if getattr(self, "_removals_drawn", None) == drawn:
+            return
+        self._removals_drawn = drawn
+        if model.removals_busy:
+            self.removals_summary.setText(self.t("projects.removed.checking"))
+            set_tone(self.removals_summary, None, palette)
+            return
+        if outcome is None:
+            self.removals_summary.setText(self.t("projects.removed.not_checked"))
+            set_tone(self.removals_summary, None, palette)
+            self.removals_table.setRowCount(0)
+            return
+        if not outcome.ok:
+            self.removals_summary.setText(self.failure_text(outcome))
+            set_tone(self.removals_summary, "danger", palette)
+            self.removals_table.setRowCount(0)
+            return
+        report = outcome.value
+        waiting = report.waiting
+        policy = self.t(f"projects.removed.policy.{report.policy}")
+        if waiting:
+            self.removals_summary.setText(self.p("projects.removed.waiting", len(waiting)) + " " + policy)
+        elif report.items:
+            self.removals_summary.setText(self.p("projects.removed.some", len(report.items)) + " " + policy)
+        else:
+            self.removals_summary.setText(self.t("projects.removed.none") + " " + policy)
+        set_tone(self.removals_summary, "attention" if waiting else None, palette)
+        rows = []
+        for item in report.items:
+            if item.here and not item.confirmed:
+                state, tone = self.t("projects.removed.state.waiting"), "attention"
+            elif item.here:
+                state, tone = self.t("projects.removed.state.here"), None
+            else:
+                state, tone = self.t("projects.removed.state.elsewhere"), None
+            rows.append([
+                Cell(item.name or item.project_id, data=item, tooltip=item.project_id),
+                Cell(item.machine, muted=True),
+                Cell(state, tone=tone),
+                Cell("; ".join(item.roots), muted=not item.roots),
+            ])
+        fill_table(self.removals_table, rows, palette)
 
     # --- where other machines' projects are here (D-033) ---------------------
 
@@ -459,9 +610,12 @@ class ProjectsScreen(Screen):
         else:
             self.place_status.setText("")
         outcome = model.places
-        if getattr(self, "_places_drawn", None) is outcome and not model.places_busy:
+        # Keyed by the busy flag too: a refused answer leaves `places` as it
+        # was, and the "Reading..." drawn while it ran stayed for good (CS-550).
+        drawn = getattr(self, "_places_drawn", None)
+        if drawn is not None and drawn[0] is outcome and drawn[1] == model.places_busy:
             return
-        self._places_drawn = outcome
+        self._places_drawn = (outcome, model.places_busy)
         if model.places_busy:
             self.places_summary.setText(self.t("projects.places.checking"))
             return
@@ -885,6 +1039,7 @@ class ProjectsScreen(Screen):
             self._fill_move_projects()
             self._move_drawn = model.directory
         self._render_move()
+        self._render_removals()
         self._render_places()
         self._render_files()
 

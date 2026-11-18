@@ -40,6 +40,10 @@ class SyncConfig:
     #: Ask Codex to quit when a sync starts while it is open (D-029). Never
     #: forced; off unless the person turns it on.
     close_codex: bool = False
+    #: What a project removed in Codex on this machine means (D-039):
+    #: ``ask`` (wait for the person), ``remove`` (on the other machines too),
+    #: ``bring_back`` (take it back from them).
+    removed_projects: str = "ask"
 
 
 @dataclass(slots=True)
@@ -265,6 +269,25 @@ class FileMeta:
     abs_path: Path
     mtime_ns: int
     size: int
+    device: int | None = None
+    inode: int | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class DestinationPrecondition:
+    """What a normal sync observed at a destination while building its plan.
+
+    ``None`` on an action means that its specialised caller (restore or chat
+    transfer) did not build the action from the ordinary two-sided file index.
+    ``exists=False`` is distinct from that legacy/unbound state: a file which
+    appears after planning must not be overwritten without a backup (CS-493).
+    """
+
+    exists: bool
+    mtime_ns: int | None = None
+    size: int | None = None
+    device: int | None = None
+    inode: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -283,6 +306,15 @@ class CopyAction:
     #: this -- to NONE for a directory the Codex runtime reads, or to the
     #: mirror's container.
     codec: JsonlCodec | None = None
+    #: The logical SHA-256 (of the decompressed stream) the confirmed plan
+    #: recorded for the source, for an action that moves a session branch.
+    #: Staging refuses a source that no longer hashes to it, so a branch that
+    #: moved after the plan was rebuilt is never written (CS-515). ``None`` for
+    #: every ordinary file copy.
+    expected_sha256: str | None = None
+    #: Destination identity captured by the ordinary sync planner. Specialised
+    #: restore/session plans leave it unbound and retain their own checks.
+    destination_precondition: DestinationPrecondition | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -330,6 +362,9 @@ class DeleteAction:
     relative_path: str
     #: ``local`` or ``cloud``: which side the file is being removed from.
     side: str
+    #: Identity of the surviving file at plan time. An ordinary propagated
+    #: deletion must not delete a replacement delivered before backup.
+    destination_precondition: DestinationPrecondition | None = None
 
 
 @dataclass

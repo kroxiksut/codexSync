@@ -64,6 +64,24 @@ class GuardianShrinkTests(unittest.TestCase):
         self.assertEqual(unknown.status, ValidationStatus.INDETERMINATE)
         self.assertIn(UNKNOWN_SCHEMA, unknown.codes)
 
+    def test_losing_every_project_is_a_drop_whatever_schema_the_empty_list_reads_as(self) -> None:
+        # CS-487: `{"local-projects": {}, "project-order": []}` is claimed by
+        # the legacy adapter; compared by schema id, losing all five projects
+        # read as a format change and was never called a shrink.
+        result = assess_suspicious_shrink(
+            self._report(0, 0, schema_id="legacy-v1"),
+            baseline=self._baseline(5, 9, schema_id="electron-v2"), baseline_verified=True,
+        )
+        self.assertEqual(result.status, ValidationStatus.SUSPICIOUS)
+        self.assertEqual(result.codes, (PROJECT_COUNT_DROP, BINDING_COUNT_DROP))
+
+    def test_an_empty_baseline_has_no_schema_to_mismatch(self) -> None:
+        candidate = self._report(3, 2, schema_id="electron-v2")
+        result = assess_suspicious_shrink(
+            candidate, baseline=self._baseline(0, 0, schema_id="legacy-v1"), baseline_verified=True,
+        )
+        self.assertEqual(result, candidate)
+
     def test_configurable_thresholds_are_applied(self) -> None:
         candidate = self._report(7, 10)
         baseline = self._baseline(10, 10)

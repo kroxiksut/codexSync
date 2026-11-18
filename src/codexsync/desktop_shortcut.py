@@ -38,6 +38,7 @@ from typing import Mapping
 
 from .exceptions import ConfigError
 from .fs_replace import replace_with_retry
+from .program_file import appimage_file
 
 LOG = logging.getLogger(__name__)
 
@@ -104,8 +105,9 @@ def window_program(
 ) -> Path | None:
     """The window program a menu entry should start: the one this process belongs to.
 
-    From an AppImage, the AppImage file (`$APPIMAGE`): the folder it runs from
-    is a mount that is gone after it exits. From a frozen build, the program
+    From an AppImage, the AppImage file (`$APPIMAGE`, believed only for this
+    very process -- `program_file.appimage_file`): the folder it runs from is
+    a mount that is gone after it exits. From a frozen build, the program
     beside this one. From pip or pipx, the script in the same `bin` folder as
     this interpreter -- not resolved, since a venv's `python` is a link out of
     that folder -- and only then `codexsync-gui` on `PATH`.
@@ -113,9 +115,9 @@ def window_program(
     env = os.environ if env is None else env
     executable = sys.executable if executable is None else executable
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
-    appimage = env.get("APPIMAGE", "")
-    if appimage and Path(appimage).is_absolute() and Path(appimage).is_file():
-        return Path(appimage)
+    appimage = appimage_file(env=env, executable=executable, frozen=frozen)
+    if appimage is not None:
+        return appimage
     if executable:
         beside = Path(executable).parent / WINDOW_PROGRAM
         if beside.is_file():
@@ -179,10 +181,24 @@ def install_shortcut(
             code="SHORTCUT_NO_PROGRAM",
         )
     icon_bytes = _packaged("codexsync.png")
-    _write(status.icon, icon_bytes)
-    LOG.warning("menu entry: icon written to %s", status.icon)
-    _write(status.entry, render_entry(program, hashlib.sha256(icon_bytes).hexdigest()).encode("utf-8"))
+    icon_hash = hashlib.sha256(icon_bytes).hexdigest()
+    recorded = (_read_entry(status.entry) or {}).get(ICON_HASH_KEY, "") if status.ours else ""
+    exists = status.icon.exists()
+    found = _sha256_of(status.icon) if exists else None
+    # An icon of that name is ours to replace only when it is missing, is the
+    # one our entry recorded, or already holds these bytes (CS-547). Anyone
+    # else's -- or one that cannot be read -- is left alone, and our entry
+    # then records no icon to remove.
+    write_icon = not exists or (found is not None and found in (icon_hash, recorded))
+    if not write_icon:
+        LOG.warning("menu entry: %s was not written by codexSync; it was left alone", status.icon)
+    # The entry first, with the icon's hash: if the icon then fails, `remove`
+    # still finds an entry naming it, instead of an icon nothing records.
+    _write(status.entry, render_entry(program, icon_hash if write_icon else "").encode("utf-8"))
     LOG.warning("menu entry: %s written, it starts %s", status.entry, program)
+    if write_icon and found != icon_hash:
+        _write(status.icon, icon_bytes)
+        LOG.warning("menu entry: icon written to %s", status.icon)
     return shortcut_status(env=env, platform=platform, executable=executable, frozen=frozen)
 
 
@@ -211,20 +227,39 @@ def remove_shortcut(
 
 
 def render_entry(program: Path, icon_sha256: str) -> str:
-    """The packaged entry with this program in `Exec`/`TryExec` and codexSync's mark."""
-    lines = []
+    """The packaged entry with this program in `Exec`/`TryExec` and codexSync's mark.
+
+    Only the `[Desktop Entry]` group is changed, and the marks go at its end:
+    appended to the file they would land in a `[Desktop Action ...]` group the
+    packaged entry may gain, where nothing reads them (CS-547).
+    """
+    lines: list[str] = []
+    marks = [f"{OWNER_KEY}=true", f"{ICON_HASH_KEY}={icon_sha256}"]
+    section = ""
     for line in _packaged("codexsync.desktop").decode("utf-8").splitlines():
-        if line.startswith("Exec="):
-            line = f"Exec={exec_value(program)}"
-            lines.append(line)
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if section == "Desktop Entry":
+                _insert_before_blank_tail(lines, marks)
+                marks = []
+            section = stripped[1:-1]
+        elif section == "Desktop Entry" and line.startswith("Exec="):
+            lines.append(f"Exec={exec_value(program)}")
             lines.append(f"TryExec={_string_value(program.as_posix())}")
             continue
-        if line.startswith("TryExec="):
+        elif section == "Desktop Entry" and line.startswith("TryExec="):
             continue
         lines.append(line)
-    lines.append(f"{OWNER_KEY}=true")
-    lines.append(f"{ICON_HASH_KEY}={icon_sha256}")
+    _insert_before_blank_tail(lines, marks)
     return "\n".join(lines) + "\n"
+
+
+def _insert_before_blank_tail(lines: list[str], extra: list[str]) -> None:
+    """Put ``extra`` after the last non-blank line, keeping a group's blank separator."""
+    index = len(lines)
+    while index > 0 and not lines[index - 1].strip():
+        index -= 1
+    lines[index:index] = extra
 
 
 _PLAIN_ARGUMENT = re.compile(r"^[A-Za-z0-9/._+,:@=-]+$")

@@ -172,6 +172,20 @@ ids disappeared; the store stayed on the 2026-09-05 snapshot.
 - It writes only into the Guardian root, so it is allowed while Codex is open.
   `doctor` warns when shrink quarantines are newer than `latest-good`.
 
+Amendment (2026-10-26, CS-487, CS-532, CS-533): a state with no project and no
+binding has no schema of its own. The legacy adapter claims
+`{"local-projects": {}, "project-order": []}` only because nothing Electron is
+left in it, so comparing schema ids made the loss of every project read as a
+format change: no shrink, an accept offered as `BASELINE_SCHEMA_CHANGED`, and a
+restore refused as `SCHEMA_CHANGED`. Where either side holds no projects
+(`guardian_models.holds_no_projects`), the shrink assessment, `guardian
+restore` and a global-state rollback compare counts, not schema ids; the
+adapters themselves are unchanged, so no state is claimed by two. The accept
+preview resolves the baseline the way the writer does — a pointer naming a
+snapshot proven gone gives way to the newest verified committed one, without
+rewriting the pointer — so a preview and the accept after it agree. `doctor`
+also warns when states held back for their format are newer than `latest-good`.
+
 ## D-015: A record-format rewrite by Codex is a conflict decided in bulk
 The session model assumed a history only grows: a branch changes at its end or
 not at all, which is what makes a prefix a fast-forward and anything else a
@@ -323,11 +337,45 @@ What was decided:
   config error). The process gate is not relaxed anywhere: every write inside a
   handoff goes through the same gate, lock, journal and backup as `sync` and
   `sessions apply`.
+- **Amendment (CS-506, 2026-10-26): the watcher is never ended from outside.**
+  Removing its task used to end the running watcher (`schtasks /End`,
+  `systemctl --user stop`, `launchctl bootout`, CS-448), which cut a full sync
+  half way and left `RECOVERY_REQUIRED`. The removal (and `apply` with
+  `handoff.enabled = false`) now leaves a new token in
+  `<temp_dir>/handoff-watch/stop-request` of the config the task ran with
+  (`watcher_stop`); the watcher compares it with the token it found at start
+  once per poll and ends between runs. A wait for the cloud is not a write, so
+  a stop ends it. On POSIX a `SIGTERM` is taken the same way. The sign-in sync
+  is not ended either (`NEVER_ENDED_SLOTS`); the read-only job and the copy of
+  `.codex` still are. One set of tasks per account: `apply`/`remove` from a
+  config other than the existing one the tasks run with refuses
+  (`AUTOMATION_OTHER_CONFIG`) unless `--replace-other-config` (CS-545).
 - **Chats not placed in `.codex` are counted, not hidden.** While
   `PROVEN_LAYOUTS` is empty a chat this machine has never held is not written
   into `.codex`, so a load reports how many newer chats stayed in the cloud
   copy only instead of calling the work loaded. (Amended by D-019: a chat this
   machine already holds is written in place.)
+
+**Amendment (2026-10-26, CS-501..504).** What "taken" and "delivered" mean,
+made exact after the second review:
+
+- A run that loads nothing takes nothing. A full sync with `sync.direction =
+  to_cloud` records no other machine's handoff as accepted, so that work stays
+  "not loaded here" and the watcher never says "you can start Codex" for it.
+  Chats a working set or a one-way direction kept out of `.codex` are counted
+  as held back, beside the chats that stayed in the cloud copy for other
+  reasons.
+- Delivery is checked against the whole cloud copy, without this machine's
+  `include_roots` or `exclude_globs` (only staging files and secrets are left
+  out): the handing machine's own roots and filters decide what its fingerprint
+  names, and a checker with narrower ones could otherwise never see it
+  delivered.
+- This machine's own handoff file is never rewritten from nothing because it
+  could not be read for a moment: it is read again, and a file that stays
+  unreadable refuses the write (remove it to start a new record).
+- The "handoff owed" mark is set before the first write to the cloud copy and
+  cleared only after the record is written, so a run that fails after writing
+  is announced by the next one.
 
 ## D-019: A continued chat is written over its own file without a proven layout
 Asked for by the owner on 2026-09-27 ("chats must sync, otherwise what is the
@@ -532,6 +580,10 @@ projects, 17 ordered, 2 pinned, 4 of 4 bindings; merging it into itself
 writes nothing; into a simulated laptop with 3 of them under other ids plus
 one of its own it adds 16, matches 3 by folder, and the result validates.
 
+*Amended 2026-10-26 (D-039):* "never removes" still holds for a merge -- a
+peer that lacks a project never removes it here. A project a person removed
+in Codex is now told apart and handled by `[sync] removed_projects`.
+
 ## D-023: An archive move follows the other machine
 Asked for by the owner on 2026-10-02 ("archived chats go to the archive too"),
 after the laptop's first full sync stopped for good on 11 chats the desktop
@@ -585,6 +637,15 @@ catalogue, or one naming neither copy, leaves the duplicate blocked as before.
 Checked against the laptop's plan of 2026-10-02: the 11 transitions carry no
 own entry, so all follow the mirror into `archived_sessions/`, and 10 of them
 are byte-identical.
+
+Amendment (2026-10-26, review CS-519): "the mirror keeps its container" holds
+only for a container codexSync writes. A mirror copy kept as `.jsonl.zst`
+(Codex's container, read on Python 3.14 and never written) planned a zstd
+write that `transcode` refuses, so every apply failed on it. Such a copy is
+rewritten in the configured `semantic.mirror_compression` beside it and the
+`.zst` removed through the same verified-backup deletion a move uses
+(`MIRROR_CONTAINER_REPLACED`); it is a rename of one branch, never a second
+file for one session id.
 
 ## D-024: Codex is asked to rebuild its chat list; one SQLite row is written
 Amended by D-032 (2026-10-09): a sync no longer asks; the request is a person's, and a stuck rebuild is put back to `complete` by `codex repair`.
@@ -1263,3 +1324,89 @@ What was decided:
   kept in the local cache either.
 - Git repositories are unaffected: what they publish names no file's
   contents.
+
+## D-039: A project removed in Codex is asked about, and removed everywhere once on purpose
+
+**Status:** accepted 2026-10-26 (owner: "make it a setting; by default ask
+what to do -- maybe it was removed by mistake; if it was removed on purpose
+on one machine, we expect it to be removed on the other too").
+
+Under D-022 a merge never removes a project. Since D-033 every list already
+taken is read again for projects that can now be added, so a project a person
+removed from Codex's sidebar came back on the very next sync, from any other
+machine that still had it (CS-497). A carried project could be removed
+nowhere.
+
+What was decided:
+
+- **A removal is told apart by this machine's own last list.** A project the
+  machine published last time that is neither in the state now nor under its
+  folder (Codex once re-created every project under new ids, 2026-09-13), and
+  that no other machine's removal explains, was removed in Codex here.
+- **`[sync] removed_projects` says what that means**, editable in the window:
+  - `ask` (**the default**): it stays removed here and is kept on the other
+    machines; the sync says so, and the person answers on the Projects page
+    or with `codexsync projects removed --everywhere|--bring-back <project>`;
+  - `remove`: on purpose, without a question;
+  - `bring_back`: by mistake -- the next sync takes it back from the other
+    machines (the behaviour before this decision).
+- **On purpose, every other machine removes it too, once.** The removal is
+  published in the machine's own project list (outside its content id, like
+  `projectless`); each other machine removes the project it names (same id,
+  else the one project here under that folder), with its chat bindings, pins,
+  order and sidebar entries, through the global-state envelope, and records
+  the removal as followed. A project made again later under that folder is
+  then kept, and carried like any new one. Two projects here that could be it
+  are left alone (`REMOVAL_AMBIGUOUS`).
+- **While a removal stands, no list brings the project back** -- neither
+  this machine's own merge nor a third machine that has not synced yet. A
+  machine that has followed the removal and still has a project there made it
+  again after the removal, so its list is believed. A removal ends once its
+  folder is a project here again.
+- **Folders and chats are never deleted.** Only Codex's list of projects
+  changes; a chat that was bound to the project sits where its folder puts it.
+- **Codex's SQLite is still not written.** Observed 2026-10-26 on Linux: a
+  project removed from the JSON alone, with its `projects`/`project_roots` rows
+  left in `state_5.sqlite`, was not taken back by Codex -- after a run and a
+  quit it rewrote the JSON without it. What its sidebar showed was not seen
+  (the screen was locked), and neither was what Codex itself writes when a
+  person removes a project.
+- **Guardian sees each removal as a drop.** On the machine where the person
+  removed the project, as before, and on each machine that follows: the drop
+  is accepted there with `guardian accept`, like any other (D-014).
+- **This machine's own list must be readable.** A list that exists but fails
+  its digest refuses the project step (`OWN_PROJECT_LIST_UNREADABLE`): read as
+  absent, every removal here would come back without a question.
+
+
+## D-040: Another machine's open journal does not block a write to this machine's own Codex state
+
+**Status:** accepted 2026-10-28 (owner, after the second code review asked
+whether it should).
+
+`JournalStore.begin` refused while any journal in the shared journals folder
+was open. For `sync`, `sessions` and `restore` that is right: they write the
+shared copy another machine's half-done run may have left half-written. But it
+also stopped every write that touches only this machine's `.codex` -- so a
+laptop that crashed mid-sync kept this computer from running `codex repair`
+on a Codex that would not start, until someone ran `recover` on the laptop.
+
+What was decided:
+
+- **The two envelopes that write only this machine's Codex state pass
+  `local_state_only`:** `app.commit_global_state` (repair, chat move, project
+  sync, Guardian restore, project move, a global-state rollback) and
+  `app._write_codex_catalogue` (thread catalogue, chat names, archive moves,
+  `codex repair`). A journal `proven_foreign` to this machine is logged as a
+  warning and does not block them; it is never closed from here.
+- **Only proof counts.** A journal is foreign when it records another machine,
+  or records none and names another machine's snapshot. A journal with neither
+  may be this machine's own and still blocks, as do this machine's own open
+  journals and any journal that cannot be read.
+- **Everything else is unchanged.** `sync`, `sessions` and `restore` still
+  wait for every open journal; `doctor` still reports any open journal as a
+  FAIL, because the next sync would refuse.
+- **Not changed with it:** the operation lock stays in the config's
+  `temp_dir` (CS-511). Moving it would let an old and a new process hold
+  different locks during an upgrade; one config per machine is the supported
+  setup.

@@ -234,6 +234,24 @@ class PagePlanTests(_Sandbox):
         self.assertEqual(page.target_relative_path, PAGE_REL)
         self.assertIn(CATALOG_NAMES_OTHER_PART, page.codes)
 
+    def test_a_page_arrives_where_the_first_file_codex_compressed_is_catalogued(self) -> None:
+        """CS-516: the chain holds the name the catalogue uses, not `x.jsonl.zst`."""
+        from codexsync.jsonl_codec import ZSTD_READABLE
+
+        if not ZSTD_READABLE:
+            self.skipTest("this Python has no compression.zstd (added in 3.14)")
+        from compression import zstd
+
+        self.write(self.local, BASE_REL + ".zst", zstd.compress(_base(5)))
+        self.write(self.cloud, BASE_REL, _base(5))
+        self.write(self.cloud, PAGE_REL, _page(3))
+        placements = ThreadPlacements(PlacementStatus.AVAILABLE, {CHAT: BASE_REL})
+        plan = self.plan(placements=placements, layout_id=SAME_PATH_LAYOUT_ID)
+        page = next(item for item in plan.items if item.session_hash == _hash(f"{CHAT}#page-9127"))
+        self.assertEqual(page.action, TransferAction.FAST_FORWARD_LOCAL, page.codes)
+        self.assertNotIn("CATALOG_PLACES_ELSEWHERE", page.codes)
+        self.assertIn(CATALOG_NAMES_OTHER_PART, page.codes)
+
     def test_a_working_set_naming_the_chat_covers_its_pages(self) -> None:
         self.write(self.cloud, BASE_REL, _base(8))
         self.write(self.cloud, PAGE_REL, _page(3))

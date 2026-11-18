@@ -23,6 +23,13 @@ from codexsync.session_index import (
 INDEX_NEWLINE = b"\n"
 
 
+def _moment(value: str) -> str:
+    """A small number in a fixture stands for that many seconds into 2026."""
+    if not value.isdigit():
+        return value
+    return f"2026-01-01T{int(value) // 3600:02d}:{int(value) // 60 % 60:02d}:{int(value) % 60:02d}Z"
+
+
 class SessionIndexTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path.cwd() / "test-sandbox" / f"session-index-{uuid.uuid4().hex}"
@@ -41,7 +48,7 @@ class SessionIndexTests(unittest.TestCase):
 
     def _index(self, name: str, records: list[tuple[str, str, str]], *, tail: bytes = b""):
         rows = [
-            {"id": sid, "thread_name": title, "updated_at": updated}
+            {"id": sid, "thread_name": title, "updated_at": _moment(updated)}
             for sid, title, updated in records
         ]
         return parse_session_index(self._write(name, rows, tail=tail))
@@ -108,6 +115,64 @@ class SessionIndexTests(unittest.TestCase):
         result = self._index("index.jsonl", [("a", "left", "5"), ("a", "right", "5")])
         self.assertFalse(result.reductions_agree)
         self.assertIn("REDUCTION_AMBIGUOUS", result.codes)
+
+    def test_updated_at_is_compared_as_a_moment_not_as_text(self) -> None:
+        """CS-521, the class of CS-466: a zone or a seventh digit orders text wrongly."""
+        result = self._index("index.jsonl", [
+            # 07:00Z, written later on another clock, as text the larger one.
+            ("a", "earlier", "2026-10-01T10:00:00+03:00"),
+            ("a", "later", "2026-10-01T08:00:00Z"),
+            ("b", "earlier", "2026-03-12T05:09:19.7567634Z"),
+            ("b", "later", "2026-03-12T05:09:19.7567635Z"),
+        ])
+        self.assertEqual(result.reduced_by_updated_at["a"].thread_name, "later")
+        self.assertEqual(result.reduced_by_updated_at["b"].thread_name, "later",
+                         "seven digits, one more than datetime keeps, are not a tie")
+        self.assertTrue(result.reductions_agree)
+
+    def test_an_updated_at_that_is_no_moment_leaves_the_max_reading_undefined(self) -> None:
+        result = self._index("index.jsonl", [("a", "one", "yesterday"), ("a", "two", "2026-01-01T00:00:00")])
+        self.assertIn("UPDATED_AT_UNREADABLE", result.updated_at_codes)
+        self.assertFalse(result.reductions_agree)
+
+    def test_two_records_at_one_moment_are_a_tie_not_a_pick(self) -> None:
+        result = self._index("index.jsonl", [("a", "left", "5"), ("a", "right", "5")])
+        self.assertIn("UPDATED_AT_TIE", result.updated_at_codes)
+
+    def test_the_merge_reads_each_side_by_the_proven_reduction(self) -> None:
+        """CS-521: the merge always took the last line, whatever was proven."""
+        base = self._index("base", [("a", "original", "1")])
+        local = self._index("local", [("a", "original", "1")])
+        # Max updated_at reads "renamed"; the last line is an older record.
+        remote = self._index("remote", [("a", "renamed", "3"), ("a", "original", "1")])
+        by_line = merge_session_indexes(base, local, remote, reduction=Reduction.LAST_LINE_WINS)
+        by_time = merge_session_indexes(base, local, remote, reduction=Reduction.MAX_UPDATED_AT)
+        self.assertEqual(by_line.merged["a"].thread_name, "original")
+        self.assertEqual(by_time.merged["a"].thread_name, "renamed")
+        self.assertNotIn("REDUCTION_AMBIGUOUS", by_time.codes, "a proven reading settles it")
+        self.assertIn("REDUCTION_AMBIGUOUS", merge_session_indexes(base, local, remote).codes,
+                      "unproven, the ambiguity still refuses a render")
+
+    def test_an_undefined_proven_reading_still_refuses(self) -> None:
+        base = self._index("base", [("a", "original", "1")])
+        local = self._index("local", [("a", "original", "1")])
+        remote = self._index("remote", [("a", "x", "5"), ("a", "y", "5")])
+        merged = merge_session_indexes(base, local, remote, reduction=Reduction.MAX_UPDATED_AT)
+        self.assertIn("UPDATED_AT_TIE", merged.codes)
+
+    def test_a_render_is_ordered_by_time_not_by_line_numbers_of_two_files(self) -> None:
+        """Line 1 of one file and line 3 of another say nothing about each other."""
+        base = self._index("base", [("a", "n", "1"), ("b", "n", "1"), ("c", "n", "1")])
+        local = self._index("local", [("c", "late here", "50"), ("a", "n", "1"), ("b", "n", "1")])
+        remote = self._index("remote", [("a", "n", "1"), ("c", "n", "1"), ("b", "early there", "20")])
+        merged = merge_session_indexes(base, local, remote, reduction=Reduction.LAST_LINE_WINS)
+        PROVEN_CONTRACTS[IndexContract.V1] = Reduction.LAST_LINE_WINS
+        try:
+            rendered = render_session_index(merged)
+        finally:
+            PROVEN_CONTRACTS.clear()
+        ids = [json.loads(line)["id"] for line in rendered.splitlines()]
+        self.assertEqual(ids, ["a", "b", "c"])
 
     # --- three-way merge --------------------------------------------------
 

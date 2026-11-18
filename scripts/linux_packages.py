@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -38,6 +39,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 import urllib.request
 
@@ -193,14 +195,31 @@ def nfpm_config(dist: Path, arch: str, meta: dict) -> dict:
     }
 
 
+#: Attempts at one download. A dropped connection (`IncompleteRead`, a reset)
+#: failed a whole release build once in six tries (CS-558); the hash check
+#: below still decides whether what arrived is the pinned file.
+FETCH_ATTEMPTS = 3
+
+
+def _download(url: str, *, attempts: int = FETCH_ATTEMPTS, sleep=time.sleep, opener=urllib.request.urlopen) -> bytes:
+    for attempt in range(1, attempts + 1):
+        try:
+            with opener(url, timeout=120) as response:  # noqa: S310 - pinned https URL
+                return response.read()
+        except (OSError, http.client.HTTPException) as error:
+            if attempt == attempts:
+                raise SystemExit(f"{url}: download failed {attempts} times, last: {error!r}") from error
+            sleep(5 * attempt)
+    raise AssertionError("unreachable")
+
+
 def fetch_tool(name: str, arch: str, folder: Path) -> Path:
     """Download one pinned tool, refuse it unless its SHA-256 is the pinned one."""
     pin = json.loads(TOOLS_FILE.read_text(encoding="utf-8"))[name][arch]
     target = folder / pin["url"].rsplit("/", 1)[1]
     if not target.exists():
         folder.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(pin["url"], timeout=120) as response:  # noqa: S310 - pinned https URL
-            target.write_bytes(response.read())
+        target.write_bytes(_download(pin["url"]))
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     if digest != pin["sha256"]:
         target.unlink()

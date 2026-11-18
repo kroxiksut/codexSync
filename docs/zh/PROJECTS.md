@@ -71,7 +71,7 @@ Codex 的侧边栏——项目、它们的顺序、哪些被置顶，以及显�
 - 下一台电脑把它**合并**进来：项目先按 id 匹配，再按文件夹匹配（经过
   [`[[path_mappings]]`](CONFIGURATION.md#path_mappings)）；本机没有的项目会按 Codex 在另一台
   电脑上写下的原样加入；
-- **不会删除任何东西**——只有本机才有的项目保持原位；
+- **合并不会删除任何东西**——只有本机才有的项目保持原位（唯一的例外是在 Codex 中移除的项目，见[下文](#在-codex-中移除的项目)）；
 - 对两台电脑都有的项目，置顶、顺序和对话绑定以另一台电脑为准，但只来自本机尚未接收过的
   列表，所以未变化的列表不会再次覆盖本机之后所做的修改；
 - 文件夹在本机不存在的项目仍会连同对话一起被加入（`D-034`，见下文）；
@@ -88,6 +88,27 @@ codexsync -c config.toml projects sync --confirm-plan <id>    # Codex 关闭：�
 写入与全局状态的其他任何修改走同一套流程：Codex 关闭、先做经过验证的备份，出错时可通过
 [`recover`](RECOVERY.md#被中断的写操作) 回滚。Codex 还把项目保存在 `state_*.sqlite` 中，codexSync
 从不修改其中的项目记录；侧边栏以 JSON 文件为准。
+
+### 在 Codex 中移除的项目
+
+你在一台机器上从 Codex 列表中移除的项目，下次同步不会把它带回来（`D-039`）。
+接下来怎么做由设置 [`[sync] removed_projects`](CONFIGURATION.md#各节)（设置 → 同步）决定：
+
+- `ask`（默认）——项目在本机保持移除，在其他机器上保留。同步会告诉你，你只需回答一次：
+  **有意**——其他机器在下次同步时也会移除它；**误删**——本机下次同步会从它们那里放回；
+- `remove`——本机的每次移除都是有意的，不再询问；
+- `bring_back`——本机的每次移除都是误删：下次同步会放回。
+
+```powershell
+codexsync -c config.toml projects removed                        # 本机（等待答复）和其他机器上的移除
+codexsync -c config.toml projects removed --everywhere <项目>    # 有意：也在其他机器上移除
+codexsync -c config.toml projects removed --bring-back <项目>    # 误删：下次同步放回
+```
+
+在窗口中位于 **项目 → 在 Codex 中移除的项目**。跟随移除的机器会把项目连同对话绑定、
+置顶和侧栏条目一起从 Codex 列表中移除，只做一次：之后为同一文件夹重新建立的项目会保留，
+并像任何新项目一样同步。文件夹和对话永远不会被删除。Guardian 会在每台机器上把这次移除
+看作一次减少，因此请像对待你自己造成的减少一样[在那里接受它](GUARDIAN.md)。
 
 ### 在另一种操作系统上
 

@@ -444,6 +444,138 @@ class SessionTransferApplyTests(unittest.TestCase):
         self.assertEqual(pending[0].state, JournalState.RECOVERY_REQUIRED)
         self.assertIsNotNone(pending[0].backup_snapshot)
 
+    def test_interrupted_third_copy_reports_applied_count_and_safe_failure(self) -> None:
+        for name in ("s1", "s2", "s3"):
+            self._branch(self.local_dir, name, ["one"])
+            self._branch(self.cloud_dir, name, ["one", "two"])
+        plan = self._plan()
+        reports = []
+        original = __import__("codexsync.sync_engine", fromlist=["SyncEngine"]).SyncEngine._replace_staged
+        calls = []
+
+        def fail_third(engine, action, staged, unchanged=None):
+            calls.append(action.relative_path)
+            if len(calls) == 3:
+                raise FailSafeError("private content and C:/private/path", code="CODEX_STATE_UNKNOWN")
+            return original(engine, action, staged, unchanged)
+
+        with patch("codexsync.sync_engine.SyncEngine._replace_staged", new=fail_third):
+            with self.assertRaises(FailSafeError) as caught:
+                self._apply(plan, phase_progress=lambda *args: reports.append(args))
+        self.assertEqual([r[1] for r in reports if r[0] == "stage_chats"], [0, 1, 2, 3])
+        self.assertEqual([r[1] for r in reports if r[0] == "apply_chats"], [0, 1, 2])
+        (journal,) = JournalStore(self.root / ".tmp").non_terminal()
+        self.assertEqual(caught.exception.recovery_operation_id, journal.operation_id)
+        self.assertEqual(journal.state, JournalState.RECOVERY_REQUIRED)
+        self.assertEqual(journal.failure_code, "CODEX_STATE_UNKNOWN")
+        self.assertEqual(journal.failure_params["relative_path"], calls[2])
+        failed_item = next(item for item in plan.items if item.target_relative_path == calls[2])
+        self.assertEqual(journal.failure_params["session_hash"], failed_item.session_hash)
+        self.assertEqual(journal.failure_params["applied"], 2)
+        self.assertEqual(journal.failure_params["staged"], 3)
+        raw = next((self.root / ".tmp" / "journals").glob("*.json")).read_text(encoding="utf-8")
+        self.assertNotIn("private content", raw)
+        self.assertNotIn("C:/private/path", raw)
+
+    def test_changed_destination_has_its_own_safe_diagnostic(self) -> None:
+        local = self._branch(self.local_dir, "s1", ["one"])
+        self._branch(self.cloud_dir, "s1", ["one", "two"])
+        plan = self._plan()
+        original = __import__("codexsync.sync_engine", fromlist=["SyncEngine"]).SyncEngine._replace_staged
+
+        def changed(engine, action, staged, unchanged=None):
+            local.write_text("changed by another process", encoding="utf-8")
+            unchanged()
+            return original(engine, action, staged, unchanged)
+
+        with patch("codexsync.sync_engine.SyncEngine._replace_staged", new=changed):
+            with self.assertRaises(FailSafeError):
+                self._apply(plan)
+        (journal,) = JournalStore(self.root / ".tmp").non_terminal()
+        self.assertEqual(journal.failure_code, "DESTINATION_CHANGED")
+        self.assertEqual(journal.failure_params["relative_path"], "sessions/s1.jsonl")
+
+    def test_full_readback_mismatch_identifies_the_written_chat(self) -> None:
+        local = self._branch(self.local_dir, "s1", ["one"])
+        self._branch(self.cloud_dir, "s1", ["one", "two"])
+        plan = self._plan()
+        from codexsync.app import _verify_transferred_branches
+
+        def corrupt_then_verify(*args):
+            local.write_text("corrupt", encoding="utf-8")
+            return _verify_transferred_branches(*args)
+
+        with patch("codexsync.app._verify_transferred_branches", new=corrupt_then_verify):
+            with self.assertRaises(FailSafeError):
+                self._apply(plan)
+        (journal,) = JournalStore(self.root / ".tmp").non_terminal()
+        self.assertEqual(journal.failure_code, "TRANSFER_READBACK_MISMATCH")
+        self.assertEqual(journal.failure_params["relative_path"], "sessions/s1.jsonl")
+
+    def test_failed_immediate_verification_counts_the_file_already_replaced(self) -> None:
+        local = self._branch(self.local_dir, "s1", ["one"])
+        self._branch(self.cloud_dir, "s1", ["one", "two"])
+        plan = self._plan()
+        from codexsync.sync_engine import _sha256_file
+
+        def mismatched(path):
+            return "bad-hash" if path == local else _sha256_file(path)
+
+        with patch("codexsync.sync_engine._sha256_file", new=mismatched):
+            with self.assertRaises(FailSafeError):
+                self._apply(plan)
+        (journal,) = JournalStore(self.root / ".tmp").non_terminal()
+        self.assertEqual(journal.failure_code, "DESTINATION_VERIFY_FAILED")
+        self.assertEqual(journal.failure_params["applied"], 1)
+
+    def test_operating_system_failure_records_errno_without_private_message(self) -> None:
+        import errno
+
+        self._branch(self.local_dir, "s1", ["one"])
+        self._branch(self.cloud_dir, "s1", ["one", "two"])
+        plan = self._plan()
+        with patch("codexsync.sync_engine.SyncEngine._replace_staged",
+                   side_effect=OSError(errno.ENOSPC, "private data")):
+            with self.assertRaises(OSError):
+                self._apply(plan)
+        (journal,) = JournalStore(self.root / ".tmp").non_terminal()
+        self.assertEqual(journal.failure_code, "FILE_IO_ERROR")
+        self.assertEqual(journal.failure_params["errno"], errno.ENOSPC)
+        self.assertNotIn("private data", journal.failure_message)
+
+    def test_tasks_never_substitute_an_older_plan_for_a_missing_current_plan(self) -> None:
+        from dataclasses import replace
+        from codexsync.gui.task_items import load_latest_session_task
+
+        self._branch(self.local_dir, "s1", ["one"])
+        self._branch(self.cloud_dir, "s1", ["one", "two"])
+        plan = self._plan()
+        plans = self.root / "plans"
+        plans.mkdir()
+        save_transfer_plan(plan, plans / "old.json")
+        store = JournalStore(self.root / ".tmp")
+        old = store.begin("sessions", plan.plan_id, 1, machine_id="machine-a")
+        store.transition(old, JournalState.FAILED)
+        newer = replace(old, operation_id=str(uuid.uuid4()), plan_hash="missing-plan",
+                        created_at_utc="9999-01-01T00:00:00Z")
+        store.write(newer)
+        self.assertIsNone(load_latest_session_task(self.config_path))
+
+    def test_a_failure_after_the_commit_does_not_fail_the_transfer(self) -> None:
+        # CS-513: the semantic record was written after COMMITTED inside the
+        # failure handler, which then tried COMMITTED -> FAILED and raised.
+        self._branch(self.local_dir, "s1", ["one"])
+        remote = self._branch(self.cloud_dir, "s1", ["one", "two"])
+        plan = self._plan()
+        with patch("codexsync.app._record_semantic_manifest", side_effect=OSError("semantic root unwritable")),                 patch("codexsync.backup.BackupManager.prune", side_effect=OSError("backup folder busy")):
+            self.assertEqual(self._apply(plan), 1)
+        self.assertEqual((self.local_dir / "sessions" / "s1.jsonl").read_bytes(), remote.read_bytes())
+        (journal,) = [
+            j for j in (JournalStore(self.root / ".tmp").load(p.stem) for p in (self.root / ".tmp" / "journals").glob("*.json"))
+            if j.family == "sessions"
+        ]
+        self.assertEqual(journal.state, JournalState.COMMITTED)
+
 
 if __name__ == "__main__":
     unittest.main()

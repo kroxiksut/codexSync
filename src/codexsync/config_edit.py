@@ -30,6 +30,7 @@ import hashlib
 import math
 import os
 from pathlib import Path
+import platform
 import re
 import tempfile
 import tomllib
@@ -37,7 +38,7 @@ from typing import Any
 
 from .config import _paths_overlap, decode_config_bytes, parse_config_text, require_config_outside_codex
 from .exceptions import ConfigError, ConflictError, FailSafeError
-from .guardian_models import require_guardian_machine_id
+from .guardian_models import normalize_machine_id, require_guardian_machine_id
 from .models import AppConfig
 from .runtime import _require_mutation_compatible_config
 from .fs_replace import replace_with_retry
@@ -985,19 +986,43 @@ def config_history_dir(cfg: AppConfig, config_path: Path) -> Path:
 
 
 def list_config_history(cfg: AppConfig, config_path: Path) -> list[ConfigHistoryEntry]:
-    """Saved versions, newest first. Read-only: an absent directory is an empty list."""
+    """Saved versions of this machine's config, newest first.
+
+    Read-only: an absent directory is an empty list. The folder sits in the
+    shared workspace, so every machine's configs are kept there; a version is
+    this machine's when the machine id it names is this one's (CS-542).
+    """
     history = config_history_dir(cfg, config_path)
     if not history.is_dir():
         return []
+    own = _history_machine(cfg.identity.machine_id)
     entries: list[ConfigHistoryEntry] = []
     for candidate in history.iterdir():
         match = _HISTORY_NAME.match(candidate.name)
         if match is None or not candidate.is_file():
             continue
+        if _history_machine(_saved_machine_id(candidate)) != own:
+            continue
         created = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S%f").replace(tzinfo=timezone.utc)
         entries.append(ConfigHistoryEntry(candidate.name, candidate, candidate.stat().st_size, created))
     entries.sort(key=lambda entry: (entry.created_utc, entry.name), reverse=True)
     return entries
+
+
+def _history_machine(machine_id: object) -> str:
+    """The machine a saved version belongs to; no id means the host it ran on."""
+    raw = machine_id.strip() if isinstance(machine_id, str) else ""
+    return normalize_machine_id(raw or platform.node()) or "unknown-machine"
+
+
+def _saved_machine_id(path: Path) -> object:
+    """`identity.machine_id` of a saved version, or ``None`` when it cannot be read."""
+    try:
+        data = tomllib.loads(decode_config_bytes(path.read_bytes(), source=str(path)))
+    except (OSError, ConfigError, tomllib.TOMLDecodeError):
+        return None
+    identity = data.get("identity")
+    return identity.get("machine_id") if isinstance(identity, dict) else None
 
 
 def save_config_text(
@@ -1252,7 +1277,10 @@ def parse_config_value(name: str, text: str) -> Any:
         ok = isinstance(value, (int, float)) and not isinstance(value, bool)
         value = float(value) if ok else value
     elif isinstance(expected, int):
-        ok = isinstance(value, int) and not isinstance(value, bool)
+        # A whole number in the template says little: some of these settings
+        # take fractions (`guardian.poll_interval_seconds = 0.5`). Any number
+        # passes here, and the loader the change goes through decides (CS-538).
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
     elif isinstance(expected, list):
         ok = isinstance(value, list)
     else:

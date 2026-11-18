@@ -19,9 +19,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import errno
+import json
 import logging
 import os
 from pathlib import Path
+import secrets
 import time
 
 LOG = logging.getLogger(__name__)
@@ -66,3 +68,25 @@ def replace_with_retry(
             time.sleep(REPLACE_BACKOFF_SECONDS * (2 ** attempt))
             if before_retry is not None:
                 before_retry()
+
+
+def write_json_atomically(path: Path | str, payload: object) -> None:
+    """Write a small JSON file of codexSync's own and replace it in one step.
+
+    Staged beside ``path`` under a unique name, so a staging file a killed run
+    left behind never blocks the next write, flushed to disk, then put in
+    place with :func:`replace_with_retry`. A plain ``write_text`` truncates
+    the target first, and a run killed there left a plan or a resolution file
+    that every later sync refused to read (CS-517).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.codexsync.tmp")
+    try:
+        with temp.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        replace_with_retry(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)

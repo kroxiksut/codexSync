@@ -172,6 +172,16 @@ class GuardianRestoreTests(_Fixture):
         self.assertEqual(len(journals), 1)
         self.assertEqual(JournalStore(self.root / ".tmp").load(journals[0].stem).state, JournalState.COMMITTED)
 
+    def test_a_live_state_another_program_holds_is_a_fail_safe_stop(self) -> None:
+        # CS-535: a bare read_bytes let PermissionError escape: "Unhandled", exit 1.
+        snapshot_id = self._snapshot(self.state_file.read_bytes())
+        self._write_state(self._state(**{"project-order": ["p-beta", "p-alpha"]}))
+        with self._gate(_StoppedGate()):
+            plan, _ = restore_global_state(self.config_path, snapshot_id=snapshot_id)
+            with patch("codexsync.app.read_shared", side_effect=PermissionError(13, "held")):
+                with self.assertRaises(FailSafeError):
+                    restore_global_state(self.config_path, snapshot_id=snapshot_id, confirm_plan=plan.plan_id)
+
     def test_apply_refuses_while_codex_runs_and_writes_nothing(self) -> None:
         snapshot_id = self._snapshot(self.state_file.read_bytes())
         self._write_state(self._state(**{"thread-project-assignments": {"t": {"projectKind": "local", "projectId": "p-alpha"}}}))

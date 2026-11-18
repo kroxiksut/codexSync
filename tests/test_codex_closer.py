@@ -415,7 +415,7 @@ class SyncTests(unittest.TestCase):
                 self.config, probe=lambda: ProcessState.STOPPED, notifier=lambda *a, **k: None,
                 sleep=lambda s: None, should_stop=lambda: True,
             )
-        self.assertEqual(calls, [{"close_codex": False}])
+        self.assertEqual([call["close_codex"] for call in calls], [False])
 
 
 if __name__ == "__main__":

@@ -5,10 +5,10 @@
 codexSync hands Codex work between a person's own machines through a folder
 they already sync (Dropbox, OneDrive, Yandex.Disk, Syncthing...): settings,
 chats, chat names and the project list, with backups, recovery and a window on
-top of the command line. Version line: 0.2 (alpha `0.2.0a1`).
+top of the command line. Version line: 0.2 (`0.2.0`).
 
 Binding rules are in `AI_RULES.md`; decisions with their reasons in
-`docs/dev/DECISIONS.md` (`D-001`...`D-030`); architecture in `CLAUDE.md`. When
+`docs/dev/DECISIONS.md` (`D-001`...`D-038`); architecture in `CLAUDE.md`. When
 this file disagrees with them, they win.
 
 ## Goal

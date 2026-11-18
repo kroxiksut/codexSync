@@ -3,11 +3,11 @@
     python scripts/npm_packages.py stage --tag v0.2.0-alpha.2 --assets release --out npm
     python scripts/npm_packages.py publish --tag v0.2.0-alpha.2 --dir npm
 
-Laid out like Codex's own npm package. `codexsync` is a launcher
+Laid out like Codex's own npm package. `@kroxut/codexsync` is a launcher
 (`packaging/npm`) whose `optionalDependencies` name one package per system,
 each a version of the same name -- `codexsync-linux-x64` is an alias of
-`codexsync@0.2.0-alpha.2-linux-x64` -- and npm installs only the one whose
-`os` and `cpu` match. A platform package carries the release build exactly as
+`@kroxut/codexsync@0.2.0-alpha.2-linux-x64` -- and npm installs only the one
+whose `os` and `cpu` match. A platform package carries the release build exactly as
 the release ships it: the two Windows programs from their zips, the Linux
 folder from its `tar.gz`. Nothing is rebuilt, and no package has an install
 script: nothing runs on the user's machine until they run codexSync.
@@ -44,7 +44,16 @@ import zipfile
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = REPO_ROOT / "packaging" / "npm"
 LICENSE_FILE = REPO_ROOT / "LICENSE"
-NAME = "codexsync"
+#: The name on npm. Scoped, because npm cannot rename a package and a scope
+#: stays the publisher's whatever the repository is called (owner, 2026-10-28).
+NAME = "@kroxut/codexsync"
+#: How `npm pack` names a scoped package's file, and the staged folders.
+PACKED = NAME.lstrip("@").replace("/", "-")
+#: The folder npm installs each platform package under, which
+#: `packaging/npm/lib/launch.js` resolves; the alias in `optionalDependencies`.
+ALIAS = "codexsync"
+#: The release assets' own name, which npm does not change.
+RELEASE_NAME = "codexsync"
 PROGRAMS = ("codexsync", "codexsync-gui")
 
 #: npm's name for each system -> what the release asset is called and what
@@ -99,7 +108,7 @@ def platform_tag(version: str, platform: str) -> str:
 def launcher_tag(version: str, latest: str | None) -> str:
     """`latest` for a release, and for a pre-release while no release exists.
 
-    `latest` is what `npm install codexsync` installs. While every version is
+    `latest` is what `npm install @kroxut/codexsync` installs. While every version is
     a pre-release it follows the newest one, as `pip install --pre` would;
     once a release exists a pre-release only moves its own label. A `latest`
     naming a platform package (npm gives the very first version published
@@ -143,7 +152,7 @@ def platform_manifest(platform: str, version: str, meta: dict) -> dict:
     return {
         "name": NAME,
         "version": f"{version}-{platform}",
-        "description": f"The {platform} build of codexSync, installed by the codexsync package.",
+        "description": f"The {platform} build of codexSync, installed by the {NAME} package.",
         **_common(meta),
         "os": [system["os"]],
         "cpu": [system["cpu"]],
@@ -164,7 +173,7 @@ def launcher_manifest(version: str, meta: dict) -> dict:
         "os": sorted({system["os"] for system in PLATFORMS.values()}),
         "cpu": sorted({system["cpu"] for system in PLATFORMS.values()}),
         "optionalDependencies": {
-            f"{NAME}-{platform}": f"npm:{NAME}@{version}-{platform}" for platform in PLATFORMS
+            f"{ALIAS}-{platform}": f"npm:{NAME}@{version}-{platform}" for platform in PLATFORMS
         },
     }
 
@@ -217,7 +226,7 @@ def _stage_linux(assets: Path, tag: str, system: dict, dist: Path) -> None:
         # The executable bits would be lost on the way, and npm packs a file's
         # mode as it finds it.
         raise SystemExit("a Linux package is staged on Linux or macOS, where file modes survive")
-    archive = assets / f"{NAME}-{tag}-{system['asset']}.tar.gz"
+    archive = assets / f"{RELEASE_NAME}-{tag}-{system['asset']}.tar.gz"
     with tempfile.TemporaryDirectory() as work, tarfile.open(archive) as bundle:
         members = _safe_members(bundle)
         if hasattr(tarfile, "data_filter"):
@@ -244,7 +253,7 @@ def stage(assets: Path, tag: str, out: Path, platforms: list[str]) -> list[Path]
     folders = []
     for platform in platforms:
         system = PLATFORMS[platform]
-        folder = out / f"{NAME}-{platform}"
+        folder = out / f"{PACKED}-{platform}"
         if folder.exists():
             shutil.rmtree(folder)
         folder.mkdir(parents=True)
@@ -259,7 +268,7 @@ def stage(assets: Path, tag: str, out: Path, platforms: list[str]) -> list[Path]
         _write_manifest(folder, platform_manifest(platform, version, meta))
         folders.append(folder)
 
-    launcher = out / NAME
+    launcher = out / PACKED
     if launcher.exists():
         shutil.rmtree(launcher)
     shutil.copytree(LAUNCHER, launcher)
@@ -314,8 +323,8 @@ def _latest() -> str | None:
 
 def publish(folder: Path, tag: str) -> int:
     version = npm_version(_release_meta().version_from_tag(tag))
-    order = [(folder / f"{NAME}-{version}-{platform}.tgz", f"{version}-{platform}", platform) for platform in PLATFORMS]
-    order.append((folder / f"{NAME}-{version}.tgz", version, None))
+    order = [(folder / f"{PACKED}-{version}-{platform}.tgz", f"{version}-{platform}", platform) for platform in PLATFORMS]
+    order.append((folder / f"{PACKED}-{version}.tgz", version, None))
     missing = [str(path) for path, _, _ in order if not path.is_file()]
     if missing:
         raise SystemExit("not packed: " + ", ".join(missing))

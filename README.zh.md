@@ -77,18 +77,17 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 **Windows，无需 Python：** 从 [Releases](https://github.com/kroxiksut/codexSync/releases)
 下载 `codexsync-gui-…-windows-amd64.zip`（或 `…-arm64.zip`），解压后运行 `codexsync-gui.exe`。同一个可执行文件也能运行命令行子命令。需要 Windows 10（1809）或更新版本。
 
-**使用 Node.js**，在 Windows 或 Linux 上，从下一个版本起：`npm install -g codexsync`（[通过 npm 安装](docs/zh/README.md#安装)）。
+**使用 Node.js**，在 Windows 或 Linux 上：`npm install -g @kroxut/codexsync`（[通过 npm 安装](docs/zh/README.md#安装)）。
 
-**使用 Python 3.11+**，在 Windows、macOS 或 Linux 上——0.2 处于 alpha 阶段时需要加 `--pre`，否则 pip 会安装 0.1；
-加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
+**使用 Python 3.11+**，在 Windows、macOS 或 Linux 上——加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
 写入会被拒绝；在 Linux 上它已经得到验证（[平台](docs/zh/README.md#平台)）。在 Linux 上系统自带的 Python 不允许 `pip install`（PEP 668），
 请使用 `pipx` 或虚拟环境——两种方式及其更新和卸载见[在 Linux 上安装](docs/zh/README.md#在-linux-上)。
 
 ```powershell
-python -m pip install --upgrade --pre "codexsync[gui]"    # 窗口和命令行
-codexsync-gui                                             # 首次启动时，窗口会帮你创建或打开 config.toml
+python -m pip install --upgrade "codexsync[gui]"    # 窗口和命令行
+codexsync-gui                                       # 首次启动时，窗口会帮你创建或打开 config.toml
 
-python -m pip install --upgrade --pre codexsync           # 只有命令行，没有依赖
+python -m pip install --upgrade codexsync           # 只有命令行，没有依赖
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
@@ -114,11 +113,9 @@ codexsync -c config.toml doctor
 
 ## 状态
 
-**0.2.0 alpha 1** —— 第一个在命令行之外带上窗口（`codexsync[gui]` 或 `codexsync-gui.exe`）的版本。
-之所以是 alpha，是因为 0.2 理解并修改的 Codex 状态比 0.1 多得多：它已在日常使用中，每次写入仍然经过锁、
-日志和经过校验的备份，但在 0.2.0 之前，它需要在比我们更多的机器上运行。如果你在两台或更多机器上使用 Codex，
-请试用并[告诉我们](https://github.com/kroxiksut/codexSync/issues/new/choose)结果。alpha 写入的数据，
-之后的每个版本都能读取。
+**0.2.0** —— 第一个在命令行之外带上窗口（`codexsync[gui]` 或 `codexsync-gui.exe`）的稳定版本，也是第一个提供 Linux 软件包和 npm 包的版本。
+0.2 理解并修改的 Codex 状态比 0.1 多得多，每次写入都经过锁、日志和经过校验的备份。如果你在两台或更多机器上使用 Codex，
+请[告诉我们](https://github.com/kroxiksut/codexSync/issues/new/choose)结果。0.2 alpha 写入的数据仍然可以读取。
 
 ### 如果你有 Mac
 
@@ -133,7 +130,7 @@ codexsync codex processes
 
 它显示安全检查会据以判断的内容：每个匹配的程序的进程号、父进程号和短名称，以及匹配它的规则——
 名称，或桌面应用对应的 `ChatGPT.app/Contents/MacOS/` 标记。在 Mac 上，检查在得到验证之前读作
-`UNKNOWN`；下面一行说明如果信任它，它会读到什么。这需要 codexSync 0.2.0a2 或更新版本。
+`UNKNOWN`；下面一行说明如果信任它，它会读到什么。这需要 codexSync 0.2.0 或更新版本。
 不安装任何东西时，可以用下面的命令查看原始列表（路径中可能含有你的用户名）：
 
 ```sh

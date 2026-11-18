@@ -13,6 +13,7 @@ closed underneath them -- behind an animation they did not ask for.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 
 from .. import theme
 from ..controller import Outcome
@@ -31,6 +32,8 @@ class OverviewModel(Model):
         #: the automation line is what the mock-up puts under the dry run.
         self.journals: Outcome | None = None
         self.automation: Outcome | None = None
+        #: The sandbox fix commands were put on the clipboard (CS-483).
+        self.sandbox_copied = False
 
     def reset_plans(self) -> None:
         self.dry_run = None
@@ -56,6 +59,15 @@ class OverviewScreen(Screen):
         self.open_recovery.clicked.connect(lambda: self.host.go_to("recovery"))
         self.recovery.actions.addWidget(self.open_recovery)
         self.body.addWidget(self.recovery)
+
+        # Project folders Codex's sandbox cannot protect (CS-483): the check
+        # names them, the button hands over the commands that fix them.
+        self.sandbox = Banner()
+        self.copy_sandbox = button(self.t("overview.sandbox.copy"))
+        self.copy_sandbox.clicked.connect(self._copy_sandbox_commands)
+        self.sandbox.actions.addWidget(self.copy_sandbox)
+        self.body.addWidget(self.sandbox)
+        self.sandbox.setVisible(False)
 
         self.summary = label()
         frame, inner = card(self.t("checks.title"), self.summary)
@@ -111,6 +123,7 @@ class OverviewScreen(Screen):
             return
         self.model.busy = True
         self.model.state = None
+        self.model.sandbox_copied = False
         self.render()
         controller = self.host.controller
 
@@ -141,8 +154,36 @@ class OverviewScreen(Screen):
                 self.banner.setVisible(True)
             self.table.setRowCount(0)
             self.summary.setText("")
+        self._render_sandbox()
         self._render_dry_run()
         self._render_side()
+
+    def sandbox_commands(self) -> list[str]:
+        """The `icacls` lines the sandbox check printed, in its order."""
+        outcome = self.model.state
+        if outcome is None or not outcome.ok:
+            return []
+        check = next((item for item in outcome.value.checks if item.name == "codex_sandbox"), None)
+        if check is None:
+            return []
+        return [str(params.get("command")) for code, params in check.parts if code == "codex_sandbox.fix"]
+
+    def _render_sandbox(self) -> None:
+        commands = self.sandbox_commands()
+        if not commands:
+            self.sandbox.setVisible(False)
+            return
+        detail = self.t("overview.sandbox.copied" if self.model.sandbox_copied else "overview.sandbox.detail")
+        self.sandbox.show_message("attention", self.p("overview.sandbox.title", len(commands)), detail, self.palette_)
+
+    def _copy_sandbox_commands(self) -> None:
+        commands = self.sandbox_commands()
+        clipboard = QGuiApplication.clipboard()
+        if not commands or clipboard is None:
+            return
+        clipboard.setText("\n".join(commands))
+        self.model.sandbox_copied = True
+        self._render_sandbox()
 
     def _open_automation(self) -> None:
         self.host.go_to("automation")

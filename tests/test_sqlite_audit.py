@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import unittest
+from unittest.mock import patch
 import uuid
 
 from codexsync.sqlite_audit import (
@@ -52,6 +53,40 @@ class SQLiteAuditTests(unittest.TestCase):
         self.assertEqual(len(sets), 2)
         state_set = next(item for item in sets if item.database.relative_path == "state_1.sqlite")
         self.assertEqual(len(state_set.sidecars), 1)
+
+    def test_unreadable_wal_metadata_never_falls_back_to_checkpointed_main_database(self) -> None:
+        database = self.root / "state_9.sqlite"
+        connection = sqlite3.connect(database)
+        connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, archived INTEGER)")
+        connection.execute("CREATE TABLE backfill_state (id INTEGER PRIMARY KEY, status TEXT)")
+        connection.execute("INSERT INTO backfill_state VALUES (1, 'complete')")
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA wal_autocheckpoint=0")
+        connection.execute("UPDATE backfill_state SET status = 'running' WHERE id = 1")
+        connection.commit()
+        wal = database.with_name(database.name + "-wal")
+        before = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in self.root.iterdir()}
+        names_before = sorted(path.name for path in self.root.iterdir())
+
+        real_stat = Path.stat
+
+        def denied_wal_stat(path, *args, **kwargs):
+            if path.name == wal.name:
+                raise PermissionError("WAL metadata is unavailable")
+            return real_stat(path, *args, **kwargs)
+
+        try:
+            with patch.object(Path, "stat", denied_wal_stat):
+                from codexsync.sqlite_audit import read_backfill_state
+                reading = read_backfill_state(self.root)
+            self.assertIs(reading.status, PlacementStatus.INDETERMINATE)
+            after = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in self.root.iterdir()}
+            self.assertEqual(after, before)
+            self.assertEqual(sorted(path.name for path in self.root.iterdir()), names_before)
+        finally:
+            connection.close()
 
 
 class ThreadPlacementTests(unittest.TestCase):
@@ -145,6 +180,25 @@ class ThreadPlacementTests(unittest.TestCase):
         self.assertEqual((database.stat().st_size, database.stat().st_mtime_ns), before)
         self.assertFalse((self.root / "state_9.sqlite-wal").exists())
         self.assertFalse((self.root / "state_9.sqlite-journal").exists())
+
+    def test_a_sidecar_that_appears_during_the_reading_makes_it_indeterminate(self) -> None:
+        # CS-524: whoever created it -- Codex starting, or a plain read-only
+        # open after a checkpoint -- the picture is not a whole state.
+        target = self.root / "sessions" / "f.jsonl"
+        target.write_bytes(b"{}\n")
+        self._catalogue([("thread-f", str(target), 0)])
+        from codexsync import sqlite_audit
+
+        real = sqlite_audit._relative_rollout
+
+        def relative(value, root):
+            (self.root / "state_9.sqlite-shm").write_bytes(b"")
+            return real(value, root)
+
+        with patch("codexsync.sqlite_audit._relative_rollout", side_effect=relative):
+            placements = read_thread_placements(self.root)
+        self.assertIs(placements.status, PlacementStatus.INDETERMINATE)
+        self.assertEqual(placements.codes, ("CATALOG_CHANGED",))
 
 
 if __name__ == "__main__":

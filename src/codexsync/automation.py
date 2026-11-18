@@ -14,14 +14,17 @@ cannot disagree about what the job does.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import logging
+import os
 from pathlib import Path
 
 from .config import load_config
 from .exceptions import FailSafeError
 from .models import AppConfig
 from .process_detector import CodexProcessDetector
+from .watcher_stop import request_watcher_stop
 from .system_scheduler import (
     HANDOFF_MODE,
     HANDOFF_SLOT,
@@ -35,9 +38,11 @@ from .system_scheduler import (
     SchedulerError,
     SchedulerStatus,
     SystemScheduler,
+    _config_argument,
     default_protected_roots,
     find_01_tasks,
     job_command,
+    job_command_problem,
     system_scheduler,
 )
 
@@ -82,6 +87,9 @@ class AutomationView:
     #: Tasks the 0.1 scheduler scripts installed, still running `codexsync sync`
     #: on their own timer; found so they can be named, never touched.
     legacy_tasks: tuple[LegacyTask, ...] = ()
+    #: Why every task this program would install would fail to start, or
+    #: None (`system_scheduler.job_command_problem`, CS-546).
+    command_problem: str | None = None
 
     @property
     def backup_scheduled(self) -> bool:
@@ -244,6 +252,7 @@ def automation_status(
         handoff_status=watcher_status,
         handoff_status_error=watcher_error,
         legacy_tasks=find_legacy(),
+        command_problem=job_command_problem(),
     )
 
 
@@ -274,6 +283,79 @@ def _require_detectable_codex(cfg: AppConfig) -> None:
         )
 
 
+LOG = logging.getLogger(__name__)
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        a, b = os.path.normcase(str(left.resolve())), os.path.normcase(str(right.resolve()))
+    except OSError:
+        a, b = os.path.normcase(str(left)), os.path.normcase(str(right))
+    return a == b
+
+
+def _installed_config(adapter: SystemScheduler) -> Path | None:
+    """The config the installed task of this slot runs with, if one is installed and readable."""
+    try:
+        status = adapter.status()
+    except (SchedulerError, ValueError, OSError):
+        return None
+    if not status.installed or status.installed_command is None:
+        return None
+    return _config_argument(status.installed_command)
+
+
+def _remove_watcher(cfg: AppConfig, adapter: SystemScheduler) -> bool:
+    """Remove the watcher's task, then ask a running watcher to end once idle (CS-506).
+
+    The task is no longer ended from outside -- that killed a sync half way
+    through. The stop request goes into the temp folder of the config the
+    task ran with, which is where that watcher looks, and into this config's.
+    A request that cannot be written leaves the watcher running until sign-out;
+    that is logged, not raised: the task itself is gone.
+    """
+    installed = _installed_config(adapter)
+    removed = adapter.remove()
+    if not removed:
+        return False
+    folders = [cfg.paths.temp_dir]
+    if installed is not None and installed.is_file():
+        try:
+            folders.append(load_config(installed).paths.temp_dir)
+        except Exception as exc:  # noqa: BLE001 - any failure: that config's watcher is not reached
+            LOG.warning("the watcher of %s could not be asked to end: %s", installed, exc)
+    for folder in dict.fromkeys(Path(item).resolve() for item in folders):
+        try:
+            request_watcher_stop(folder)
+        except OSError as exc:
+            LOG.warning("the running watcher could not be asked to end (%s); it ends at sign-out", exc)
+    return True
+
+
+def _require_tasks_of_this_config(
+    config_path: Path, adapters: Sequence[SystemScheduler], *, replace_other_config: bool,
+) -> None:
+    """Refuse to change tasks another existing config installed (CS-545).
+
+    There is one set of tasks per account, so `apply` from a second config
+    used to remove the first config's watcher without a word. A task whose
+    config is gone is broken and is replaced; one naming a config that still
+    exists is changed only when the person said so. Checked before any task
+    is touched, so a refusal changes nothing.
+    """
+    if replace_other_config:
+        return
+    for adapter in adapters:
+        other = _installed_config(adapter)
+        if other is None or _same_file(other, config_path) or not other.is_file():
+            continue
+        raise FailSafeError(
+            f"The scheduled tasks were not changed: they were installed from another config, {other}. "
+            "Open that config to change them, or pass --replace-other-config to make them this config's.",
+            code="AUTOMATION_OTHER_CONFIG", params={"path": str(other)},
+        )
+
+
 def apply_automation(
     config_path: Path,
     *,
@@ -281,6 +363,7 @@ def apply_automation(
     login_scheduler: SystemScheduler | None = None,
     backup_scheduler: SystemScheduler | None = None,
     handoff_scheduler: SystemScheduler | None = None,
+    replace_other_config: bool = False,
 ) -> AutomationView:
     """Make every OS task match the config: install what is on, remove what is off."""
     _require_all(scheduler, login_scheduler, backup_scheduler, handoff_scheduler)
@@ -290,6 +373,10 @@ def apply_automation(
     login_adapter = _scheduler(cfg, login_scheduler, slot=LOGIN_SYNC_SLOT)
     backup_adapter = _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT)
     handoff_adapter = _scheduler(cfg, handoff_scheduler, slot=HANDOFF_SLOT)
+    _require_tasks_of_this_config(
+        config_path, (adapter, login_adapter, backup_adapter, handoff_adapter),
+        replace_other_config=replace_other_config,
+    )
     try:
         if cfg.handoff.enabled is True:
             definition = handoff_definition(cfg, config_path)
@@ -300,7 +387,7 @@ def apply_automation(
                 log_dir=definition.log_dir,
             )
         else:
-            handoff_adapter.remove()
+            _remove_watcher(cfg, handoff_adapter)
         if cfg.state_backup.scheduled:
             definition = state_backup_definition(cfg, config_path)
             backup_adapter.install(
@@ -350,15 +437,21 @@ def remove_automation(
     login_scheduler: SystemScheduler | None = None,
     backup_scheduler: SystemScheduler | None = None,
     handoff_scheduler: SystemScheduler | None = None,
+    replace_other_config: bool = False,
 ) -> bool:
     """Remove every task; ``True`` if any existed."""
     _require_all(scheduler, login_scheduler, backup_scheduler, handoff_scheduler)
     cfg = load_config(config_path)
+    adapters = (
+        _scheduler(cfg, scheduler),
+        _scheduler(cfg, login_scheduler, slot=LOGIN_SYNC_SLOT),
+        _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT),
+        _scheduler(cfg, handoff_scheduler, slot=HANDOFF_SLOT),
+    )
+    _require_tasks_of_this_config(config_path, adapters, replace_other_config=replace_other_config)
     try:
-        periodic = _scheduler(cfg, scheduler).remove()
-        login = _scheduler(cfg, login_scheduler, slot=LOGIN_SYNC_SLOT).remove()
-        backup = _scheduler(cfg, backup_scheduler, slot=STATE_BACKUP_SLOT).remove()
-        watcher = _scheduler(cfg, handoff_scheduler, slot=HANDOFF_SLOT).remove()
+        periodic, login, backup = (adapter.remove() for adapter in adapters[:3])
+        watcher = _remove_watcher(cfg, adapters[3])
         return periodic or login or backup or watcher
     except SchedulerError as exc:
         raise FailSafeError(f"The scheduled task was not removed: {exc}") from exc

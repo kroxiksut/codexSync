@@ -102,6 +102,46 @@ class ChatDirectoryTests(unittest.TestCase):
         self.assertEqual(len(search_chats(directory)), 1, "the default list is chats")
         self.assertEqual(len(search_chats(directory, include_sub_threads=True)), 2)
 
+    def test_a_compressed_chat_keeps_its_kind_and_title(self) -> None:
+        """CS-499: meta and title are read through the container.
+
+        Codex keeps most chats it has not touched for a while compressed; read
+        raw, a spawned thread there had no ``thread_source`` and listed as a
+        chat, and no compressed chat had a title to search by.
+        """
+        from codexsync.jsonl_codec import READABLE_CODECS, JsonlCodec, compress_file
+
+        def pack(plain: Path, packed: Path, codec: JsonlCodec) -> None:
+            if codec is JsonlCodec.ZSTD:
+                # Codex's container; codexSync reads it and never writes it.
+                from compression import zstd
+
+                packed.write_bytes(zstd.compress(plain.read_bytes()))
+            else:
+                compress_file(plain, packed, codec)
+
+        for codec in READABLE_CODECS:
+            if codec is JsonlCodec.NONE:
+                continue
+            with self.subTest(codec=codec):
+                shutil.rmtree(self.root / "sessions", ignore_errors=True)
+                parent = "aaaaaaaa-0000-0000-0000-00000000000a"
+                child = "bbbbbbbb-0000-0000-0000-00000000000b"
+                for session_id, kwargs in (
+                    (parent, {"opening": "plan the release"}),
+                    (child, {"parent": parent, "thread_source": "subagent"}),
+                ):
+                    plain = self._session(session_id, **kwargs)
+                    packed = plain.with_name(plain.name + codec.suffix)
+                    pack(plain, packed, codec)
+                    plain.unlink()
+                directory = self._directory()
+                by_id = {chat.session_id: chat for chat in directory.chats}
+                self.assertEqual(by_id[parent].kind, ChatKind.TOP_LEVEL)
+                self.assertEqual(by_id[parent].title, "plan the release")
+                self.assertEqual(by_id[child].kind, ChatKind.SUB_THREAD)
+                self.assertEqual(len(search_chats(directory, text="release")), 1)
+
     def test_a_thread_source_alone_marks_a_sub_thread(self) -> None:
         """Either signal is enough; neither is inferred from the records."""
         self._session("cccccccc-0000-0000-0000-000000000003", thread_source="guardian_review")

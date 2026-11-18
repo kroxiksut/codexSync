@@ -44,6 +44,8 @@ from ..app import (
     close_codex_for_sync,
     place_project,
     project_places,
+    project_removals,
+    decide_project_removal,
     known_machines,
     session_pair_name,
     __version__,
@@ -214,6 +216,10 @@ def _refusal(failure: Failure, exc: Exception) -> Outcome:
     details = getattr(exc, "details", None)
     if details is None:
         details = dict(getattr(exc, "params", None) or {}) or None
+    operation_id = getattr(exc, "recovery_operation_id", None)
+    if operation_id:
+        return Outcome(failure=failure, message=getattr(exc, "recovery_message", "Recovery is required."),
+                       details={"recovery_operation_id": operation_id})
     return Outcome(failure=failure, message=str(exc), code=getattr(exc, "code", None), details=details)
 
 
@@ -236,7 +242,10 @@ def run(call: Callable[[], T]) -> Outcome:
     except FailSafeError as exc:
         return _refusal(Failure.STOPPED_SAFELY, exc)
     except Exception as exc:  # noqa: BLE001 - reported as a bug, never swallowed
-        return Outcome(failure=Failure.UNEXPECTED, message=f"{type(exc).__name__}: {exc}")
+        result = _refusal(Failure.UNEXPECTED, exc)
+        return Outcome(failure=result.failure,
+                       message=result.message if getattr(exc, "recovery_operation_id", None) else f"{type(exc).__name__}: {exc}",
+                       code=result.code, details=result.details)
 
 
 @dataclass(frozen=True, slots=True)
@@ -777,6 +786,10 @@ class Controller:
     def journals(self) -> Outcome:
         return run(lambda: list_journals(self._config_path))
 
+    def task_items(self) -> Outcome:
+        from .task_items import load_latest_session_task
+        return run(lambda: load_latest_session_task(self._config_path))
+
     def sync_history(self, *, limit: int | None = None) -> Outcome:
         """Past runs of every kind, newest first, from the same journals recovery reads.
 
@@ -890,12 +903,12 @@ class Controller:
     def automation(self) -> Outcome:
         return run(lambda: automation_status(self._config_path))
 
-    def apply_automation(self) -> Outcome:
+    def apply_automation(self, *, replace_other_config: bool = False) -> Outcome:
         """Install or remove the OS task so it matches `[scheduler]` as saved."""
-        return run(lambda: apply_automation(self._config_path))
+        return run(lambda: apply_automation(self._config_path, replace_other_config=replace_other_config))
 
-    def remove_automation(self) -> Outcome:
-        return run(lambda: remove_automation(self._config_path))
+    def remove_automation(self, *, replace_other_config: bool = False) -> Outcome:
+        return run(lambda: remove_automation(self._config_path, replace_other_config=replace_other_config))
 
     def run_automation_now(self) -> Outcome:
         return run(lambda: run_automation_job(self._config_path))
@@ -932,8 +945,14 @@ class Controller:
         one rule instead of `[conflict] policy` -- the buttons a stopped sync
         offers (D-027). ``direction`` is this run's choice over `sync.direction`.
         """
+        def phase_progress(phase: str, done: int, total: int) -> None:
+            # Keep the old two-number callback for other consumers, while the
+            # window names staging and application separately.
+            if progress is not None and not (phase == "sync_chats" and total):
+                progress(phase, done, total)
+
         return run(lambda: run_handoff(
-            self._config_path, origin="window", wait_seconds=0, progress=progress,
+            self._config_path, origin="window", wait_seconds=0, progress=phase_progress,
             conflict_policy=conflict_policy, direction=direction,
         ))
 
@@ -982,6 +1001,18 @@ class Controller:
         return run(lambda: place_project(
             self._config_path, project_id, path=path, skip=skip, forget=forget, whole_folder=whole_folder,
         ))
+
+    def project_removals(self) -> Outcome:
+        """Projects removed in Codex here and, on purpose, elsewhere (D-039). Reads only."""
+        return run(lambda: project_removals(self._config_path))
+
+    def decide_project_removal(self, project_id: str, *, everywhere: bool) -> Outcome:
+        """Say whether a project removed here was removed on purpose (D-039).
+
+        Writes only this machine's own project list in the shared workspace,
+        never `.codex`; the next synchronisation acts on the answer.
+        """
+        return run(lambda: decide_project_removal(self._config_path, project_id, everywhere=everywhere))
 
     # --- guardian restore and project move ------------------------------------
 

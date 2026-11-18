@@ -94,22 +94,21 @@ Found a security or data-safety problem? See [SECURITY.md](./SECURITY.md).
 unpack it and run `codexsync-gui.exe`. The same executable can also run CLI
 subcommands. Windows 10 (1809) or later.
 
-**With Node.js**, on Windows or Linux, from the next release on:
-`npm install -g codexsync` ([installing with npm](docs/en/README.md#install)).
+**With Node.js**, on Windows or Linux:
+`npm install -g @kroxut/codexsync` ([installing with npm](docs/en/README.md#install)).
 
-**With Python 3.11+**, on Windows, macOS or Linux — `--pre` while 0.2 is an
-alpha, or pip installs 0.1, and `--upgrade` so that an installed 0.1 is
-replaced too. On macOS every read and plan works, but writes are refused
+**With Python 3.11+**, on Windows, macOS or Linux — `--upgrade` so that an
+installed 0.1 is replaced too. On macOS every read and plan works, but writes are refused
 until the process detector is proven there; on Linux it has been
 ([platforms](docs/en/README.md#platforms)). On Linux the system Python refuses
 `pip install` (PEP 668): use `pipx` or a virtual environment — both, with
 updating and removing, in [installing on Linux](docs/en/README.md#on-linux).
 
 ```powershell
-python -m pip install --upgrade --pre "codexsync[gui]"    # the window and the command line
-codexsync-gui                                             # on first launch, the window helps you create or open config.toml
+python -m pip install --upgrade "codexsync[gui]"    # the window and the command line
+codexsync-gui                                       # on first launch, the window helps you create or open config.toml
 
-python -m pip install --upgrade --pre codexsync           # the command line only, no dependencies
+python -m pip install --upgrade codexsync           # the command line only, no dependencies
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
@@ -137,13 +136,12 @@ Every page in one place: [docs/](docs/README.md). For contributors:
 
 ## Status
 
-**0.2.0 alpha 1** — the first release with the window (`codexsync[gui]` or
-`codexsync-gui.exe`) next to the command line. It is an alpha because 0.2
-understands and changes far more of Codex's state than 0.1: it is in daily use,
-and every write still goes through the lock, journal and verified backup, but it
-needs more machines than ours before 0.2.0. If you use Codex on two or more
-machines, please try it and [tell us](https://github.com/kroxiksut/codexSync/issues/new/choose)
-what happened. Data an alpha writes stays readable by every later version.
+**0.2.0** — the first stable release with the window (`codexsync[gui]` or
+`codexsync-gui.exe`) next to the command line, and the first with packages for
+Linux and npm. 0.2 understands and changes far more of Codex's state than 0.1, and every
+write goes through the lock, journal and verified backup. If you use Codex on
+two or more machines, please [tell us](https://github.com/kroxiksut/codexSync/issues/new/choose)
+what happened. Data the 0.2 alpha wrote stays readable.
 
 ### Have a Mac?
 
@@ -161,7 +159,7 @@ It shows what the safety check would act on: each matching program by process
 id, parent id and short name, and which rule matched it — a name, or the
 `ChatGPT.app/Contents/MacOS/` marker for the desktop app. On a Mac the check
 reads `UNKNOWN` until it is proven; the line under it says what it would read
-if it were trusted. This needs codexSync 0.2.0a2 or later. Without installing
+if it were trusted. This needs codexSync 0.2.0 or later. Without installing
 anything, this shows the raw list instead (paths may contain your user name):
 
 ```sh

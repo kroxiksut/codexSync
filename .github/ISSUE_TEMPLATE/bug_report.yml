@@ -18,7 +18,7 @@ body:
     attributes:
       label: codexSync version
       description: "`codexsync --version`, or the About page in the window"
-      placeholder: "codexsync 0.2.0a1"
+      placeholder: "codexsync 0.2.0"
     validations:
       required: true
   - type: dropdown
@@ -93,7 +93,7 @@ body:
     attributes:
       label: doctor --report
       description: >-
-        `codexsync -c config.toml doctor --report` (codexSync 0.2.0a2 or later): versions,
+        `codexsync -c config.toml doctor --report` (codexSync 0.2.0 or later): versions,
         formats, gates, check statuses and counts, with no name, path, title or chat id in it,
         so it can be pasted as it is
       render: json

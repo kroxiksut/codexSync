@@ -77,6 +77,10 @@ class MutationJournal:
     #: carries the machine too. Decides only whether ``begin`` may close a
     #: journal on its own -- never whether a mutation may run.
     machine_id: str | None = None
+    #: Optional, descriptive diagnostics; never used to authorise recovery.
+    failure_code: str | None = None
+    failure_params: Mapping[str, object] | None = None
+    failure_message: str | None = None
 
 
 def snapshot_belongs_to(name: str | None, machine_id: str | None) -> bool:
@@ -102,6 +106,20 @@ def owned_by(journal: MutationJournal, machine_id: str | None) -> bool:
     return snapshot_belongs_to(journal.backup_snapshot, machine_id)
 
 
+def proven_foreign(journal: MutationJournal, machine_id: str | None) -> bool:
+    """Whether the journal is provably another machine's, not merely not provably this one's.
+
+    Stricter than ``not owned_by``: a journal naming neither a machine nor a
+    snapshot has no owner at all and may well be this machine's own, so it is
+    never foreign here.
+    """
+    if journal.machine_id is not None:
+        return journal.machine_id != normalize_machine_id(machine_id)
+    if journal.backup_snapshot:
+        return not snapshot_belongs_to(journal.backup_snapshot, machine_id)
+    return False
+
+
 class JournalStore:
     def __init__(self, root: Path) -> None:
         self.root = root / "journals"
@@ -116,6 +134,8 @@ class JournalStore:
         counts: Mapping[str, int] | None = None,
         origin: str | None = None,
         machine_id: str | None = None,
+        superseding: str | None = None,
+        local_state_only: bool = False,
     ) -> MutationJournal:
         """Open a journal for a new operation.
 
@@ -124,10 +144,38 @@ class JournalStore:
         this machine's abandoned journals first (``close_abandoned``). Any
         journal still open after that blocks: one that entered the commit
         phase, another machine's, or one that cannot be read.
+
+        ``superseding`` names the one open journal this operation exists to
+        undo -- `recover rollback` passes the journal it rolls back. That
+        journal stays open while the rollback runs and is closed only after
+        the rollback's own journal is ``COMMITTED`` (CS-491); closing it first
+        left nothing open when the rollback then refused half-way.
+
+        ``local_state_only`` is for an operation that writes nothing but this
+        machine's ``.codex`` (the global state, Codex's catalogue): a journal
+        ``proven_foreign`` to this machine is logged and does not block it.
+        Another machine's half-done run concerns the shared copy and that
+        machine's own state, neither of which such an operation touches, and
+        blocking it meant a laptop that crashed mid-sync kept this machine
+        from repairing a Codex that would not start. This machine's own open
+        journals, journals of unknown owner and unreadable ones still block.
         """
         if machine_id is not None:
             self.close_abandoned(machine_id)
-        pending = self.non_terminal()
+        pending = [
+            journal for journal in self.non_terminal()
+            if superseding is None or journal.operation_id != superseding
+        ]
+        if local_state_only and machine_id is not None:
+            foreign = [journal for journal in pending if proven_foreign(journal, machine_id)]
+            for journal in foreign:
+                LOG.warning(
+                    "another machine's journal %s (%s, %s, machine: %s) is still open; "
+                    "it does not block a %s write, which touches only this machine's Codex state",
+                    journal.operation_id, journal.family, journal.state.value,
+                    journal.machine_id or "from snapshot name", family,
+                )
+            pending = [journal for journal in pending if journal not in foreign]
         if pending:
             blocker = pending[0]
             owner = blocker.machine_id or "not recorded"
@@ -221,6 +269,9 @@ class JournalStore:
         state: JournalState,
         *,
         failure: BaseException | None = None,
+        failure_code: str | None = None,
+        failure_params: Mapping[str, object] | None = None,
+        failure_message: str | None = None,
     ) -> MutationJournal:
         if state not in _TRANSITIONS[journal.state]:
             raise FailSafeError(f"Invalid mutation journal transition: {journal.state.value} -> {state.value}")
@@ -229,6 +280,9 @@ class JournalStore:
             state=state,
             finished_at_utc=_now() if state in TERMINAL else journal.finished_at_utc,
             failure=type(failure).__name__ if failure is not None else journal.failure,
+            failure_code=failure_code if failure is not None else journal.failure_code,
+            failure_params=dict(failure_params) if failure_params is not None else journal.failure_params,
+            failure_message=failure_message if failure is not None else journal.failure_message,
         )
         self.write(updated)
         return updated
@@ -250,6 +304,9 @@ class JournalStore:
                 finished_at_utc=_lenient_str(raw.get("finished_at_utc")),
                 failure=_lenient_str(raw.get("failure")),
                 machine_id=_lenient_str(raw.get("machine_id")),
+                failure_code=_lenient_str(raw.get("failure_code")),
+                failure_params=raw.get("failure_params") if isinstance(raw.get("failure_params"), dict) else None,
+                failure_message=_lenient_str(raw.get("failure_message")),
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise FailSafeError("Mutation journal is missing or invalid") from exc
@@ -263,9 +320,43 @@ class JournalStore:
                 journal = self.load(path.stem)
             except FailSafeError:
                 raise FailSafeError("A mutation journal cannot be verified")
-            if journal.state not in TERMINAL:
-                result.append(journal)
+            if journal.state in TERMINAL:
+                continue
+            if journal.operation_id != path.stem:
+                # A file that claims another operation's identity: a cloud
+                # client's duplicate such as `<id> (1).json` (CS-512).
+                if self.is_stale_copy(path, journal):
+                    continue
+                raise FailSafeError(
+                    f"Journal file {path.name} is a copy of operation {journal.operation_id}, whose own "
+                    "journal is missing or unreadable; check it, then remove the copy",
+                    code="JOURNAL_COPY",
+                    params={"file": path.name, "operation_id": journal.operation_id},
+                )
+            result.append(journal)
         return result
+
+    def is_stale_copy(self, path: Path, journal: MutationJournal) -> bool:
+        """Whether ``path`` duplicates a journal whose own file says more.
+
+        Only the owning run writes a journal, and ``COMMITTED``/``FAILED`` are
+        final, so when ``<id>.json`` is readable and terminal any open copy
+        of it is an older version. An open ``<id>.json`` blocks by itself, so
+        the copy adds nothing either. Only a copy whose original is missing or
+        unreadable is evidence of its own.
+        """
+        if journal.operation_id == path.stem or not _plain_name(journal.operation_id):
+            return False
+        try:
+            original = self.load(journal.operation_id)
+        except FailSafeError:
+            return False
+        return original.operation_id == journal.operation_id
+
+
+def _plain_name(value: str) -> bool:
+    """A journal id names a file in this folder and nothing else."""
+    return bool(value) and value not in {".", ".."} and not any(sep in value for sep in ("/", "\\", ":"))
 
 
 def _optional_str(value: object) -> str | None:

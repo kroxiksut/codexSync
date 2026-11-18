@@ -41,12 +41,11 @@
 
 ## 安装
 
-内核和命令行没有任何依赖。窗口是可选的附加部分。0.2 处于 alpha 阶段时，pip 需要加 `--pre`；
-不加的话会安装 0.1。加上 `--upgrade`，同一条命令也会替换已安装的 0.1。
+内核和命令行没有任何依赖。窗口是可选的附加部分。加上 `--upgrade`，同一条命令也会替换已安装的 0.1。
 
 ```powershell
-python -m pip install --upgrade --pre "codexsync[gui]"    # 命令行加窗口（PySide6）
-python -m pip install --upgrade --pre codexsync           # 只装命令行
+python -m pip install --upgrade "codexsync[gui]"    # 命令行加窗口（PySide6）
+python -m pip install --upgrade codexsync           # 只装命令行
 ```
 
 在 Windows 上也可以直接从
@@ -60,12 +59,12 @@ python -m pip install --upgrade --pre codexsync           # 只装命令行
 
 没有 32 位版本：Codex 本身只为 x64 和 ARM64 发布。
 
-**使用 Node.js**，在 Windows 或 Linux（x64 和 ARM64）上，从下一个版本起可以通过 npm
+**使用 Node.js**，在 Windows 或 Linux（x64 和 ARM64）上，可以通过 npm
 获得同样的构建，安装方式与 Codex CLI 相同：
 
 ```sh
-npm install -g codexsync      # 两个程序 codexsync 和 codexsync-gui；同一命令用于更新
-npm uninstall -g codexsync    # 卸载
+npm install -g @kroxut/codexsync      # 两个程序 codexsync 和 codexsync-gui；同一命令用于更新
+npm uninstall -g @kroxut/codexsync    # 卸载
 ```
 
 请全局安装，而不要通过 `npx` 运行：计划任务记录的是程序的安装位置，而 `npx`
@@ -84,32 +83,34 @@ pip install -e ".[gui]"
 
 下面每种方式都可行，没有「首选」——按机器情况选择。有 root 和 `apt` 或 `dnf`，用软件包；
 没有 root，用 AppImage 或 `tar.gz`；有 Python 3.11 或更新版本，用 `pipx` 或虚拟环境。
-软件包、AppImage 和 `tar.gz` 从下一个版本起发布在[版本页面](https://github.com/kroxiksut/codexSync/releases)，
+软件包、AppImage 和 `tar.gz` 发布在[版本页面](https://github.com/kroxiksut/codexSync/releases)，
 支持 x64（glibc 2.35 或更新：Ubuntu 22.04、Debian 12、Fedora 36 及更新版本）和
 ARM64（glibc 2.39 或更新：Ubuntu 24.04、Debian 13 及更新版本）。每种都包含
 `codexsync` 和 `codexsync-gui` 两个程序。
+文件名由发布标签和处理器组成，例如 `codexsync-v0.2.0-linux-amd64.deb`（ARM64 为
+`arm64`）；下面的 `<标签>` 表示发布标签。
 
 **.deb 软件包**（Ubuntu、Debian 及其衍生版）安装到 `/opt/codexsync`，两个命令都在
 `PATH` 上，并添加菜单项：
 
 ```sh
-sudo apt install ./codexsync-<版本>-linux-amd64.deb   # 安装；用更新的文件执行同一命令即为更新
+sudo apt install ./codexsync-<标签>-linux-amd64.deb   # 安装；用更新的文件执行同一命令即为更新
 sudo apt remove codexsync                             # 删除
 ```
 
 **.rpm 软件包**（Fedora 及其衍生版），方式相同：
 
 ```sh
-sudo dnf install ./codexsync-<版本>-linux-amd64.rpm   # 安装；用更新的文件执行同一命令即为更新
+sudo dnf install ./codexsync-<标签>-linux-amd64.rpm   # 安装；用更新的文件执行同一命令即为更新
 sudo dnf remove codexsync                             # 删除
 ```
 
 **AppImage** 是一个可以放在任何地方的文件；不带命令时是窗口，带命令时是命令行：
 
 ```sh
-chmod +x codexsync-<版本>-linux-amd64.AppImage
-./codexsync-<版本>-linux-amd64.AppImage                          # 窗口
-./codexsync-<版本>-linux-amd64.AppImage -c config.toml doctor    # 命令行
+chmod +x codexsync-<标签>-linux-amd64.AppImage
+./codexsync-<标签>-linux-amd64.AppImage                          # 窗口
+./codexsync-<标签>-linux-amd64.AppImage -c config.toml doctor    # 命令行
 ```
 
 更新时，把新文件以相同的名称放到相同的路径（计划任务指向的就是这个文件）；删除时，删掉它即可。
@@ -120,7 +121,7 @@ chmod +x codexsync-<版本>-linux-amd64.AppImage
 
 ```sh
 mkdir -p ~/.local/opt/codexsync
-tar -xzf codexsync-<版本>-linux-amd64.tar.gz -C ~/.local/opt/codexsync --strip-components=1   # 安装
+tar -xzf codexsync-<标签>-linux-amd64.tar.gz -C ~/.local/opt/codexsync --strip-components=1   # 安装
 rm -rf ~/.local/opt/codexsync/* && tar -xzf <更新的文件> -C ~/.local/opt/codexsync --strip-components=1   # 更新
 rm -rf ~/.local/opt/codexsync                                                                  # 删除
 ```
@@ -133,9 +134,9 @@ rm -rf ~/.local/opt/codexsync                                                   
 `pipx ensurepath`）：
 
 ```sh
-pipx install --pip-args=--pre "codexsync[gui]"   # 窗口和命令行；不带 [gui] 则只有命令行
-pipx upgrade --pip-args=--pre codexsync          # 更新
-pipx uninstall codexsync                         # 卸载
+pipx install "codexsync[gui]"   # 窗口和命令行；不带 [gui] 则只有命令行
+pipx upgrade codexsync          # 更新
+pipx uninstall codexsync        # 卸载
 ```
 
 **手动创建虚拟环境**——系统自带的 Python 不允许直接 `pip install`（PEP 668）；在 Ubuntu 和
@@ -143,12 +144,12 @@ Debian 上请先 `sudo apt install python3-venv`：
 
 ```sh
 python3 -m venv ~/.venvs/codexsync
-~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"            # 安装
-~/.venvs/codexsync/bin/pip install --upgrade --pre "codexsync[gui]"  # 更新
-rm -rf ~/.venvs/codexsync                                            # 卸载
+~/.venvs/codexsync/bin/pip install "codexsync[gui]"            # 安装
+~/.venvs/codexsync/bin/pip install --upgrade "codexsync[gui]"  # 更新
+rm -rf ~/.venvs/codexsync                                      # 卸载
 ```
 
-把 `~/.venvs/codexsync/bin` 加入 `PATH`，或按这个路径调用命令。0.2 仍是预发布版时需要 `--pre`。
+把 `~/.venvs/codexsync/bin` 加入 `PATH`，或按这个路径调用命令。
 
 **应用程序菜单。** `.deb` 或 `.rpm` 软件包会把 CodexSync 加入菜单；pipx、虚拟环境、AppImage
 和 `tar.gz` 不会。对于这些方式，`codexsync shortcut install`（或窗口中的「关于 → 应用程序菜单」）

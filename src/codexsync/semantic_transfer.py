@@ -60,7 +60,9 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from .exceptions import FailSafeError
+from .fs_replace import write_json_atomically
 from .jsonl_codec import (
+    WRITABLE_CODECS,
     JsonlCodec,
     codec_of,
     held_in_any_container,
@@ -340,6 +342,12 @@ DESTINATION_OCCUPIED = "DESTINATION_OCCUPIED"
 #: The mirror already holds this branch under another path than the source
 #: does, and it is rewritten there rather than gaining a second file.
 MIRROR_PATH_KEPT = "MIRROR_PATH_KEPT"
+#: The mirror holds this branch in a container codexSync reads but never
+#: writes (`.jsonl.zst`, Codex's). It is rewritten in the configured container
+#: beside it and the old file removed after its verified backup, in the same
+#: envelope, as an archive move removes its old file (CS-519). Keeping the
+#: container made every apply fail.
+MIRROR_CONTAINER_REPLACED = "MIRROR_CONTAINER_REPLACED"
 #: A proven layout renders another path than the one this machine keeps the
 #: session under.
 LAYOUT_DISAGREES_WITH_BRANCH = "LAYOUT_DISAGREES_WITH_BRANCH"
@@ -749,7 +757,11 @@ def build_transfer_plan(
     chains: dict[str, set[str]] = {}
     for descriptor in local_catalog.descriptors:
         if descriptor.session_id:
-            chains.setdefault(descriptor.session_id, set()).add(descriptor.relative_path)
+            # By the name the catalogue uses: the row of a chat whose first
+            # part Codex compressed names `x.jsonl`, not `x.jsonl.zst` (CS-516).
+            chains.setdefault(descriptor.session_id, set()).update(
+                {descriptor.relative_path, _catalogued_path(descriptor)}
+            )
     codes.extend(_idless_codes(local_catalog, "LOCAL"))
     codes.extend(_idless_codes(remote_catalog, "REMOTE"))
     occupied = _destination_check(local_root, remote_root, local_catalog, remote_catalog)
@@ -1202,16 +1214,21 @@ def _gate_write(
         # one exception is an archive state that changes, which moves the
         # mirror's file into the other state folder and removes the old one.
         stored = codec_of(remote.relative_path) if remote is not None else None
-        codec = mirror_codec if stored is None else stored
+        # A container this version only reads cannot be kept (CS-519).
+        unwritable = stored is not None and stored not in WRITABLE_CODECS
+        codec = mirror_codec if stored is None or unwritable else stored
         side = "mirror"
         extra = extra + ("MIRROR_DESTINATION",)
         if remote is not None and remote.state is not source.state:
             moving = True
             target = mirror_relative_path(source, codec)
             extra = extra + (MOVES_BRANCH,)
+        elif unwritable:
+            target = with_codec(remote.relative_path, codec)
+            extra = extra + (MIRROR_CONTAINER_REPLACED,)
         else:
             target = remote.relative_path if remote is not None else mirror_relative_path(source, codec)
-        if stored is not None and stored is not mirror_codec:
+        if stored is not None and stored is not mirror_codec and not unwritable:
             extra = extra + ("MIRROR_CONTAINER_KEPT",)
         if (
             remote is not None and not moving
@@ -1524,11 +1541,8 @@ class _PlanRejected(ValueError):
 
 
 def save_transfer_plan(plan: TransferPlan, path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(_serialise(plan), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8", newline="\n",
-    )
+    # Atomic: a plan cut short by a killed run must never be the plan (CS-517).
+    write_json_atomically(path, _serialise(plan))
     return path
 
 

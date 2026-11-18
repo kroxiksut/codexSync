@@ -164,7 +164,9 @@ sides agreed. A file conflict stays a conflict and is decided by
 `to_cloud` keeps this machine's copy of a chat changed on both machines and
 writes nothing into `.codex`, `to_local` keeps the cloud's and writes nothing
 into the cloud copy. `validate`, `doctor` and the plan report state the
-direction.
+direction. A `to_cloud` full sync loads nothing, so it takes no other machine's
+handoff: their work stays "not loaded here" until a run that loads it, and the
+result counts what the direction held back.
 
 ## Deletions
 
@@ -241,6 +243,12 @@ It replaces the sync after sign-in: `handoff.enabled` and
 `scheduler.sync_at_login` together are a configuration error. What it does is
 reported with a system notification (`notify`) and always in the log. A
 machine that is shut down with Codex still open hands off at its next sign-in.
+
+Switching the watcher off (`enabled = false` and *Apply*, or `automation
+remove`) never ends a sync it is running. The task is removed, and the running
+watcher is asked to stop: it ends within seconds when idle, or as soon as the
+sync in progress has finished. On Linux and macOS a sign-out is taken the same
+way, within the time the system gives a program before it ends it.
 
 `--accept-undelivered` loads a handoff that never fully arrives — use it only
 when you know why, for example when a file it named was changed by hand in the

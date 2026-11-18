@@ -129,6 +129,18 @@ class SemanticMergeTests(unittest.TestCase):
         self.assertIsNone(canonical_digest(b'{"a":1.0}'))
         self.assertIsNotNone(canonical_digest(b'{"a":1}'))
 
+    def test_a_lone_surrogate_has_no_canonical_form(self) -> None:
+        """CS-520: JSON may escape half a surrogate pair; UTF-8 cannot encode it."""
+        self.assertIsNone(canonical_digest(rb'{"text":"\ud800"}'))
+
+    def test_a_lone_surrogate_leaves_an_ordinary_divergence(self) -> None:
+        """Raising there failed the comparison and blocked the chat for good."""
+        local = self._file("local", [b'{"n":0}', rb'{"text":"\ud800"}'])
+        remote = self._file("remote", [b'{"n":0}', rb'{"text":"\udc00"}'])
+        result = compare_session_branches(local, remote)
+        self.assertEqual(result.relation, BranchRelation.DIVERGED)
+        self.assertEqual(result.common_records, 1)
+
     def test_non_nfc_strings_are_never_canonicalised(self) -> None:
         composed = json.dumps({"a": "é"}).encode("utf-8")          # NFC
         decomposed = json.dumps({"a": "é"}).encode("utf-8")       # NFD

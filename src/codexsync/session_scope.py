@@ -33,6 +33,7 @@ import json
 from pathlib import Path
 
 from .chat_directory import ChatDirectory, ChatEntry
+from .fs_replace import write_json_atomically
 
 __all__ = [
     "SCOPE_FORMAT",
@@ -67,10 +68,23 @@ class SessionScope:
     #: catalogue row codexSync does not write. Empty when there is no
     #: catalogue to ask, because "unknown" is not "fine".
     not_in_catalog: tuple[str, ...] = ()
+    #: Projects the person named that match no project now -- a typo, a
+    #: renamed project, or one Codex re-created under a new id. They stay in
+    #: the choice: a set whose every project vanished covers nothing, it does
+    #: not become "carry everything" (CS-495).
+    unresolved_projects: tuple[str, ...] = ()
+    #: Chats the person named that match no chat now, for the same reason.
+    unresolved_chats: tuple[str, ...] = ()
 
     @property
     def is_empty(self) -> bool:
-        return not self.projects and not self.chats
+        """Nothing was chosen. Judged on the choice, never on what it resolved to."""
+        return not self.projects and not self.chats and not self.unresolved_projects
+
+    @property
+    def unresolved(self) -> tuple[str, ...]:
+        """Every chosen name that matches nothing now, projects first."""
+        return (*self.unresolved_projects, *self.unresolved_chats)
 
 
 def session_hash(session_id: str) -> str:
@@ -87,22 +101,27 @@ def build_session_scope(
     """Expand chosen projects and chats into the sessions they cover.
 
     ``projects`` may be given by id or by name, because a person reads names
-    and a plan stores ids; a name that matches no project simply contributes
-    nothing, which the counter then shows.
+    and a plan stores ids. A name that matches no project contributes no chat
+    but stays in the set as ``unresolved_projects``: the set is still a
+    choice, so it covers nothing rather than everything (CS-495).
 
     ``placements`` is this machine's thread catalogue, when it could be read.
     It is used for one thing: saying which chats of the set cannot be written
     into `.codex` here, so a screen can show that limit instead of letting a
     person find out by a chat never appearing.
     """
-    wanted_projects = _resolve_projects(directory, projects)
+    wanted_projects, unresolved_projects = _resolve_projects(directory, projects)
     chosen: dict[str, ChatEntry] = {}
+    unresolved_chats: list[str] = []
 
     for chat in directory.chats:
         if chat.project_id and chat.project_id in wanted_projects:
             chosen[chat.session_id] = chat
     for reference in chats:
-        for chat in directory.find(reference):
+        found = directory.find(reference)
+        if not found and reference.strip():
+            unresolved_chats.append(reference)
+        for chat in found:
             chosen[chat.session_id] = chat
 
     # Sub-threads follow their parent, however deep. A set that brought a
@@ -123,6 +142,8 @@ def build_session_scope(
         chat_count=len(chosen),
         total_bytes=sum(chat.byte_count for chat in chosen.values()),
         not_in_catalog=_unplaceable(chosen, placements),
+        unresolved_projects=tuple(sorted(set(unresolved_projects))),
+        unresolved_chats=tuple(sorted(set(unresolved_chats))),
     )
 
 
@@ -142,8 +163,12 @@ def _unplaceable(chosen: dict[str, ChatEntry], placements: "object | None") -> t
     ))
 
 
-def _resolve_projects(directory: ChatDirectory, projects: tuple[str, ...]) -> set[str]:
+def _resolve_projects(
+    directory: ChatDirectory, projects: tuple[str, ...]
+) -> tuple[set[str], list[str]]:
+    """Project ids the references name, and the references that name none."""
     wanted: set[str] = set()
+    unresolved: list[str] = []
     by_name = {
         (view.name or "").casefold(): project_id
         for project_id, view in directory.projects.items()
@@ -159,7 +184,9 @@ def _resolve_projects(directory: ChatDirectory, projects: tuple[str, ...]) -> se
         matched = by_name.get(value.casefold())
         if matched:
             wanted.add(matched)
-    return wanted
+        else:
+            unresolved.append(value)
+    return wanted, unresolved
 
 
 def scope_path_for(plans_dir: Path, source_machine: str, target_machine: str) -> Path:
@@ -174,19 +201,18 @@ def save_session_scope(scope: SessionScope, path: Path) -> Path:
     Only projects and chats are stored. Session hashes are the result of
     reading the state at a moment in time, and a set that froze them would
     stop covering a chat started on the other machine tomorrow, which is
-    exactly what a standing working set is for.
+    exactly what a standing working set is for. A project name that matches
+    nothing now is stored as given: dropping it would turn a set whose
+    projects all vanished into "carry everything" on the next run (CS-495).
     """
     payload = {
         "format": SCOPE_FORMAT,
-        "projects": list(scope.projects),
+        "projects": sorted({*scope.projects, *scope.unresolved_projects}),
         "chats": list(scope.chats),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-    )
-    temp.replace(path)
+    # Atomic, through the retrying replace: a staging file a killed run left
+    # behind used to be overwritten in place by name (CS-517).
+    write_json_atomically(path, payload)
     return path
 
 

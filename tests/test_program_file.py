@@ -34,12 +34,18 @@ class _Frozen(unittest.TestCase):
         self.appimage.write_bytes(b"")
         self.addCleanup(shutil.rmtree, self.root, True)
 
-    def frozen(self, *, platform: str = "linux", appimage: str | None = None, writable: bool = True):
+    def frozen(
+        self, *, platform: str = "linux", appimage: str | None = None, writable: bool = True,
+        appdir: str | None = "",
+    ):
         import os
 
-        env = {key: value for key, value in os.environ.items() if key != "APPIMAGE"}
+        env = {key: value for key, value in os.environ.items() if key not in ("APPIMAGE", "APPDIR")}
         if appimage is not None:
             env["APPIMAGE"] = appimage
+            # The runtime's own mount, which holds the executable ("" = that one).
+            if appdir is not None:
+                env["APPDIR"] = appdir or str(self.mount.parent.parent)
         return [
             mock.patch.object(sys, "frozen", True, create=True),
             mock.patch.object(sys, "executable", str(self.inner)),
@@ -71,6 +77,18 @@ class FrozenProgramTests(_Frozen):
     def test_the_folder_searched_beside_it_is_the_appimages_own(self) -> None:
         result = self.run_with(self.frozen(appimage=str(self.appimage)), frozen_executable_dir)
         self.assertEqual(result, self.home)
+
+    def test_an_appimage_variable_from_another_programs_mount_is_not_believed(self) -> None:
+        # Inherited from an editor that is an AppImage (CS-505): its mount does
+        # not hold this executable.
+        other = self.root / "tmp" / ".mount_CursorXy"
+        other.mkdir(parents=True)
+        result = self.run_with(self.frozen(appimage=str(self.appimage), appdir=str(other)), frozen_program)
+        self.assertEqual(result, self.inner.resolve())
+
+    def test_an_appimage_variable_without_its_mount_is_not_believed(self) -> None:
+        result = self.run_with(self.frozen(appimage=str(self.appimage), appdir=None), frozen_program)
+        self.assertEqual(result, self.inner.resolve())
 
     def test_an_appimage_variable_naming_no_file_is_not_believed(self) -> None:
         missing = str(self.home / "gone.AppImage")

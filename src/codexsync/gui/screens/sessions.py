@@ -50,6 +50,12 @@ class SessionsModel(Model):
         self.target = ""
         self.category = ""
         self.scan: Outcome | None = None
+        #: The (source, target) pair the scan above was made for. The table,
+        #: Apply and a recorded choice are all about that pair (CS-509).
+        self.scan_pair: tuple[str, str] | None = None
+        #: The pair last chosen on the page; a scan of any other pair that
+        #: arrives later is dropped instead of drawn under this one.
+        self.pair: tuple[str, str] | None = None
         self.busy = False
         self.action_busy = False
         self.action_kind = ""
@@ -87,6 +93,7 @@ class SessionsModel(Model):
         self.rule = None
         self.decided = False
         self.scan = None
+        self.scan_pair = None
         self.action_result = None
         self.scope = None
         self.directory = None
@@ -363,7 +370,19 @@ class SessionsScreen(Screen):
 
     def _pair_changed(self, *_: object) -> None:
         """Another pair of machines was chosen: show the set stored for it."""
-        if self.model.scope_busy or self.model.scope_pair == self._pair():
+        pair = self._pair()
+        self.model.pair = pair
+        if self.model.scan_pair is not None and self.model.scan_pair != pair:
+            # The table, Apply and a recorded choice were about the other pair;
+            # kept, a choice would go into that pair's file under this one's
+            # labels (CS-509).
+            self.model.scan = None
+            self.model.scan_pair = None
+            self.model.action_result = None
+            self.model.rule = None
+            self.model.decided = False
+            self.render()
+        if self.model.scope_busy or self.model.scope_pair == pair:
             return
         self.model.source, self.model.target = self._pair()
         self.model.rule = None
@@ -389,11 +408,18 @@ class SessionsScreen(Screen):
         if column != 0 or getattr(self, "_filling_scope", False):
             return
         chosen: list[str] = []
+        shown: set[str] = set()
         root = self.scope_tree.invisibleRootItem()
         for index in range(root.childCount()):
             child = root.child(index)
+            if child.data(0, Qt.UserRole):
+                shown.add(child.data(0, Qt.UserRole))
             if child.checkState(0) == Qt.Checked and child.data(0, Qt.UserRole):
                 chosen.append(child.data(0, Qt.UserRole))
+        # A stored project the tree cannot show (renamed, re-created by Codex)
+        # stays chosen until the person clears the set: dropping it here would
+        # quietly turn its share of the set into nothing (CS-495).
+        chosen.extend(project for project in self.model.scope_projects if project not in shown)
         self.model.scope_projects = tuple(chosen)
         self.model.scope = None
         # The tree already shows this choice; redrawing it would only lose
@@ -537,14 +563,31 @@ class SessionsScreen(Screen):
                 # here, however complete the mirror is.
                 self.p("sessions.scope.not_in_catalog", len(scope.not_in_catalog))
                 if scope.not_in_catalog else "",
+                self._not_found_text(scope.unresolved),
             ])
         elif model.scope is not None and not model.scope.ok:
             text = self.failure_text(model.scope)
         elif not model.scope_projects and not model.scope_chats:
             text = self.t("sessions.scope.all")
         else:
-            text = ""
+            text = self._not_found_text(self._stored_not_found())
         self.scope_summary.setText(text)
+
+    def _stored_not_found(self) -> tuple[str, ...]:
+        """Stored projects the chat list read here has no project for."""
+        outcome = self.model.directory
+        if outcome is None or not outcome.ok or outcome.value is None:
+            return ()
+        return tuple(
+            project for project in self.model.scope_projects
+            if project not in outcome.value.projects
+        )
+
+    def _not_found_text(self, names: tuple[str, ...]) -> str:
+        """Chosen names that match nothing now; the set brings nothing for them."""
+        if not names:
+            return ""
+        return self.p("sessions.scope.not_found", len(names), names=", ".join(names))
 
     # --- actions -------------------------------------------------------------------
 
@@ -553,6 +596,7 @@ class SessionsScreen(Screen):
         if model.busy or model.action_busy:
             return
         model.source, model.target = self._pair()
+        model.pair = (model.source, model.target)
         if model.scope_pair != (model.source, model.target) and not model.scope_busy:
             # The scan uses the set stored for this pair; the page shows that one.
             self.load_working_set()
@@ -572,7 +616,10 @@ class SessionsScreen(Screen):
 
         def apply(model: SessionsModel, outcome: Outcome) -> None:
             model.busy = False
+            if model.pair != (source, target):
+                return  # another pair was chosen while this one was read
             model.scan = outcome
+            model.scan_pair = (source, target)
 
         self.read(
             lambda progress=None: controller.scan_sessions(
@@ -636,8 +683,11 @@ class SessionsScreen(Screen):
 
         def apply(model: SessionsModel, outcome: Outcome) -> None:
             model.action_busy = False
+            if model.pair != (source, target):
+                return  # the choice is recorded; the page now shows another pair
             if outcome.ok:
                 model.scan = outcome
+                model.scan_pair = (source, target)
                 model.action_result = Outcome(value="resolved")
                 model.decided = True
             else:
@@ -667,8 +717,11 @@ class SessionsScreen(Screen):
 
         def apply(model: SessionsModel, outcome: Outcome) -> None:
             model.action_busy = False
+            if model.pair != (source, target):
+                return  # the choice is recorded; the page now shows another pair
             if outcome.ok:
                 model.scan = outcome
+                model.scan_pair = (source, target)
                 model.action_result = Outcome(value="resolved")
                 model.decided = True
             else:
@@ -713,6 +766,8 @@ class SessionsScreen(Screen):
 
     def _scan(self):
         outcome = self.model.scan
+        if self.model.scan_pair is not None and self.model.scan_pair != self.model.pair:
+            return None
         return outcome.value if outcome is not None and outcome.ok else None
 
     # --- drawing ------------------------------------------------------------------------

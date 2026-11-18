@@ -124,6 +124,17 @@ class Board:
     def own(self, machine: str) -> HandoffRecord | None:
         return self.records.get(machine)
 
+    def case_twin(self, machine: str) -> str | None:
+        """Another machine whose id differs from ``machine`` only in case.
+
+        Windows and most cloud folders keep `Laptop.json` and `laptop.json` as
+        one file, so the two would overwrite each other's handoff (CS-494).
+        """
+        for name in self.records:
+            if name != machine and name.casefold() == machine.casefold():
+                return name
+        return None
+
     def others(self, machine: str) -> list[HandoffRecord]:
         return [record for name, record in sorted(self.records.items()) if name != machine]
 
@@ -164,6 +175,13 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def case_twin_message(machine: str, other: str) -> str:
+    return (
+        f"machines {machine!r} and {other!r} have ids that differ only in case; Windows and most "
+        "cloud folders keep their files as one. Give one of them another identity.machine_id."
+    )
+
+
 def machine_key(machine_id: str | None) -> str:
     key = normalize_machine_id(machine_id, allow_unknown=False)
     if key is None:
@@ -196,6 +214,8 @@ def _parse(raw: Any, *, expected_machine: str) -> HandoffRecord:
         raise HandoffError("digest does not match the contents")
     machine = body.get("machine")
     if machine != expected_machine:
+        if isinstance(machine, str) and machine.casefold() == expected_machine.casefold():
+            raise HandoffError(case_twin_message(expected_machine, machine))
         # A copy that landed under another machine's name is not adopted.
         raise HandoffError(f"file of {expected_machine!r} claims machine {machine!r}")
     state = body.get("state")
@@ -269,10 +289,44 @@ def write_record(root: Path, record: HandoffRecord) -> Path:
     return target
 
 
-def mark_working(root: Path, machine: str, *, now: Callable[[], str] = now_utc) -> HandoffRecord:
-    """Say that Codex is running here; the last handoff stays as it was."""
+#: Pauses before re-reading this machine's own handoff file that did not read.
+OWN_READ_PAUSES = (0.2, 0.5, 1.0, 2.0)
+
+
+def _read_own(
+    root: Path, machine: str, sleep: Callable[[float], None] | None,
+) -> tuple[Board, HandoffRecord | None]:
+    """The board and this machine's record, never "no record" for one that is there.
+
+    Rewriting a file that merely could not be read this moment (a cloud
+    client holding it, half-delivered) would start this machine over: no id,
+    nothing accepted -- every other machine's handoff pending again, and this
+    one's own work no longer waited for (CS-502). So it is read again, and a
+    file that stays unreadable refuses the write.
+    """
+    name = record_path(root, machine).name
     board = read_board(root)
-    own = board.own(machine) or HandoffRecord(machine, STATE_HANDED_OFF, "")
+    pauses = iter(OWN_READ_PAUSES)
+    while name in board.unreadable:
+        pause = next(pauses, None)
+        if pause is None:
+            raise HandoffError(
+                f"this machine's handoff file {record_path(root, machine)} cannot be read "
+                f"({board.unreadable[name]}); it is not rewritten from nothing. If it stays so, "
+                "remove it and the next sync starts a new record."
+            )
+        (sleep or time.sleep)(pause)
+        board = read_board(root)
+    return board, board.own(machine)
+
+
+def mark_working(
+    root: Path, machine: str, *, now: Callable[[], str] = now_utc,
+    sleep: Callable[[float], None] | None = None,
+) -> HandoffRecord:
+    """Say that Codex is running here; the last handoff stays as it was."""
+    _board, own = _read_own(root, machine, sleep)
+    own = own or HandoffRecord(machine, STATE_HANDED_OFF, "")
     if own.state == STATE_WORKING:
         return own
     record = HandoffRecord(
@@ -291,6 +345,7 @@ def record_handoff(
     taken: Iterable[HandoffRecord],
     new_handoff: bool = True,
     now: Callable[[], str] = now_utc,
+    sleep: Callable[[float], None] | None = None,
 ) -> HandoffRecord:
     """Write a finished full sync: what was taken and, if anything, what was handed off.
 
@@ -299,8 +354,7 @@ def record_handoff(
     kept exactly, because a new id would make every other machine wait for
     the "delivery" of what it already holds.
     """
-    board = read_board(root)
-    own = board.own(machine)
+    _board, own = _read_own(root, machine, sleep)
     accepted = dict(own.accepted) if own is not None else {}
     for other in taken:
         if other.handoff_id:
@@ -338,18 +392,35 @@ class Fingerprinter:
         self._cache: dict[str, tuple[int, int, str]] = {}
         self._sleep = sleep
 
-    def files(self, cfg: AppConfig, *, strict: bool = False) -> dict[str, FileMark]:
+    def files(
+        self, cfg: AppConfig, *, strict: bool = False, wanted: Iterable[str] | None = None,
+    ) -> dict[str, FileMark]:
         """``strict`` is for this machine's own handoff: a file that cannot be
         read is retried briefly and then raises ``HandoffError`` -- skipping it
         would let another machine count the handoff delivered without it (CS-464).
+        Only the own handoff follows this machine's roots and filters, since it
+        says what this machine handed off.
+
+        Checking another machine's handoff reads the whole cloud copy (CS-501):
+        that machine's roots and filters may differ from these, and a file it
+        named that this config filters out would never count as arrived.
+        ``wanted`` (path keys) limits the hashing to what is being checked.
         """
         cloud = cfg.paths.cloud_root_dir
-        roots = list(dict.fromkeys([*cfg.targets.include_roots, *_SEMANTIC_ROOTS]))
-        path_filter = PathFilter([*cfg.filters.exclude_globs, *_STAGING_GLOBS])
-        index = scan_tree(cloud, roots, path_filter)
+        if strict:
+            roots = list(dict.fromkeys([*cfg.targets.include_roots, *_SEMANTIC_ROOTS]))
+            path_filter = PathFilter([*cfg.filters.exclude_globs, *_STAGING_GLOBS])
+        else:
+            roots = _top_level_names(cloud)
+            path_filter = PathFilter(list(_STAGING_GLOBS))
+        index = scan_tree(cloud, roots, path_filter) if roots else {}
+        wanted_keys = set(wanted) if wanted is not None else None
         marks: dict[str, FileMark] = {}
         for relative, meta in index.items():
             if any(part in SECRET_NAMES for part in relative.split("/")):
+                continue
+            key = path_key(relative)
+            if wanted_keys is not None and key not in wanted_keys:
                 continue
             cached = self._cache.get(relative)
             if cached is not None and cached[0] == meta.size and cached[1] == meta.mtime_ns:
@@ -364,7 +435,7 @@ class Fingerprinter:
                     # this look, which is the conservative reading.
                     continue
                 self._cache[relative] = (meta.size, meta.mtime_ns, digest)
-            marks[path_key(relative)] = FileMark(meta.size, digest)
+            marks[key] = FileMark(meta.size, digest)
         return marks
 
     def _hash(self, path: Path, strict: bool) -> str:
@@ -377,6 +448,18 @@ class Fingerprinter:
             except OSError:
                 sleep(pause)
         return _sha256(path)
+
+
+def _top_level_names(cloud: Path) -> list[str]:
+    try:
+        return sorted(entry.name for entry in cloud.iterdir() if not entry.name.endswith(".codexsync.tmp"))
+    except OSError:
+        return []
+
+
+def wanted_keys(records: Iterable[HandoffRecord]) -> set[str]:
+    """Every path key the given handoffs name."""
+    return {key for record in records for key in record.files}
 
 
 #: Pauses before re-reading a file a cloud client holds for a moment.
@@ -445,11 +528,13 @@ __all__ = [
     "STATE_HANDED_OFF",
     "STATE_WORKING",
     "awaiting_delivery",
+    "case_twin_message",
     "delivery",
     "machine_key",
     "mark_working",
     "superseded_by",
     "now_utc",
+    "wanted_keys",
     "path_key",
     "read_board",
     "record_handoff",

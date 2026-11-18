@@ -1,7 +1,6 @@
 """Streaming, read-only catalog of active and archived Codex sessions."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -10,8 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
-import threading
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .fs_links import is_link
 from .jsonl_codec import (
@@ -25,6 +23,7 @@ from .jsonl_codec import (
     unsupported_container,
 )
 from .progress import ProgressCallback, report
+from .work_scheduler import WorkScheduler
 
 
 DEFAULT_MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024
@@ -118,6 +117,9 @@ class SessionDescriptor:
     page: str | None = None
     #: The highest record `ordinal` in this file; ``None`` when none is numbered.
     max_ordinal: int | None = None
+    #: Diagnostic first-record reading, kept apart from whole-history format.
+    #: It does not participate in a branch's identity or transfer decisions.
+    first_record_format: str = field(default="unreadable", compare=False)
 
     @property
     def page_start(self) -> int:
@@ -163,9 +165,27 @@ def scan_sessions(
     source_machine: str | None = None,
     progress: ProgressCallback | None = None,
     phase: str = "sessions",
+    scheduler: WorkScheduler | None = None,
+    on_tree_file: Callable[[Path], None] | None = None,
+    on_tree_complete: Callable[[], None] | None = None,
 ) -> SessionCatalog:
+    """Read one tree; an injected scheduler remains owned by its caller.
+
+    Optional tree observers measure files before decoding. Completion marks
+    that independent measurement usable even if decoding later fails.
+    """
+    return _scan_catalogs(
+        [(state_root, source_machine)], max_line_bytes=max_line_bytes,
+        volatile=volatile, progress=progress, phase=phase, scheduler=scheduler,
+        on_tree_file=on_tree_file,
+        on_tree_complete=on_tree_complete,
+    )[0]
+
+
+def _find_sessions(
+    state_root: Path, on_tree_file: Callable[[Path], None] | None = None,
+) -> tuple[Path, list[tuple[Path, SessionState]]]:
     root = state_root.resolve()
-    descriptors: list[SessionDescriptor] = []
     # Both trees are walked first. Listing them is cheap and hashing them is
     # not, so this is what makes the count a total rather than a guess.
     found: list[tuple[Path, SessionState]] = []
@@ -173,44 +193,86 @@ def scan_sessions(
         directory = root / directory_name
         if not directory.is_dir():
             continue
-        found.extend((path, state) for path in _walk_jsonl(directory, root))
+        # Startup's file count skips linked root folders; the scan's existing
+        # branch selection remains independent of that measurement.
+        observer = on_tree_file
+        if observer is not None and (directory.is_symlink() or _is_reparse(directory)):
+            observer = None
+        found.extend((path, state) for path in _walk_jsonl(directory, root, on_tree_file=observer))
 
-    total = len(found)
+    return root, found
+
+
+def _scan_catalogs(
+    sides: list[tuple[Path, str | None]], *, max_line_bytes: int, volatile: bool,
+    progress: ProgressCallback | None, phase: str, scheduler: WorkScheduler | None,
+    on_tree_file: Callable[[Path], None] | None = None,
+    on_tree_complete: Callable[[], None] | None = None,
+) -> list[SessionCatalog]:
+    # Flatten both roots into one read batch: a scan never runs inside a
+    # scheduler worker and therefore cannot multiply pools or deadlock them.
+    jobs: list[tuple[Path, Path, SessionState, str | None]] = []
+    sizes: list[int] = []
+    for state_root, source_machine in sides:
+        root, found = _find_sessions(state_root, on_tree_file)
+        sizes.append(len(found))
+        jobs.extend((path, root, state, source_machine) for path, state in found)
+    if on_tree_complete is not None:
+        on_tree_complete()
+    total = len(jobs)
     report(progress, phase, 0, total)
-    packed = {
-        index for index, (path, _) in enumerate(found)
-        if codec_of(path) not in (None, JsonlCodec.NONE)
-    }
-    if min(SCAN_WORKERS, len(packed)) <= 1:
-        packed = set()
-    # Each file is still read whole by one thread, exactly as before; only the
-    # order they finish in varies. The result keeps the order they were found
-    # in, so the catalogue never depends on timing, and progress is reported
-    # from this thread, which is the caller's.
     results: list[SessionDescriptor | None] = [None] * total
     done = 0
-    with ThreadPoolExecutor(
-        max_workers=max(1, min(SCAN_WORKERS, len(packed))), thread_name_prefix="codexsync-scan"
-    ) as pool:
-        queued = {
-            pool.submit(
-                _scan_jsonl, found[index][0], root, found[index][1], max_line_bytes, volatile, source_machine
-            ): index
-            for index in sorted(packed)
-        }
-        # Plain files are read here while the pool unpacks the others.
-        for index, (path, state) in enumerate(found):
-            if index in packed:
-                continue
-            results[index] = _scan_jsonl(path, root, state, max_line_bytes, volatile, source_machine)
-            done += 1
-            report(progress, phase, done, total)
-        for future in as_completed(queued):
-            results[queued[future]] = future.result()
-            done += 1
-            report(progress, phase, done, total)
-    descriptors.extend(item for item in results if item is not None)
 
+    def read(index: int) -> SessionDescriptor:
+        path, root, state, machine = jobs[index]
+        return _scan_jsonl(path, root, state, max_line_bytes, volatile, machine)
+
+    def store(index: int, item: SessionDescriptor) -> None:
+        nonlocal done
+        results[index] = item
+        done += 1
+        report(progress, phase, done, total)
+
+    packed = [index for index, (path, *_rest) in enumerate(jobs)
+              if codec_of(path) not in (None, JsonlCodec.NONE)]
+    # Preserve the explicit serial path used for comparison/diagnostics.
+    if SCAN_WORKERS <= 1:
+        packed = []
+    packed_set = set(packed)
+
+    def plain_steps() -> Iterator[Callable[[], None]]:
+        for index in range(total):
+            if index not in packed_set:
+                yield lambda index=index: store(index, read(index))
+
+    def read_packed(work: WorkScheduler) -> None:
+        items = work.map_read(
+            read, packed, large_file=lambda _index: True,
+            caller_work=plain_steps() if len(packed) < total else None,
+        )
+        for index, item in zip(packed, items):
+            store(index, item)
+
+    if scheduler is not None:
+        read_packed(scheduler)
+    elif not packed:
+        for step in plain_steps():
+            step()
+    else:
+        with WorkScheduler(io_workers=SCAN_WORKERS, large_file_limit=SCAN_WORKERS) as owned:
+            read_packed(owned)
+
+    catalogs: list[SessionCatalog] = []
+    offset = 0
+    for size in sizes:
+        descriptors = [item for item in results[offset:offset + size] if item is not None]
+        catalogs.append(_catalog_from_descriptors(descriptors, volatile))
+        offset += size
+    return catalogs
+
+
+def _catalog_from_descriptors(descriptors: list[SessionDescriptor], volatile: bool) -> SessionCatalog:
     # A duplicate is two files for one history; a chat continued in a page is
     # one history per file, keyed apart by `branch_key`.
     by_key: dict[str, list[SessionDescriptor]] = {}
@@ -233,7 +295,9 @@ def scan_sessions(
     return SessionCatalog(descriptors, branches, tuple(sorted(graph_codes)), volatile)
 
 
-def _walk_jsonl(directory: Path, state_root: Path) -> Iterator[Path]:
+def _walk_jsonl(
+    directory: Path, state_root: Path, *, on_tree_file: Callable[[Path], None] | None = None,
+) -> Iterator[Path]:
     for current, dirs, files in os.walk(directory, followlinks=False):
         current_path = Path(current)
         safe_dirs: list[str] = []
@@ -245,6 +309,8 @@ def _walk_jsonl(directory: Path, state_root: Path) -> Iterator[Path]:
             safe_dirs.append(name)
         dirs[:] = safe_dirs
         for name in files:
+            if on_tree_file is not None:
+                on_tree_file(current_path / name)
             # A branch is recognised by its logical name, not by its container:
             # the cloud mirror may store the same history compressed, and Codex
             # may store it in a container this version cannot open, which is
@@ -290,6 +356,9 @@ def _scan_jsonl(
     numbered = unnumbered = 0
     last_record_at: str | None = None
     max_ordinal: int | None = None
+    first_record_format = "unreadable"
+    first_record: object = None
+    first_record_readable = False
     try:
         # Every metric below is taken from the decompressed stream, so a branch
         # kept in a compressed container is the same branch as the plain one.
@@ -301,6 +370,15 @@ def _scan_jsonl(
                 byte_count += len(line)
                 digest.update(line)
                 line_count += 1
+                if line_count == 1:
+                    # The format check used to reopen this file and decode
+                    # just this record. Capture that exact reading once.
+                    try:
+                        first_record = json.loads(line.decode("utf-8")) if line.strip() else None
+                        first_record_readable = True
+                    except (UnicodeError, ValueError):
+                        pass
+                    first_record_format = _first_record_format(first_record)
                 if len(line) > max_line_bytes:
                     codes.append("LINE_TOO_LARGE")
                     break
@@ -317,7 +395,13 @@ def _scan_jsonl(
                     codes.append("EMPTY_RECORD")
                     continue
                 try:
-                    record = json.loads(raw_line.decode("utf-8"))
+                    if line_count == 1:
+                        if not first_record_readable:
+                            codes.append("INVALID_RECORD")
+                            continue
+                        record = first_record
+                    else:
+                        record = json.loads(raw_line.decode("utf-8"))
                 except (UnicodeError, json.JSONDecodeError):
                     codes.append("INVALID_RECORD")
                     continue
@@ -402,6 +486,7 @@ def _scan_jsonl(
         last_record_at=last_record_at,
         page=page,
         max_ordinal=max_ordinal,
+        first_record_format=first_record_format,
     )
 
 
@@ -464,6 +549,7 @@ def _unsupported_container(
         codes=tuple(codes),
         mtime_ns=stat.st_mtime_ns if stat is not None else None,
         file_id=_file_id(stat) if stat is not None else None,
+        first_record_format=RECORD_FORMAT_UNSUPPORTED,
     )
 
 
@@ -548,17 +634,20 @@ def peek_record_formats(state_root: Path, *, max_line_bytes: int = DEFAULT_MAX_J
                 record = json.loads(first.decode("utf-8")) if first.strip() else None
             except (*JSONL_READ_ERRORS, UnicodeError, ValueError):
                 record = None
-            if not isinstance(record, dict):
-                key = "unreadable"
-            else:
-                ordinal = record.get("ordinal")
-                key = (
-                    RECORD_FORMAT_ORDINAL
-                    if isinstance(ordinal, int) and not isinstance(ordinal, bool)
-                    else RECORD_FORMAT_LEGACY
-                )
+            key = _first_record_format(record)
             formats[logical_relative_path(path.relative_to(root).as_posix())] = key
     return formats
+
+
+def _first_record_format(record: object) -> str:
+    if not isinstance(record, dict):
+        return "unreadable"
+    ordinal = record.get("ordinal")
+    return (
+        RECORD_FORMAT_ORDINAL
+        if isinstance(ordinal, int) and not isinstance(ordinal, bool)
+        else RECORD_FORMAT_LEGACY
+    )
 
 
 def _record_format(numbered: int, unnumbered: int) -> str | None:
@@ -636,6 +725,7 @@ def scan_both_sides(
     max_line_bytes: int = DEFAULT_MAX_JSONL_LINE_BYTES,
     volatile: bool = False,
     progress: ProgressCallback | None = None,
+    scheduler: WorkScheduler | None = None,
 ) -> tuple[SessionCatalog, SessionCatalog]:
     """`.codex` and the cloud mirror, read at the same time. Reads only.
 
@@ -646,31 +736,9 @@ def scan_both_sides(
     Each catalogue is exactly what `scan_sessions` returns for its side; the
     progress is one phase, ``sessions``, over both.
     """
-    lock = threading.Lock()
-    seen: dict[str, tuple[int, int]] = {}
-
-    def side(name: str) -> ProgressCallback | None:
-        if progress is None:
-            return None
-
-        def callback(_phase: str, done: int, total: int) -> None:
-            # Under the lock, so the two sides never report a smaller "done"
-            # after a larger one.
-            with lock:
-                seen[name] = (done, total)
-                report(
-                    progress, "sessions",
-                    sum(item[0] for item in seen.values()), sum(item[1] for item in seen.values()),
-                )
-        return callback
-
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="codexsync-scan-mirror") as pool:
-        remote = pool.submit(
-            scan_sessions, remote_root, max_line_bytes=max_line_bytes, volatile=volatile,
-            source_machine=remote_machine, progress=side("remote"),
-        )
-        local = scan_sessions(
-            local_root, max_line_bytes=max_line_bytes, volatile=volatile,
-            source_machine=local_machine, progress=side("local"),
-        )
-        return local, remote.result()
+    local, remote = _scan_catalogs(
+        [(local_root, local_machine), (remote_root, remote_machine)],
+        max_line_bytes=max_line_bytes, volatile=volatile, progress=progress,
+        phase="sessions", scheduler=scheduler,
+    )
+    return local, remote

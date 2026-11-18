@@ -47,9 +47,15 @@ class GuardianModel(Model):
         self.accept_result: Outcome | None = None
 
     def reset_plans(self) -> None:
+        # Everything read under the old file goes (CS-551): the store may be
+        # another folder now, and a baseline preview was judged by the old rules.
         self.preview = None
         self.checked = None
         self.restore_result = None
+        self.selected = None
+        self.inventory = None
+        self.accept_preview = None
+        self.accept_result = None
 
 
 class GuardianScreen(Screen):
@@ -420,6 +426,17 @@ class GuardianScreen(Screen):
         set_tone(self.restore_status, tone, palette)
         self.restore_status.setVisible(bool(text))
 
+    def _problem_text(self, problem: str) -> str:
+        """A store problem in the window's language; English when core gave no code (CS-552)."""
+        code = getattr(problem, "code", None)
+        key = f"guardian.problem.{code}" if code else ""
+        if not (key and self.host.catalog.has(key)):
+            return str(problem)
+        try:
+            return self.t(key, **getattr(problem, "params", {}))
+        except (KeyError, IndexError, ValueError):
+            return str(problem)
+
     def render(self) -> None:
         model = self.model
         palette = self.palette_
@@ -436,7 +453,10 @@ class GuardianScreen(Screen):
         else:
             inventory = outcome.value
             latest = next((s for s in inventory.snapshots if s.latest_good), None)
-            detail = self.join([self.t("guardian.root", path=inventory.root_dir), *inventory.problems])
+            detail = self.join([
+                self.t("guardian.root", path=inventory.root_dir),
+                *(self._problem_text(problem) for problem in inventory.problems),
+            ])
             if latest is not None:
                 self.banner.show_message(
                     "ok",

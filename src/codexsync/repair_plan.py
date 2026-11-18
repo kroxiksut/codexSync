@@ -197,6 +197,9 @@ def save_repair_plan(plan: RepairPlan, path: Path) -> Path:
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
+    # Left only by a save that died mid-write: it holds nothing anyone
+    # confirmed, and "x" mode would otherwise refuse every later save (CS-529).
+    temp.unlink(missing_ok=True)
     with temp.open("x", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, ensure_ascii=False, sort_keys=True, indent=2)
         handle.write("\n")

@@ -18,11 +18,15 @@ A snapshot the journal names but that is *gone* proves nothing (CS-294): the
 backup directory may be shared with another machine whose retention removed
 it, so a rollback refuses instead of reporting that nothing was overwritten.
 
-Rollback is planned and proven before the journal is closed (CS-292), and it
-follows the journal's family: files of a sync or restore go back through the
-restore envelope, each into the side its manifest entry records (CS-293); the
-global state goes back through ``app.commit_global_state``; a session transfer
-is not rolled back at all (see ``_rollback_refusal``).
+Rollback is planned and proven before anything is written (CS-292), and the
+journal it undoes stays open until the rollback's own journal is
+``COMMITTED`` (CS-491). Only the machine that ran an operation rolls it back:
+the journals folder is shared, and another machine's backup holds that
+machine's files (CS-486). Rollback follows the journal's family: files of a
+sync or restore go back through the restore envelope, each into the side its
+manifest entry records (CS-293); the global state goes back through
+``app.commit_global_state``; a session transfer is not rolled back at all
+(see ``_rollback_refusal``).
 """
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ import zipfile
 
 from .config import load_config
 from .exceptions import ConfigError, FailSafeError
-from .guardian_models import ValidationStatus
+from .guardian_models import ValidationStatus, holds_no_projects
 from .guardian_restore import carries_project_state
 from .guardian_schema import validate_global_state_references
 from .models import AppConfig, SyncPlan
@@ -87,6 +91,15 @@ class RecoveryOutcome:
     snapshot: str | None
     restored_files: int
     detail: str
+    #: For ``WOULD_RECOVER``: what the same call without ``dry_run`` would do --
+    #: ``RETRY_ALLOWED`` (resume), ``NOTHING_TO_ROLL_BACK`` (a rollback with
+    #: nothing replaced: no snapshot was read) or ``ROLLED_BACK`` (the
+    #: snapshot was verified against its manifest). A screen words its result
+    #: from this, never from which button was pressed (CS-549).
+    would: RecoveryAction | None = None
+    #: Whether the recorded snapshot is in the backup folder. A closed journal
+    #: says "the backup is kept" only when it is.
+    snapshot_kept: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +141,16 @@ class JournalInfo:
     #: stopped before the commit phase, so nothing was replaced. Anything else
     #: still open waits for ``recover resume`` or ``recover rollback``.
     closes_itself: bool = False
+    #: Whether a rollback would need the recorded snapshot: open and past the
+    #: commit phase. Before it, a snapshot not on disk loses nothing (CS-549).
+    backup_needed: bool = False
+    #: For a file that claims another operation's identity (a cloud client's
+    #: duplicate, CS-512): the operation it copies. A copy whose original is
+    #: readable is not listed at all; this one has none and still blocks.
+    copy_of: str | None = None
+    failure_code: str | None = None
+    failure_params: Mapping[str, object] | None = None
+    failure_message: str | None = None
 
 
 def list_journals(config_path: Path) -> list[JournalInfo]:
@@ -148,9 +171,11 @@ def list_journals(config_path: Path) -> list[JournalInfo]:
         return []
     machine = cfg.identity.machine_id or platform.node()
     result = [
-        _describe_journal(store, path, cfg.paths.backup_dir, machine)
+        info
         for path in store.root.glob("*.json")
         if path.is_file()
+        for info in [_describe_journal(store, path, cfg.paths.backup_dir, machine)]
+        if info is not None
     ]
     # Two stable sorts: newest first, then non-terminal before terminal.
     result.sort(key=lambda item: (item.created_at_utc or "", item.operation_id), reverse=True)
@@ -176,16 +201,20 @@ def list_history(
     return items if limit is None else items[:max(limit, 0)]
 
 
-def _describe_journal(store: JournalStore, path: Path, backup_root: Path, machine: str) -> JournalInfo:
+def _describe_journal(store: JournalStore, path: Path, backup_root: Path, machine: str) -> JournalInfo | None:
     operation_id = path.stem
     try:
         journal: MutationJournal | None = store.load(operation_id)
     except FailSafeError:
         journal = None
+    if journal is not None and journal.operation_id != operation_id and store.is_stale_copy(path, journal):
+        # A duplicate of a journal that is readable under its own name: it
+        # says nothing that file does not, and blocks nothing (CS-512).
+        return None
     if journal is not None and journal.operation_id == operation_id:
         terminal = journal.state in TERMINAL
-        refusal = None if terminal else _rollback_refusal(journal, backup_root)
         own = owned_by(journal, machine)
+        refusal = None if terminal else _rollback_refusal(journal, backup_root, own=own)
         return JournalInfo(
             operation_id=operation_id,
             family=journal.family,
@@ -202,10 +231,14 @@ def _describe_journal(store: JournalStore, path: Path, backup_root: Path, machin
             origin=journal.origin,
             finished_at_utc=journal.finished_at_utc,
             failure=journal.failure,
+            failure_code=journal.failure_code,
+            failure_params=journal.failure_params,
+            failure_message=journal.failure_message,
             rollback_refusal=refusal,
             machine_id=journal.machine_id,
             own=own,
             closes_itself=own and journal.state in BEFORE_COMMIT,
+            backup_needed=not terminal and journal.state not in BEFORE_COMMIT,
         )
     # Unreadable, or it claims another operation's identity, which
     # ``_load_recoverable`` refuses. Salvage correctly typed fields for display.
@@ -227,6 +260,7 @@ def _describe_journal(store: JournalStore, path: Path, backup_root: Path, machin
         can_resume=False,
         can_rollback=False,
         backup_snapshot_present=_snapshot_presence(backup_root, snapshot),
+        copy_of=journal.operation_id if journal is not None else None,
     )
 
 
@@ -268,21 +302,31 @@ def resume_operation(config_path: Path, operation_id: str, *, dry_run: bool) -> 
         # manifest, refuse rather than discard the only record of the old state.
         _verify_backup_snapshot(snapshot, allow_legacy_snapshot=False)
 
-    detail = (
-        f"Re-run the interrupted `{journal.family}` command; it re-plans from the current state. "
-        f"The backup snapshot from the interrupted attempt is kept."
-    )
+    kept = snapshot is not None
+    detail = f"Re-run the interrupted `{journal.family}` command; it re-plans from the current state."
+    if kept:
+        detail += " The backup snapshot from the interrupted attempt is kept."
+    elif journal.backup_snapshot is not None:
+        detail += f" Its backup snapshot {journal.backup_snapshot} is not in the backup folder."
+    machine = cfg.identity.machine_id or platform.node()
+    if not owned_by(journal, machine):
+        # Allowed on purpose: a run of a machine that is gone would otherwise
+        # block this one for good. Only that machine can tell it is over.
+        detail += (
+            f" This run belongs to machine {journal.machine_id or 'not recorded'}; close it here only "
+            "when that run is certainly over."
+        )
     if dry_run:
         return RecoveryOutcome(
             journal.operation_id, journal.family, journal.state.value,
             RecoveryAction.WOULD_RECOVER, journal.backup_snapshot, 0,
             "Dry-run: the journal would be closed. " + detail,
+            would=RecoveryAction.RETRY_ALLOWED, snapshot_kept=kept,
         )
 
     # Close under the machine's lock, as rollback does (CS-461): a run that
     # still holds it may yet move this journal.
     store = JournalStore(cfg.paths.temp_dir)
-    machine = cfg.identity.machine_id or platform.node()
     with OperationLock(
         cfg.paths.temp_dir, state_root=locate_local_state_dir(cfg), machine_id=machine,
         family="recover", reentrant=True,
@@ -293,6 +337,7 @@ def resume_operation(config_path: Path, operation_id: str, *, dry_run: bool) -> 
     return RecoveryOutcome(
         journal.operation_id, journal.family, journal.state.value,
         RecoveryAction.RETRY_ALLOWED, journal.backup_snapshot, 0, detail,
+        snapshot_kept=kept,
     )
 
 
@@ -315,13 +360,28 @@ def rollback_operation(
 
     Everything that can refuse -- the snapshot's integrity, its sides, whether
     this family can be rolled back at all, the candidate global state's
-    validity -- is checked before the journal is closed (CS-292). The journal
-    is then closed and the restore run while holding the state root's lock,
-    so no other mutation can slip in between.
+    validity -- is checked before anything is written (CS-292). The restore
+    then runs under the state root's lock with a journal of its own that
+    supersedes this one, and this journal is closed only once that restore is
+    ``COMMITTED``: a rollback that refuses half-way leaves it open (CS-491).
+
+    Only the machine that ran the operation may roll it back (CS-486): its
+    snapshot holds that machine's `.codex` files, and the local side here is
+    another `.codex`.
     """
     if target not in (None, "local", "cloud"):
         raise ConfigError(f"Unsupported rollback target: {target}")
     cfg, journal, gate = _load_recoverable(config_path, operation_id)
+    machine = cfg.identity.machine_id or platform.node()
+    if not owned_by(journal, machine):
+        owner = journal.machine_id or "not recorded"
+        raise FailSafeError(
+            f"Operation {journal.operation_id} was run on machine {owner}, not this one. Its backup holds "
+            f"that machine's files; roll it back there. Close it here with `recover resume` only when "
+            "that run is certainly over.",
+            code="ROLLBACK_OTHER_MACHINE",
+            params={"machine": owner},
+        )
     if journal.backup_snapshot is None:
         raise FailSafeError(
             f"Operation {journal.operation_id} has no recorded backup snapshot, so a rollback target "
@@ -338,7 +398,7 @@ def rollback_operation(
             store, journal, dry_run,
             "The operation never entered its commit phase, so no destination was replaced.",
         )
-    refusal = _rollback_refusal(journal, cfg.paths.backup_dir)
+    refusal = _rollback_refusal(journal, cfg.paths.backup_dir, own=True)
     if refusal is not None:
         raise FailSafeError(f"Operation {journal.operation_id} cannot be rolled back: {refusal}")
     snapshot = _locate_snapshot(cfg.paths.backup_dir, journal.backup_snapshot)
@@ -364,8 +424,8 @@ def rollback_operation(
                 journal.operation_id, journal.family, journal.state.value,
                 RecoveryAction.WOULD_RECOVER, snapshot.name, 0,
                 f"Dry-run: snapshot {snapshot.name} verifies; {rollback.describe()} would be restored.",
+                would=RecoveryAction.ROLLED_BACK, snapshot_kept=True,
             )
-        machine = cfg.identity.machine_id or platform.node()
         with OperationLock(
             cfg.paths.temp_dir, state_root=local_root, machine_id=machine,
             family="recover", reentrant=True,
@@ -374,14 +434,25 @@ def rollback_operation(
             if store.load(journal.operation_id) != journal:
                 raise FailSafeError(f"Operation {journal.operation_id} changed while the rollback was prepared", code="STATE_CHANGED_RETRY")
             rollback.recheck()
-            _close(store, journal)
-            restored = rollback.execute(cfg, gate)
+            # The restore's own journal supersedes this one; this one is
+            # closed only after it is COMMITTED. Anything the restore refuses
+            # -- Codex starting, a file that moved -- leaves it open.
+            restored = rollback.execute(cfg, gate, superseding=journal.operation_id)
+            try:
+                _close(store, journal)
+            except Exception as exc:
+                raise FailSafeError(
+                    f"Restored {restored} file(s) from {snapshot.name}, but journal {journal.operation_id} "
+                    f"could not be closed ({type(exc).__name__}). Close it with `recover resume "
+                    f"{journal.operation_id}`; the files are already back."
+                ) from exc
     finally:
         rollback.discard()
     return RecoveryOutcome(
         journal.operation_id, journal.family, journal.state.value,
         RecoveryAction.ROLLED_BACK, snapshot.name, restored,
         f"Restored {restored} file(s) from {snapshot.name}: {rollback.describe()}.",
+        snapshot_kept=True,
     )
 
 
@@ -395,13 +466,18 @@ _FILE_FAMILIES = frozenset({"sync", "restore"})
 _GLOBAL_STATE_FILE = ".codex-global-state.json"
 
 
-def _rollback_refusal(journal: MutationJournal, backup_root: Path) -> str | None:
+def _rollback_refusal(journal: MutationJournal, backup_root: Path, *, own: bool) -> str | None:
     """Why rollback would refuse this non-terminal journal, cheaply; ``None`` if it would not.
 
     Shared by the listing (``can_rollback``) and ``rollback_operation`` so a
     screen never offers an exit that then refuses. Reads the small manifest
-    JSON at most, never the payload.
+    JSON at most, never the payload. ``own`` is ``owned_by`` this machine.
     """
+    if not own:
+        return (
+            f"it was run on machine {journal.machine_id or 'not recorded'}, and its backup holds that "
+            "machine's files; roll it back there"
+        )
     if journal.backup_snapshot is None:
         return "no backup snapshot is recorded"
     if journal.state in _BEFORE_COMMIT:
@@ -455,7 +531,7 @@ class _Rollback:
     def recheck(self) -> None:
         """Re-prove, under the lock, what planning read from the live state."""
 
-    def execute(self, cfg: AppConfig, gate) -> int:
+    def execute(self, cfg: AppConfig, gate, *, superseding: str) -> int:
         raise NotImplementedError
 
     def discard(self) -> None:
@@ -475,9 +551,9 @@ class _FileRollback(_Rollback):
             parts.append(f"{len(self.plan.to_cloud)} file(s) to cloud")
         return ", ".join(parts) or "no file"
 
-    def execute(self, cfg: AppConfig, gate) -> int:
+    def execute(self, cfg: AppConfig, gate, *, superseding: str) -> int:
         staging, self.staging_dir = self.staging_dir, None
-        execute_restore_plan(cfg, gate, self.plan, staging, dry_run=False)
+        execute_restore_plan(cfg, gate, self.plan, staging, dry_run=False, superseding=superseding)
         return self.plan.action_count
 
     def discard(self) -> None:
@@ -519,13 +595,23 @@ def _plan_file_rollback(
             raise ConfigError(f"Snapshot entry has no restorable side: {rel}")
         return side, roots[side]
 
+    # Every entry, whatever today's include_roots/exclude_globs say: they may
+    # have narrowed since, and a filtered rollback skipped files silently,
+    # then closed the journal as if all were back (CS-492).
     plan, staging = _build_restore_plan_from_snapshot(
         snapshot=snapshot,
         destination=destination,
-        include_roots=cfg.targets.include_roots,
-        exclude_globs=cfg.filters.exclude_globs,
+        include_roots=None,
+        exclude_globs=[],
         temp_root=cfg.paths.temp_dir,
     )
+    if plan.action_count != len(sides):
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        raise FailSafeError(
+            f"Snapshot {snapshot.name} records {len(sides)} file(s) but {plan.action_count} would be "
+            "restored; nothing was changed"
+        )
     return _FileRollback(plan, staging)
 
 
@@ -546,7 +632,7 @@ class _GlobalStateRollback(_Rollback):
         if current != self.live:
             raise FailSafeError(f"{_GLOBAL_STATE_FILE} changed while the rollback was prepared; run it again", code="STATE_CHANGED_RETRY")
 
-    def execute(self, cfg: AppConfig, gate) -> int:
+    def execute(self, cfg: AppConfig, gate, *, superseding: str) -> int:
         # `app` imports this module; the envelope is reached lazily.
         from .app import commit_global_state
 
@@ -559,6 +645,7 @@ class _GlobalStateRollback(_Rollback):
             source=self.source,
             original=self.live,
             candidate=self.candidate,
+            superseding=superseding,
         )
         return 1
 
@@ -590,7 +677,11 @@ def _plan_global_state_rollback(snapshot: Path, local_root: Path, target: str | 
             f"The global state in snapshot {snapshot.name} fails validation ({report.status.value}); not restored"
         )
     live_report = validate_global_state_references(live)
-    if live_report.schema_id is not None and live_report.schema_id != report.schema_id:
+    if (
+        live_report.schema_id is not None and live_report.schema_id != report.schema_id
+        and not holds_no_projects(live_report.project_count, live_report.binding_count)
+        and not holds_no_projects(report.project_count, report.binding_count)
+    ):
         raise FailSafeError(
             f"The live global state is schema {live_report.schema_id!r} and the snapshot's is "
             f"{report.schema_id!r}; Codex changed its format since, so the old state is not written back"
@@ -650,6 +741,7 @@ def _no_op_rollback(
             journal.operation_id, journal.family, journal.state.value,
             RecoveryAction.WOULD_RECOVER, journal.backup_snapshot, 0,
             f"Dry-run: {reason} The journal would be closed.",
+            would=RecoveryAction.NOTHING_TO_ROLL_BACK,
         )
     _close(store, journal)
     return RecoveryOutcome(

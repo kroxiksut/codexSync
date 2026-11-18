@@ -26,6 +26,10 @@ class OperationKind(str, Enum):
     CHAT_MOVE = "chat_move"
     SESSION_SCAN = "session_scan"
     SESSION_APPLY = "session_apply"
+    #: A write into Codex's own SQLite catalogue: the chat-list rebuild request,
+    #: `codex repair`, chat names and archive moves (CS-485: a refusal named
+    #: these `session_apply`).
+    CODEX_CATALOGUE = "codex_catalogue"
     RECOVER_RESUME = "recover_resume"
     RECOVER_ROLLBACK = "recover_rollback"
     GUARDIAN_RESTORE = "guardian_restore"
@@ -71,6 +75,7 @@ OPERATION_PROFILES: dict[OperationKind, OperationProfile] = {
     OperationKind.CHAT_MOVE: OperationProfile(OperationKind.CHAT_MOVE, True, True, False),
     OperationKind.SESSION_SCAN: OperationProfile(OperationKind.SESSION_SCAN, False, False, True),
     OperationKind.SESSION_APPLY: OperationProfile(OperationKind.SESSION_APPLY, True, True, False),
+    OperationKind.CODEX_CATALOGUE: OperationProfile(OperationKind.CODEX_CATALOGUE, True, True, False),
     OperationKind.RECOVER_RESUME: OperationProfile(OperationKind.RECOVER_RESUME, True, True, False),
     OperationKind.RECOVER_ROLLBACK: OperationProfile(OperationKind.RECOVER_ROLLBACK, True, True, False),
     OperationKind.GUARDIAN_RESTORE: OperationProfile(OperationKind.GUARDIAN_RESTORE, True, True, False),

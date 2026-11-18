@@ -80,13 +80,24 @@ class _PairController(FakeController):
 class _TaskController(FakeController):
     """The OS-task calls, answered here: no test may reach `schtasks`."""
 
-    def apply_automation(self) -> Outcome:
-        self.calls.append(("apply_automation",))
-        return Outcome(value=None)
+    #: What the next apply/remove answers; a refusal for another config by default off.
+    other_config: str | None = None
 
-    def remove_automation(self) -> Outcome:
-        self.calls.append(("remove_automation",))
-        return Outcome(value=True)
+    def _maybe_refuse(self, replace: bool) -> Outcome | None:
+        if self.other_config and not replace:
+            return Outcome(
+                failure=Failure.STOPPED_SAFELY, message="installed from another config",
+                code="AUTOMATION_OTHER_CONFIG", details={"path": self.other_config},
+            )
+        return None
+
+    def apply_automation(self, *, replace_other_config: bool = False) -> Outcome:
+        self.calls.append(("apply_automation", replace_other_config))
+        return self._maybe_refuse(replace_other_config) or Outcome(value=None)
+
+    def remove_automation(self, *, replace_other_config: bool = False) -> Outcome:
+        self.calls.append(("remove_automation", replace_other_config))
+        return self._maybe_refuse(replace_other_config) or Outcome(value=True)
 
     def automation(self) -> Outcome:
         self.calls.append(("automation",))
@@ -228,6 +239,35 @@ class AutomationTaskTests(_JobsCase):
         self.assertFalse(window.screen("automation").model.task_busy)
 
 
+class AutomationOtherConfigTests(_JobsCase):
+    """CS-545: tasks another config installed are taken over only when the person says so."""
+
+    def test_a_refusal_offers_to_take_the_tasks_over_and_asks_first(self) -> None:
+        controller = _TaskController()
+        controller.other_config = "D:/Other/config.toml"
+        window, controller, runner = self.deferred(controller=controller, page="automation")
+        screen = window.screen("automation")
+        self.assertFalse(screen.task_replace.isVisibleTo(window))
+        screen._start_task("apply")
+        runner.finish(0)
+        screen = window.screen("automation")
+        self.assertTrue(screen.task_replace.isVisibleTo(window))
+        self.assertIn("D:/Other/config.toml", screen.task_status.text())
+        asked: list[str] = []
+        window.confirm = lambda title, body, action: asked.append(body) or False
+        screen.replace_tasks()
+        self.assertEqual(len(runner.jobs), 0, "declined: nothing started")
+        window.confirm = lambda title, body, action: asked.append(body) or True
+        screen.replace_tasks()
+        self.assertIn("D:/Other/config.toml", asked[-1])
+        runner.finish(0)
+        self.assertEqual(
+            [call for call in controller.calls if call[0] == "apply_automation"],
+            [("apply_automation", False), ("apply_automation", True)],
+        )
+        self.assertFalse(window.screen("automation").task_replace.isVisibleTo(window))
+
+
 class ConfigMigrationReloadTests(_JobsCase):
     def test_an_upgraded_file_is_what_every_page_reads_next(self) -> None:
         """CS-307: after the upgrade the pages kept the old file."""
@@ -258,6 +298,166 @@ class RecoveryResumeTests(_JobsCase):
 
 
 class ProgressRedrawTests(_JobsCase):
+    def test_job_progress_estimates_rate_and_resets_at_phase_boundary(self) -> None:
+        from codexsync.gui.jobs import JobBook
+
+        now = [10.0]
+        book = JobBook(clock=lambda: now[0])
+        book.start("job", page="sync", kind="full_sync", apply=lambda *_: None,
+                   model=object(), cancellable=False)
+        self.assertTrue(book.report("job", "stage_chats", 1, 10))
+        self.assertIsNone(book.running["job"].progress_estimate.items_per_second)
+        now[0] = 12.0
+        book.report("job", "stage_chats", 5, 10)
+        estimate = book.running["job"].progress_estimate
+        self.assertEqual(estimate.items_per_second, 2.0)
+        self.assertEqual(estimate.remaining_seconds, 2.5)
+        now[0] = 13.0
+        book.report("job", "apply_chats", 1, 10)
+        self.assertIsNone(book.running["job"].progress_estimate.items_per_second)
+        self.assertEqual(book.running["job"].progress, ("apply_chats", 1, 10))
+
+    def test_large_task_list_filters_without_changing_the_plan(self) -> None:
+        from codexsync.gui.task_items import task_rows, filter_task_rows
+        from codexsync.semantic_transfer import TransferAction, TransferItem, TransferPlan
+        from codexsync.semantic_merge import BranchRelation
+
+        items = tuple(TransferItem(str(i), BranchRelation.IDENTICAL, TransferAction.FAST_FORWARD_REMOTE,
+                                   "a", "b", 1, 1, f"sessions/{i}.jsonl") for i in range(1200))
+        plan = TransferPlan(1, "p", "now", "a", "b", "layout", "v1", False, items)
+        rows = task_rows(plan, {"staged": 1200, "applied": 205, "relative_path": "sessions/205.jsonl",
+                                "phase": "apply_chats"})
+        self.assertEqual(len(filter_task_rows(rows, "applied")), 205)
+        self.assertEqual(len(filter_task_rows(rows, "failed")), 1)
+        self.assertEqual(len(filter_task_rows(rows, "not_applied")), 995)
+        self.assertEqual(plan.items, items)
+
+    def test_not_applied_filter_includes_blocked_and_skipped_chats(self) -> None:
+        from codexsync.gui.task_items import task_rows, filter_task_rows
+        from codexsync.semantic_transfer import TransferAction, TransferItem, TransferPlan
+        from codexsync.semantic_merge import BranchRelation
+
+        items = tuple(TransferItem(str(i), BranchRelation.IDENTICAL, action, "a", "b", 1, 1)
+                      for i, action in enumerate((TransferAction.BLOCKED_INVALID_BRANCH, TransferAction.NOOP)))
+        plan = TransferPlan(1, "p", "now", "a", "b", "layout", "v1", False, items)
+        self.assertEqual(len(filter_task_rows(task_rows(plan, {}), "not_applied")), 2)
+
+    def test_failed_item_is_identified_by_branch_not_ambiguous_path(self) -> None:
+        from codexsync.gui.task_items import task_rows
+        from codexsync.semantic_transfer import TransferAction, TransferItem, TransferPlan
+        from codexsync.semantic_merge import BranchRelation
+
+        items = (
+            TransferItem("first", BranchRelation.IDENTICAL, TransferAction.FAST_FORWARD_LOCAL,
+                         "a", "b", 1, 1, "sessions/chat.jsonl"),
+            TransferItem("second", BranchRelation.IDENTICAL, TransferAction.FAST_FORWARD_REMOTE,
+                         "a", "b", 1, 1, "sessions/chat.jsonl"),
+        )
+        plan = TransferPlan(1, "p", "now", "a", "b", "layout", "v1", False, items)
+        params = {"staged": 2, "applied": 1, "phase": "apply_chats",
+                  "relative_path": "sessions/chat.jsonl", "session_hash": "second"}
+        self.assertEqual([row.state for row in task_rows(plan, params)], ["applied", "failed"])
+        params.update(phase="delete_chat_files", relative_path="archived_sessions/old.jsonl")
+        self.assertEqual([row.state for row in task_rows(plan, params)], ["applied", "failed"])
+
+    def test_tasks_dialog_virtualizes_and_filters_failed_transfer(self) -> None:
+        from types import SimpleNamespace
+        from codexsync.gui.screens.tasks import TasksDialog
+        from codexsync.semantic_transfer import TransferAction, TransferItem, TransferPlan
+        from codexsync.semantic_merge import BranchRelation
+
+        items = tuple(TransferItem(str(i), BranchRelation.IDENTICAL, TransferAction.FAST_FORWARD_REMOTE,
+                                   "a", "b", 1, 1, f"sessions/{i}.jsonl") for i in range(1200))
+        plan = TransferPlan(1, "p", "now", "a", "b", "layout", "v1", False, items)
+        journal = SimpleNamespace(state="RECOVERY_REQUIRED", failure_params={
+            "staged": 1200, "applied": 205, "relative_path": "sessions/205.jsonl", "phase": "apply_chats",
+        })
+        window, _ = self.make()
+        dialog = TasksDialog(window)
+        dialog.set_task_data(plan, journal)
+        self.assertEqual(dialog.items_model.rowCount(), 1200)
+        dialog.items_filter.setCurrentIndex(dialog.items_filter.findData("failed"))
+        self.assertEqual(dialog.items_proxy.rowCount(), 1)
+        self.assertEqual(plan.items, items)
+        dialog.close()
+
+    def test_tasks_dialog_tracks_live_applied_count(self) -> None:
+        from types import SimpleNamespace
+        from codexsync.gui.screens.tasks import TasksDialog
+        from codexsync.semantic_transfer import TransferAction, TransferItem, TransferPlan
+        from codexsync.semantic_merge import BranchRelation
+
+        items = tuple(TransferItem(str(i), BranchRelation.IDENTICAL, TransferAction.FAST_FORWARD_REMOTE,
+                                   "a", "b", 1, 1, f"sessions/{i}.jsonl") for i in range(3))
+        plan = TransferPlan(1, "p", "now", "a", "b", "layout", "v1", False, items)
+        window, _ = self.make()
+        dialog = TasksDialog(window)
+        dialog.set_task_data(plan, SimpleNamespace(state="COMMITTING", failure_params=None))
+        dialog.update_task_progress(("apply_chats", 2, 3))
+        self.assertEqual([row.state for row in dialog.items_model.rows], ["applied", "applied", "staged"])
+        dialog.close()
+
+    def test_open_tasks_reloads_journal_after_transfer_stops(self) -> None:
+        from types import SimpleNamespace
+        from codexsync.gui.screens.tasks import TasksDialog
+        from codexsync.semantic_transfer import TransferPlan
+
+        window, _ = self.make()
+        dialog = TasksDialog(window)
+        plan = TransferPlan(1, "p", "now", "a", "b", "layout", "v1", False)
+        dialog.set_task_data(plan, SimpleNamespace(state="COMMITTING", failure_params=None,
+                                                    machine_id=window.machine_id()))
+        book = window.jobs()
+        book.start("transfer", page="sync", kind="full_sync", apply=lambda *_: None,
+                   model=object(), cancellable=False)
+        dialog.render()
+        book.finish("transfer", Outcome(failure=Failure.STOPPED_SAFELY))
+        with mock.patch.object(dialog, "_load_items") as reload_items:
+            dialog.render()
+        reload_items.assert_called_once()
+        dialog.close()
+
+    def test_failed_transfer_items_offer_the_matching_recovery_journal(self) -> None:
+        from types import SimpleNamespace
+        from codexsync.gui.screens.tasks import TasksDialog
+        from codexsync.semantic_transfer import TransferPlan
+
+        window, _ = self.make()
+        dialog = TasksDialog(window)
+        plan = TransferPlan(1, "p", "now", "a", "b", "layout", "v1", False)
+        dialog.set_task_data(plan, SimpleNamespace(state="RECOVERY_REQUIRED", failure_params={}, operation_id="op-1"))
+        self.assertFalse(dialog.items_recovery.isHidden())
+        with mock.patch.object(window, "go_to") as go:
+            dialog.items_recovery.click()
+        go.assert_called_once_with("recovery", "op-1")
+        dialog.close()
+
+    def test_failed_task_keeps_last_applied_count(self) -> None:
+        from codexsync.gui.jobs import JobBook
+
+        book = JobBook()
+        book.start(1, page="sync", kind="full_sync", apply=lambda *_: None,
+                   model=object(), cancellable=False)
+        book.report(1, "apply_chats", 2, 3)
+        book.finish(1, Outcome(failure=Failure.STOPPED_SAFELY))
+        self.assertEqual(book.recent[0].progress, ("apply_chats", 2, 3))
+
+    def test_fast_failure_flushes_the_latest_progress_before_result(self) -> None:
+        from codexsync.gui.widgets import _Job
+
+        def work(progress):
+            progress("stage_chats", 3, 3)
+            progress("apply_chats", 0, 3)
+            progress("apply_chats", 2, 3)
+            return Outcome(failure=Failure.STOPPED_SAFELY)
+
+        job = _Job(1, work, with_progress=True)
+        reports = []
+        job.signals.progress.connect(reports.append)
+        with mock.patch("codexsync.gui.widgets.time.monotonic", return_value=100.0):
+            job.outcome()
+        self.assertEqual(reports[-1], (1, "apply_chats", 2, 3))
+
     """A scan redraws the page per report; the trees are drawn once per result."""
 
     def _count(self, widget, name: str) -> list[int]:
@@ -316,6 +516,16 @@ class StaleResultTests(_JobsCase):
 
 @unittest.skipUnless(_HAS_QT, "PySide6 is an optional extra and is not installed")
 class JobFailureTests(_WindowTestCase):
+    def test_interrupted_transfer_does_not_show_exception_payload(self) -> None:
+        from codexsync.exceptions import FailSafeError
+        from codexsync.gui.controller import run
+
+        exc = FailSafeError("private chat payload")
+        exc.recovery_operation_id = "op-1"
+        exc.recovery_message = "Session transfer stopped; recovery may be required."
+        outcome = run(lambda: (_ for _ in ()).throw(exc))
+        self.assertNotIn("private chat payload", outcome.message)
+        self.assertEqual(outcome.details["recovery_operation_id"], "op-1")
     def test_a_call_that_raises_still_delivers_a_failure(self) -> None:
         """Without a result the page's busy flag would never clear."""
         from codexsync.gui.widgets import JobRunner

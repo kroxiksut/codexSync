@@ -84,7 +84,7 @@ class ManifestTests(unittest.TestCase):
     def test_the_launcher_names_every_built_system_under_its_alias(self) -> None:
         self.assertEqual(
             self.launcher["optionalDependencies"],
-            {f"codexsync-{key}": f"npm:codexsync@0.2.0-alpha.2-{key}" for key in npm.PLATFORMS},
+            {f"codexsync-{key}": f"npm:@kroxut/codexsync@0.2.0-alpha.2-{key}" for key in npm.PLATFORMS},
         )
         for key in npm.PLATFORMS:
             platform = npm.platform_manifest(key, "0.2.0-alpha.2", self.meta)
@@ -109,6 +109,15 @@ class ManifestTests(unittest.TestCase):
 
     def test_the_repository_is_the_one_trusted_publishing_checks(self) -> None:
         self.assertEqual(self.launcher["repository"]["url"], f"git+{self.meta['repository']}.git")
+
+    def test_the_package_is_published_under_the_scope(self) -> None:
+        self.assertEqual(self.launcher["name"], "@kroxut/codexsync")
+        # What `npm pack` calls the file of a scoped package.
+        self.assertEqual(npm.PACKED, "kroxut-codexsync")
+
+    def test_the_launcher_resolves_the_alias_the_manifest_installs(self) -> None:
+        text = LAUNCH_JS.read_text(encoding="utf-8")
+        self.assertIn(f"resolve(`{npm.ALIAS}-${{key}}/package.json`)", text)
 
     def test_the_launcher_knows_the_same_systems(self) -> None:
         text = LAUNCH_JS.read_text(encoding="utf-8")
@@ -172,7 +181,8 @@ class StageTests(_Sandbox):
         self.assertTrue((platform / "LICENSE").is_file())
         manifest = json.loads((platform / "package.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["os"], ["win32"])
-        self.assertEqual(launcher.name, "codexsync")
+        self.assertEqual(launcher.name, "kroxut-codexsync")
+        self.assertEqual(platform.name, "kroxut-codexsync-win32-x64")
         self.assertTrue((launcher / "lib" / "launch.js").is_file())
         self.assertTrue((launcher / "README.md").is_file())
         self.assertEqual(
@@ -216,21 +226,21 @@ class PublishTests(_Sandbox):
             return subprocess.CompletedProcess([], code, stdout=out, stderr=err)
         with mock.patch.object(npm, "_npm", return_value="npm"):
             with mock.patch.object(npm.subprocess, "run", return_value=fake(1, "", "npm error code E404")):
-                self.assertFalse(npm._published("codexsync@1.0.0"))
+                self.assertFalse(npm._published("@kroxut/codexsync@1.0.0"))
                 self.assertIsNone(npm._latest())
             with mock.patch.object(npm.subprocess, "run", return_value=fake(0, '"1.0.0"')):
-                self.assertTrue(npm._published("codexsync@1.0.0"))
+                self.assertTrue(npm._published("@kroxut/codexsync@1.0.0"))
             with mock.patch.object(npm.subprocess, "run", return_value=fake(1, "", "npm error code ETIMEDOUT")):
                 with self.assertRaises(SystemExit):
-                    npm._published("codexsync@1.0.0")
+                    npm._published("@kroxut/codexsync@1.0.0")
                 with self.assertRaises(SystemExit):
                     npm._latest()
 
     def test_platforms_go_first_and_a_published_version_is_skipped(self) -> None:
         version = "0.2.0-alpha.2"
         for key in npm.PLATFORMS:
-            (self.root / f"codexsync-{version}-{key}.tgz").write_bytes(b"")
-        (self.root / f"codexsync-{version}.tgz").write_bytes(b"")
+            (self.root / f"kroxut-codexsync-{version}-{key}.tgz").write_bytes(b"")
+        (self.root / f"kroxut-codexsync-{version}.tgz").write_bytes(b"")
         commands: list[list[str]] = []
 
         def run(argv, **_kwargs):
@@ -245,14 +255,14 @@ class PublishTests(_Sandbox):
             npm.publish(self.root, "v0.2.0-alpha.2")
 
         self.assertEqual(commands, [
-            ["publish", f"codexsync-{version}-win32-arm64.tgz", "--tag", "alpha-win32-arm64", "--access", "public"],
-            ["publish", f"codexsync-{version}-linux-x64.tgz", "--tag", "alpha-linux-x64", "--access", "public"],
-            ["publish", f"codexsync-{version}-linux-arm64.tgz", "--tag", "alpha-linux-arm64", "--access", "public"],
-            ["publish", f"codexsync-{version}.tgz", "--tag", "latest", "--access", "public"],
+            ["publish", f"kroxut-codexsync-{version}-win32-arm64.tgz", "--tag", "alpha-win32-arm64", "--access", "public"],
+            ["publish", f"kroxut-codexsync-{version}-linux-x64.tgz", "--tag", "alpha-linux-x64", "--access", "public"],
+            ["publish", f"kroxut-codexsync-{version}-linux-arm64.tgz", "--tag", "alpha-linux-arm64", "--access", "public"],
+            ["publish", f"kroxut-codexsync-{version}.tgz", "--tag", "latest", "--access", "public"],
         ])
 
     def test_nothing_is_published_while_a_package_is_missing(self) -> None:
-        (self.root / "codexsync-0.2.0-alpha.2.tgz").write_bytes(b"")
+        (self.root / "kroxut-codexsync-0.2.0-alpha.2.tgz").write_bytes(b"")
         with mock.patch.object(npm.subprocess, "run") as run, self.assertRaises(SystemExit):
             npm.publish(self.root, "v0.2.0-alpha.2")
         run.assert_not_called()
@@ -265,7 +275,8 @@ class LauncherTests(_Sandbox):
     def setUp(self) -> None:
         super().setUp()
         self.modules = self.root / "node_modules"
-        shutil.copytree(REPO_ROOT / "packaging" / "npm", self.modules / "codexsync")
+        # Where npm puts the scoped launcher; the platform package sits beside the scope.
+        shutil.copytree(REPO_ROOT / "packaging" / "npm", self.modules / "@kroxut" / "codexsync")
         self.key = subprocess.run(
             ["node", "-p", "process.platform + '-' + process.arch"], capture_output=True, text=True, check=True,
         ).stdout.strip()
@@ -273,11 +284,11 @@ class LauncherTests(_Sandbox):
     def _platform_package(self) -> Path:
         dist = self.modules / f"codexsync-{self.key}" / "dist"
         dist.mkdir(parents=True)
-        (dist.parent / "package.json").write_text('{"name": "codexsync"}', encoding="utf-8")
+        (dist.parent / "package.json").write_text('{"name": "@kroxut/codexsync"}', encoding="utf-8")
         return dist
 
     def _launch(self, *args: str) -> subprocess.CompletedProcess:
-        script = self.modules / "codexsync" / "bin" / "codexsync.js"
+        script = self.modules / "@kroxut" / "codexsync" / "bin" / "codexsync.js"
         return subprocess.run(["node", str(script), *args], capture_output=True, text=True, timeout=60)
 
     def test_without_the_platform_package_it_says_so_and_exits_4(self) -> None:

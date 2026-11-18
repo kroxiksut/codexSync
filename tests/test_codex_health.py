@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from codexsync.app import check_codex, list_history, refresh_thread_catalogue, repair_codex
 from codexsync.codex_health import (
@@ -33,7 +34,7 @@ from codexsync.codex_health import (
     measure_chat_files,
 )
 from codexsync.exceptions import ConfigError, FailSafeError, SafetyPreconditionError
-from codexsync.safety_gate import ProcessState
+from codexsync.safety_gate import OperationKind, ProcessState
 from codexsync.sqlite_audit import BackfillReading, PlacementStatus, read_backfill_state
 from codexsync.thread_catalogue import BACKFILL_COMPLETE, BACKFILL_PENDING, settle_backfill
 
@@ -233,6 +234,43 @@ class CheckAndRepairTests(_Workspace):
         self.assertEqual([run.state for run in list_history(self.config, family="codex-repair")], ["COMMITTED"])
         self.assertFalse(check_codex(self.config).broken)
 
+    def test_a_read_back_that_fails_leaves_the_journal_needing_recovery(self) -> None:
+        # CS-523: the transaction committed, then reading it back raised; the
+        # journal stayed COMMITTING with no failure recorded.
+        set_row(self.database, "running")
+        preview = repair_codex(self.config)
+        with patch("codexsync.app.read_backfill_row", side_effect=sqlite3.OperationalError("database is locked")):
+            with self.assertRaises(sqlite3.OperationalError):
+                repair_codex(self.config, confirm_plan=preview.plan.plan_id)
+        [run] = list_history(self.config, family="codex-repair")
+        self.assertEqual((run.state, run.failure), ("RECOVERY_REQUIRED", "OperationalError"))
+
+    def test_a_row_with_a_real_where_an_integer_was_expected_is_still_repaired(self) -> None:
+        # CS-525: the plan read the REAL as None, the write compared the stored
+        # row and refused as "changed after it was checked", every time.
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "UPDATE backfill_state SET status = 'running', last_success_at = NULL, updated_at = 1791524862.5"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        preview = repair_codex(self.config)
+        self.assertTrue(preview.plan.writes)
+        done = repair_codex(self.config, confirm_plan=preview.plan.plan_id)
+        self.assertTrue(done.repaired)
+        self.assertEqual(full_row(self.database), (BACKFILL_COMPLETE, None, 1791524862.5, 1791524862.5))
+
+    def test_a_blob_in_the_row_offers_no_repair(self) -> None:
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute("UPDATE backfill_state SET status = 'running', last_watermark = x'00'")
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertFalse(repair_codex(self.config).plan.writes)
+
     def test_codex_running_refuses_the_repair(self) -> None:
         set_row(self.database, "running")
         preview = repair_codex(self.config)
@@ -240,6 +278,8 @@ class CheckAndRepairTests(_Workspace):
         with self.assertRaises(SafetyPreconditionError):
             repair_codex(self.config, confirm_plan=preview.plan.plan_id)
         self.assertEqual(full_row(self.database)[0], "running")
+        # CS-485: the refusal named this write `session_apply`.
+        self.assertEqual(set(self.gate.required), {OperationKind.CODEX_CATALOGUE})
 
     def test_a_stale_plan_id_is_refused(self) -> None:
         set_row(self.database, "running")

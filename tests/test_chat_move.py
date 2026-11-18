@@ -185,6 +185,21 @@ class ChatMoveTests(unittest.TestCase):
         self.assertEqual(after["local-projects"], before["local-projects"])
         self.assertEqual(after["project-order"], before["project-order"])
 
+    def test_a_chat_codex_lists_as_no_project_leaves_that_list(self) -> None:
+        # CS-531: bound but still listed there, it could stay out of the project.
+        chat = "99999999-0000-0000-0000-000000000009"
+        self._chat(chat)
+        state = self._state()
+        state["projectless-thread-ids"] = [chat, "other-chat"]
+        self._write_state(state)
+        plan, _ = self._move(["99999999"])
+        self.assertTrue(plan.actions[0].leaves_projectless)
+        _, written = self._move(["99999999"], confirm_plan=plan.plan_id)
+        self.assertEqual(written, 1)
+        after = json.loads(self.state_file.read_text(encoding="utf-8"))
+        self.assertEqual(after["projectless-thread-ids"], ["other-chat"])
+        self.assertEqual(after["thread-project-assignments"][chat]["projectId"], "p-beta")
+
     def test_several_chats_move_together(self) -> None:
         self._chat("66666666-0000-0000-0000-000000000006")
         self._chat("77777777-0000-0000-0000-000000000007")
