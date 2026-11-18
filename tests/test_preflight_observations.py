@@ -5,6 +5,7 @@ import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 import shutil
+import sys
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -73,7 +74,10 @@ class PreflightObservationTests(unittest.TestCase):
             subprocesses=[], sandbox_detected=False,
         )
         reading = BackfillReading(PlacementStatus.AVAILABLE, "state_5.sqlite", "running")
-        with patch(
+        # This test exercises observation reuse, not the platform proof gate.
+        # macOS deliberately reports UNKNOWN until its detector is proven, so
+        # mark the current synthetic detector as proven for this one scenario.
+        with patch.dict("codexsync.process_detector.PROVEN_DETECTORS", {sys.platform: "test fixture"}), patch(
             "codexsync.runtime.collect_process_snapshot", side_effect=[running, self.stopped],
         ) as process, patch("codexsync.preflight.read_backfill_state", return_value=reading), patch(
             "codexsync.preflight.diagnose_catalogue", return_value=[],

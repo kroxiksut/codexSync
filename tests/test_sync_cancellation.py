@@ -148,12 +148,14 @@ def test_partial_rollback_retry_leaves_already_restored_files_alone(mirror):
         if event.phase == "apply_chats" and event.completed == 3:
             token.request_rollback()
     real_require = gate.require
-    finals = []
     def check(operation, *, final=False):
-        if operation.value == "restore" and final:
-            finals.append(True)
-            if len(finals) == 3:
-                raise SafetyPreconditionError("Codex started during rollback")
+        # Fail after two files have actually been restored, rather than on an
+        # implementation-specific count of final gate calls. Retry/gate call
+        # counts differ across platforms while the filesystem promise does not.
+        if (operation.value == "restore" and final
+                and (cloud / "b").read_text() == "old"
+                and (cloud / "c").read_text() == "old"):
+            raise SafetyPreconditionError("Codex started during rollback")
         return real_require(operation, final=final)
     with patch.object(gate, "require", side_effect=check), pytest.raises(SafetyPreconditionError):
         run_sync(build_context(config), False, cancellation=token, event_progress=stop)
