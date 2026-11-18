@@ -186,7 +186,7 @@ class FakeController(Controller):
         self.calls.append(("resolve_format_migrations", scan.plan.plan_id))
         return Outcome(value=([], 0))
 
-    def apply_sessions(self, scan, *, confirm_plan, dry_run=False) -> Outcome:
+    def apply_sessions(self, scan, *, confirm_plan, dry_run=False, progress=None) -> Outcome:
         self.calls.append(("apply_sessions", confirm_plan, dry_run))
         return self._answer("apply_sessions", Outcome(value=1))
 
@@ -366,7 +366,7 @@ class FakeController(Controller):
     def handoff(self) -> Outcome:
         return self._answer("handoff", Outcome(failure=Failure.CONFIGURATION, message="not in this test"))
 
-    def handoff_now(self, *, progress=None, conflict_policy=None, direction=None) -> Outcome:
+    def handoff_now(self, *, progress=None, conflict_policy=None, direction=None, cancellation=None) -> Outcome:
         self.calls.append(
             ("handoff_now",) + ((conflict_policy,) if conflict_policy is not None else ())
             + ((("direction", direction),) if direction is not None else ())
@@ -462,7 +462,7 @@ class _InlineRunner:
 
     busy = False
 
-    def start(self, call, done, progress=None) -> None:
+    def start(self, call, done, progress=None, *, abandonable=False) -> None:
         done(call(progress=progress) if progress is not None else call())
 
 
@@ -595,7 +595,10 @@ class WindowTests(_WindowTestCase):
     def test_a_result_that_lands_after_a_rebuild_is_drawn_by_the_new_widgets(self) -> None:
         window, _ = self.make()
         pending = []
-        window._jobs = type("Deferred", (), {"busy": False, "start": lambda self, call, done: pending.append((call, done))})()
+        window._jobs = type("Deferred", (), {
+            "busy": False,
+            "start": lambda self, call, done, progress=None, **options: pending.append((call, done)),
+        })()
         window.go_to("sync")
         window.screen("sync").check_plan()
         window.set_language("ru")
@@ -2165,7 +2168,7 @@ class ActivityTests(_WindowTestCase):
             def __init__(self):
                 self.abandoned = []
 
-            def start(self, call, done, report=None):
+            def start(self, call, done, report=None, *, abandonable=False):
                 pending.append((call, done))
                 return len(pending)
 
@@ -2200,7 +2203,7 @@ class _HeldRunner:
         self.pending: list[tuple] = []
         self.abandoned: list[int] = []
 
-    def start(self, call, done, report=None):
+    def start(self, call, done, report=None, *, abandonable=False):
         self.pending.append((call, done, report))
         return len(self.pending)
 
@@ -2354,7 +2357,69 @@ class TasksDialogTests(_WindowTestCase):
             for r in range(table.rowCount())
         ]
 
-    def test_the_list_names_each_job_its_page_and_offers_stop_only_for_reads(self) -> None:
+    def test_stopping_a_sync_keeps_the_job_visible_until_the_worker_reports(self) -> None:
+        window, runner = self._window()
+        window.go_to("sync")
+        window.screen("sync").start_run(dry_run=False)
+        token = len(runner.pending)
+        window.show_tasks()
+        dialog = window._tasks_dialog
+        self.assertIn(token, dialog.stop_buttons, "preparation must offer cooperative Stop")
+        dialog.stop_buttons[token].click()
+        self.assertIn(token, window.jobs().running)
+        self.assertEqual(runner.abandoned, [])
+        self.assertFalse(dialog.stop_buttons[token].isEnabled())
+        self.assertIn(window.catalog.text("tasks.cancellation.stopping"), self._texts(dialog.running)[0])
+        runner.finish(token)
+        self.assertNotIn(token, window.jobs().running)
+
+    def test_full_sync_finishes_after_commit_without_offering_rollback(self) -> None:
+        window, runner = self._window()
+        window.go_to("sync")
+        window.screen("sync").start_run(dry_run=False)
+        token = len(runner.pending)
+        window.show_tasks()
+        dialog = window._tasks_dialog
+        self.assertIn(token, dialog.stop_buttons)
+        window.jobs().running[token].cancellation.begin_commit()
+        dialog.render()
+        self.assertFalse(dialog.stop_buttons[token].isEnabled())
+        self.assertNotIn(token, dialog.rollback_buttons)
+        self.assertIn(token, dialog.finish_buttons)
+        dialog.finish_buttons[token].click()
+        self.assertFalse(window.cancel_job(token))
+        self.assertIn(token, window.jobs().running)
+        self.assertEqual(runner.abandoned, [])
+        runner.finish(token)
+
+    def test_a_rollback_capable_write_requires_an_explicit_request(self) -> None:
+        from codexsync.cancellation import CancellationToken
+
+        window, runner = self._window()
+        cancellation = CancellationToken()
+        window.run(
+            "sync",
+            lambda *, cancellation: Outcome(failure=Failure.STOPPED_SAFELY, code="OPERATION_ROLLED_BACK"),
+            lambda *_: None,
+            cancellation=cancellation,
+        )
+        token = len(runner.pending)
+        window.show_tasks()
+        dialog = window._tasks_dialog
+        self.assertNotIn(token, dialog.rollback_buttons)
+        cancellation.begin_commit()
+        dialog.render()
+        window.confirm = lambda *_: False
+        dialog.rollback_buttons[token].click()
+        self.assertEqual(cancellation.state, "committing")
+        window.confirm = lambda *_: True
+        dialog.rollback_buttons[token].click()
+        self.assertEqual(cancellation.state, "rolling_back")
+        self.assertIn(token, window.jobs().running)
+        runner.finish(token)
+        self.assertEqual(self._texts(dialog.recent)[0][4], window.catalog.text("tasks.events.status.rolled_back"))
+
+    def test_the_list_names_each_job_its_page_and_stop_waiting_only_for_reads(self) -> None:
         window, runner = self._window()
         window.go_to("sync")
         sync = window.screen("sync")
@@ -2371,7 +2436,8 @@ class TasksDialogTests(_WindowTestCase):
             window.catalog.text("job.sync_preview"), window.catalog.text("job.full_sync"),
         ])
         self.assertEqual({row[1] for row in rows}, {window.catalog.text("nav.sync")})
-        self.assertEqual(set(dialog.stop_buttons), {read_token}, "a write has no stop button")
+        self.assertEqual(set(dialog.stop_buttons), {read_token, write_token})
+        self.assertEqual(dialog.stop_buttons[read_token].text(), window.catalog.text("activity.cancel"))
 
         dialog.stop_buttons[read_token].click()
         self.assertEqual(runner.abandoned, [read_token])
@@ -2869,7 +2935,7 @@ class ProgressTests(_WindowTestCase):
         def __init__(self) -> None:
             self.reports: list[tuple[str, int, int]] = []
 
-        def start(self, call, done, progress=None) -> None:
+        def start(self, call, done, progress=None, *, abandonable=False) -> None:
             if progress is not None:
                 progress("sessions", 120, 252)
                 self.reports.append(("sessions", 120, 252))

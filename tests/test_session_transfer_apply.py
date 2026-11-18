@@ -155,6 +155,23 @@ class SessionTransferApplyTests(unittest.TestCase):
         self.assertEqual(local.read_bytes(), remote.read_bytes(), "the whole branch is taken")
         self.assertEqual(len(local.read_bytes().splitlines()), 3)
 
+    def test_session_apply_shows_a_short_reference_and_stores_the_same_safe_events(self) -> None:
+        from codexsync.progress_log import iter_progress_records, progress_record
+
+        self._branch(self.local_dir, "private-filename", ["one"])
+        self._branch(self.cloud_dir, "private-filename", ["one", "private-payload"])
+        plan = self._plan()
+        observed = []
+        self.assertEqual(self._apply(plan, event_progress=observed.append), 1)
+        applied, = [event for event in observed if event.status == "applied"]
+        self.assertEqual(applied.item_id, plan.items[0].session_hash[:12])
+        self.assertEqual(applied.direction, "local")
+        self.assertIsNone(applied.relative_path)
+        self.assertGreater(applied.item_bytes, 0)
+        log, = (self.root / ".tmp" / "progress").glob("sessions-*.complete.jsonl")
+        self.assertEqual(list(iter_progress_records(log)), [json.loads(progress_record(row)) for row in observed])
+        self.assertNotIn("private", log.read_text(encoding="utf-8"))
+
     def test_the_ancestor_is_kept_in_a_verifiable_backup(self) -> None:
         local = self._branch(self.local_dir, "s1", ["one"])
         before = local.read_bytes()

@@ -756,8 +756,10 @@ class SessionsScreen(Screen):
                 model.scan = None
 
         self.run(
-            lambda: controller.apply_sessions(scan, confirm_plan=plan.plan_id, dry_run=dry_run), apply,
-            kind="sessions_apply", dry_run=dry_run,
+            lambda progress=None: controller.apply_sessions(
+                scan, confirm_plan=plan.plan_id, dry_run=dry_run, progress=progress,
+            ), apply,
+            kind="sessions_apply", dry_run=dry_run, progress=True,
         )
 
     def _category_changed(self) -> None:

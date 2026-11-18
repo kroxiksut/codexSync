@@ -13,6 +13,7 @@ lost and a job that finishes during the rebuild is drawn by the new widgets.
 """
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 import sys
 import time
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from . import BRAND_NAME
 from . import theme
+from ..cancellation import CancellationState, CancellationToken
 from .controller import ConfigInfo, Controller, Failure, Outcome
 from .i18n import Catalog, available_languages, load, pick_language
 from .jobs import JobBook, sharing_pages
@@ -255,13 +257,14 @@ class MainWindow(QMainWindow):
         progress: bool = False,
         kind: str | None = None,
         dry_run: bool = False,
+        cancellation: CancellationToken | None = None,
     ) -> None:
         """Run ``call`` off the UI thread and apply its outcome to the page's model.
 
         ``cancellable`` is for read-only work only: the person may stop waiting,
         which applies a "stopped, nothing changed" outcome at once and drops the
-        real one when it arrives. A write is never offered that, because a
-        write that is merely no longer watched has not stopped.
+        real one when it arrives. A write that supports cooperative stopping
+        gets a separate ``cancellation`` token and stays visible until it ends.
 
         ``progress`` says the call takes a ``progress=`` callback and will
         report how far it has got. Reports arrive on this thread through the
@@ -279,10 +282,12 @@ class MainWindow(QMainWindow):
         generation = self._generation
         self._jobs_book.start(
             key[0], page=page, kind=kind, apply=apply, model=model,
-            cancellable=cancellable, dry_run=dry_run,
+            cancellable=cancellable, dry_run=dry_run, cancellation=cancellation,
         )
 
         def done(outcome: Outcome) -> None:
+            if cancellation is not None:
+                cancellation.finish()
             if self._jobs_book.finish(key[0], outcome) is None:
                 return  # abandoned: the "stopped waiting" outcome was applied already
             # A dry run writes nothing either, and its result is what unlocks
@@ -320,7 +325,14 @@ class MainWindow(QMainWindow):
             if self._models[page] is model:
                 self._render_pages((page, *sharing_pages(kind, page)))
 
-        token = self._jobs.start(call, done, report) if progress else self._jobs.start(call, done)
+        def report_events(events) -> None:
+            if self._jobs_book.report_events(key[0], events):
+                self._update_activity()
+
+        report.events = report_events
+        if cancellation is not None:
+            call = partial(call, cancellation=cancellation)
+        token = self._jobs.start(call, done, report if progress else None, abandonable=cancellable)
         if key[0] in self._jobs_book.running:
             if token is not None:
                 self._jobs_book.retoken(key[0], token)
@@ -360,9 +372,15 @@ class MainWindow(QMainWindow):
                 screen.render()
 
     def cancel_job(self, token: Any) -> bool:
-        """Stop waiting for one cancellable (read-only) job. False if it cannot be."""
+        """Request a cooperative stop or stop waiting for a read."""
         job = self._jobs_book.running.get(token)
-        if job is None or not job.cancellable or not self._jobs.abandon(token):
+        if job is None:
+            return False
+        if job.cancellation is not None:
+            requested = job.cancellation.request_cancel()
+            self._update_activity()
+            return requested
+        if not job.cancellable or not self._jobs.abandon(token):
             return False
         self._jobs_book.finish(token, None, abandoned=True)
         job.apply(job.model, Outcome(failure=Failure.STOPPED_SAFELY, message=self._catalog.text("activity.cancelled")))
@@ -370,6 +388,14 @@ class MainWindow(QMainWindow):
             self._render_pages((job.page, *sharing_pages(job.kind, job.page)))
         self._update_activity()
         return True
+
+    def rollback_job(self, token: Any) -> bool:
+        job = self._jobs_book.running.get(token)
+        if job is None or job.cancellation is None:
+            return False
+        requested = job.cancellation.request_rollback()
+        self._update_activity()
+        return requested
 
     def cancel_waiting(self) -> None:
         """Stop waiting for every cancellable (read-only) job."""
@@ -411,16 +437,30 @@ class MainWindow(QMainWindow):
 
     def job_progress_text(self, job) -> str:
         """Phase count plus a rate/ETA once this phase has enough samples."""
+        if job.cancellation is not None:
+            state = job.cancellation.state
+            if state in {CancellationState.STOPPING, CancellationState.ROLLING_BACK}:
+                return self._catalog.text(f"tasks.cancellation.{state.value}")
         base = self.phase_text(job.progress)
         if not base or job.progress is None:
             return base
         estimate = job.progress_estimate
+        if job.progress_event is not None:
+            if job.progress_event.total == 0:
+                return self._catalog.text("progress.of", phase=base, done=0, total=0)
+            if job.progress_event.total is None and job.progress_event.completed:
+                base = self._catalog.text("progress.unknown", phase=base, done=job.progress_event.completed)
         if job.progress[2] <= 0 or estimate is None or estimate.items_per_second is None or estimate.remaining_seconds is None:
             return f"{base} · {self._catalog.text('progress.estimating')}"
         rate = estimate.items_per_second * 60
         seconds = max(0, int(estimate.remaining_seconds + 0.5))
         eta = self._catalog.plural("common.seconds", seconds)
-        return f"{base} · {self._catalog.text('progress.rate_eta', rate=f'{rate:.1f}', eta=eta)}"
+        text = f"{base} · {self._catalog.text('progress.rate_eta', rate=f'{rate:.1f}', eta=eta)}"
+        if estimate.bytes_per_second is not None:
+            text += " · " + self._catalog.text(
+                "progress.byte_rate", rate=f"{estimate.bytes_per_second / 1024**2:.1f}",
+            )
+        return text
 
     def _update_activity(self) -> None:
         if not hasattr(self, "_activity_label"):
@@ -445,7 +485,12 @@ class MainWindow(QMainWindow):
         reported = next(iter(sorted(
             (job.progress for job in running.values() if job.progress is not None), key=lambda item: -item[2],
         )), None)
-        if reported is not None and reported[2] > 0:
+        stopping = next((job for job in running.values() if job.cancellation is not None
+                         and job.cancellation.state in {CancellationState.STOPPING, CancellationState.ROLLING_BACK}), None)
+        if stopping is not None:
+            self._activity_bar.setRange(0, 0)
+            self._activity_label.setText(self.job_progress_text(stopping))
+        elif reported is not None and reported[2] > 0:
             _phase, done, total = reported
             self._activity_bar.setRange(0, total)
             self._activity_bar.setValue(done)
@@ -637,6 +682,10 @@ class MainWindow(QMainWindow):
         self.move(left, top)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if any(not job.cancellable and not job.dry_run for job in self._jobs_book.running.values()):
+            self.statusBar().showMessage(self._catalog.text("tasks.cancellation.close_wait"), 5000)
+            event.ignore()
+            return
         # A maximised window would otherwise be remembered at the screen's
         # size, and reopen shrunk to that screen minus its frame for good.
         size = self.normalGeometry().size() if self.isMaximized() or self.isFullScreen() else self.size()

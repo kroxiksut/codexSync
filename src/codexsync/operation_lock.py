@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import threading
+from contextlib import contextmanager
 
 from .exceptions import OperationBusyError
 from .guardian_models import normalize_machine_id
@@ -95,6 +96,18 @@ class OperationLock:
         if self._reentrant:
             held[key] = 1
         return self
+
+    @contextmanager
+    def allow_nested_recovery(self):
+        """Let the restore envelope take this held lock on the current thread."""
+        if self._handle is None or self._reentrant or self._nested:
+            raise RuntimeError("a held outer operation lock is required")
+        key = str(self.path)
+        _held()[key] = 1
+        try:
+            yield
+        finally:
+            _held().pop(key)
 
     def __exit__(self, exc_type, exc, tb) -> None:
         key = str(self.path)

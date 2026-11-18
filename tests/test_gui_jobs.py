@@ -38,7 +38,7 @@ class _DeferredRunner:
         self.jobs: list[tuple[object, object, object, object]] = []
         self.abandoned: list[object] = []
 
-    def start(self, call, done, progress=None):
+    def start(self, call, done, progress=None, *, abandonable=False):
         token = object()
         self.jobs.append((token, call, done, progress))
         return token
@@ -396,6 +396,48 @@ class ProgressRedrawTests(_JobsCase):
         dialog.update_task_progress(("apply_chats", 2, 3))
         self.assertEqual([row.state for row in dialog.items_model.rows], ["applied", "applied", "staged"])
         dialog.close()
+
+    def test_tasks_live_events_keep_only_the_latest_500_and_filter_them(self) -> None:
+        from codexsync.gui.screens.tasks import TasksDialog
+        from codexsync.progress import ProgressEvent
+
+        window, _ = self.make()
+        dialog = TasksDialog(window)
+        book = window.jobs()
+        book.start("transfer", page="sync", kind="full_sync", apply=lambda *_: None,
+                   model=object(), cancellable=False)
+        for i in range(1500):
+            book.report_events("transfer", [ProgressEvent(
+                "sync", "apply_chats", i, 1500, relative_path=f"settings/{i}.toml",
+                status=("pending", "applied", "failed")[i % 3],
+            )])
+        dialog.render()
+        self.assertEqual(dialog.events_model.rowCount(), 500)
+        self.assertEqual(dialog.events_model.rows[0].relative_path, "settings/1000.toml")
+        self.assertEqual(dialog.events_model.rows[-1].relative_path, "settings/1499.toml")
+        for category, count in (("errors", 167), ("applied", 167), ("pending", 166)):
+            dialog.events_filter.setCurrentIndex(dialog.events_filter.findData(category))
+            self.assertEqual(dialog.events_proxy.rowCount(), count)
+        dialog.close()
+
+    def test_a_fast_worker_flushes_bounded_event_batches_before_finishing(self) -> None:
+        from codexsync.gui.widgets import _Job
+        from codexsync.progress import ProgressEvent
+
+        def work(progress):
+            for i in range(1500):
+                progress.event(ProgressEvent("sync", "apply_chats", i, 1500, status="applied"))
+            return Outcome(value=True)
+
+        job = _Job(1, work, with_progress=True)
+        batches = []
+        job.signals.events.connect(batches.append)
+        with mock.patch("codexsync.gui.widgets.time.monotonic", return_value=100.0):
+            job.outcome()
+        self.assertEqual(len(batches), 2)
+        token, latest = batches[-1]
+        self.assertEqual(token, 1)
+        self.assertEqual([row.completed for row in latest], list(range(1000, 1500)))
 
     def test_open_tasks_reloads_journal_after_transfer_stops(self) -> None:
         from types import SimpleNamespace

@@ -4,12 +4,14 @@ import os
 from pathlib import Path
 
 from .exceptions import ConfigError
+from .cancellation import CancellationToken
 from .filters import PathFilter
 from .fs_links import is_link
 from .models import FileMeta
 
 
-def scan_tree(base_dir: Path, include_roots: list[str], path_filter: PathFilter) -> dict[str, FileMeta]:
+def scan_tree(base_dir: Path, include_roots: list[str], path_filter: PathFilter, *,
+              cancellation: CancellationToken | None = None) -> dict[str, FileMeta]:
     """
     Returns file index by normalized relative path.
     """
@@ -21,6 +23,8 @@ def scan_tree(base_dir: Path, include_roots: list[str], path_filter: PathFilter)
     base_resolved = base_dir.resolve()
 
     for root in roots:
+        if cancellation is not None:
+            cancellation.checkpoint()
         root_candidate = Path(root)
         if root_candidate.is_absolute():
             raise ConfigError(f"targets.include_roots must be relative paths: {root}")
@@ -46,7 +50,7 @@ def scan_tree(base_dir: Path, include_roots: list[str], path_filter: PathFilter)
             )
             continue
 
-        for path, st in _walk_files(root_path):
+        for path, st in _walk_files(root_path, cancellation):
             rel = path.relative_to(base_resolved).as_posix()
             if path_filter.is_excluded(rel):
                 continue
@@ -62,7 +66,7 @@ def scan_tree(base_dir: Path, include_roots: list[str], path_filter: PathFilter)
     return result
 
 
-def _walk_files(root: Path):
+def _walk_files(root: Path, cancellation: CancellationToken | None = None):
     """Regular files under ``root``, never entering or listing a link.
 
     ``rglob`` follows junctions (``.codex/skills`` holds them), which indexed
@@ -73,6 +77,8 @@ def _walk_files(root: Path):
         folder = stack.pop()
         with os.scandir(folder) as entries:
             for entry in entries:
+                if cancellation is not None:
+                    cancellation.checkpoint()
                 info = entry.stat(follow_symlinks=False)
                 if is_link(entry.path, info):
                     continue

@@ -1,29 +1,15 @@
-"""How a long read says how far it has got.
-
-A scan of this machine's sessions takes about thirteen seconds -- 270 chats
-over 864 MiB -- and until now a window could only spin an indeterminate bar at
-it. The cost is entirely in hashing; walking the tree to find the files is
-cheap, so the total is known before the expensive part begins and the report
-can be a real "120 of 252" rather than a guess.
-
-The contract is three values and no object: a phase id, how many items are
-done, and how many there are. It is deliberately the smallest thing that can
-cross from the core into a toolkit the core knows nothing about -- the callback
-is plain and is called from whatever thread the scan runs on.
-
-`report` swallows whatever the callback raises. A progress bar is not allowed
-to be the reason a read fails: the caller asked for a catalogue, and a screen
-that throws while drawing a number has not made the catalogue wrong.
-"""
+"""Toolkit-neutral progress events and the legacy three-number callback."""
 from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import re
 import time
 from typing import Callable
 
 __all__ = [
-    "PHASES", "ProgressCallback", "ProgressEstimate", "ProgressEstimator", "ProgressEvent", "report",
+    "PHASES", "ProgressCallback", "ProgressEstimate", "ProgressEstimator", "ProgressEvent",
+    "ProgressEventCallback", "ProgressObserver", "report",
 ]
 
 #: ``(phase, done, total)``. ``total`` may be 0 while it is still unknown.
@@ -42,13 +28,39 @@ PHASES: tuple[str, ...] = (
     "sync_chats",
     "stage_chats",
     "apply_chats",
+    "backup_chats",
     "delete_chat_files",
     "sync_projects",
     "follow_chat_archive",
     "sync_chat_names",
     "refresh_catalogue",
     "check_project_files",
+    "transfer",
 )
+
+_EVENT_STATUSES = frozenset({
+    "running", "pending", "applied", "failed", "completed", "cancelled", "rolled_back", "recovery_required",
+})
+_EVENT_DIRECTIONS = frozenset({"local", "cloud"})
+_PATH_COMPONENT = re.compile(r"[\w. -]+\Z")
+_SESSION_HASH = re.compile(r"[0-9a-f]{12}(?:[0-9a-f]{52})?\Z")
+
+
+def safe_relative_path(value: str | None) -> str | None:
+    """Permit a small filename alphabet and reject secret names at any depth."""
+    if not value or len(value) > 512:
+        return None
+    parts = value.replace("\\", "/").split("/")
+    for part in parts:
+        name = part.casefold().rstrip(" .")
+        if (
+            not _PATH_COMPONENT.fullmatch(part) or not name
+            or any(word in name for word in ("auth", "secret", "token", "credential", "cap_sid"))
+            or name.startswith((".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"))
+            or name.endswith((".pem", ".key", ".p12", ".pfx"))
+        ):
+            return None
+    return "/".join(parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +68,7 @@ class ProgressEvent:
     """One toolkit-neutral progress observation.
 
     ``total`` is unknown rather than zero while discovery is still in progress.
-    Paths and messages are deliberately absent from the first version: callers
-    must not accidentally turn a useful counter into a payload or secret log.
-    Item metadata is added only together with the redaction boundary in CS-561.
+    Item metadata holds a sync-relative filename or a short branch reference.
     """
 
     operation: str
@@ -67,6 +77,14 @@ class ProgressEvent:
     total: int | None
     bytes_completed: int | None = None
     bytes_total: int | None = None
+    item_id: str | None = None
+    relative_path: str | None = None
+    direction: str | None = None
+    item_bytes: int | None = None
+    status: str = "running"
+    started_at: float | None = None
+    at: float | None = None
+    monotonic_at: float | None = None
 
     def __post_init__(self) -> None:
         if not self.operation or not self.phase:
@@ -82,6 +100,31 @@ class ProgressEvent:
                 raise ValueError("progress bytes_total must not be negative")
             if self.bytes_completed is not None and self.bytes_completed > self.bytes_total:
                 raise ValueError("progress bytes_total must not be below bytes_completed")
+        if self.item_bytes is not None and self.item_bytes < 0:
+            raise ValueError("progress item_bytes must not be negative")
+        item = self.item_id
+        item = item[:12] if item and _SESSION_HASH.fullmatch(item) else None
+        object.__setattr__(self, "item_id", item)
+        path = safe_relative_path(self.relative_path) if self.operation != "sessions" else None
+        object.__setattr__(self, "relative_path", path)
+        if self.direction not in _EVENT_DIRECTIONS:
+            object.__setattr__(self, "direction", None)
+        if self.status not in _EVENT_STATUSES:
+            object.__setattr__(self, "status", "running")
+
+
+ProgressEventCallback = Callable[[ProgressEvent], None]
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressObserver:
+    """Legacy callable with an optional structured-event channel."""
+
+    counts: ProgressCallback
+    event: ProgressEventCallback
+
+    def __call__(self, phase: str, done: int, total: int) -> None:
+        self.counts(phase, done, total)
 
 
 @dataclass(frozen=True, slots=True)

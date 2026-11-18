@@ -28,6 +28,7 @@ from .safety_gate import ProcessState, SafetyGate
 from .scanner import scan_tree
 from .session_index import SESSION_INDEX_FILE
 from .work_scheduler import WorkScheduler
+from .cancellation import CancellationToken
 
 LOG = logging.getLogger(__name__)
 
@@ -233,26 +234,33 @@ def collect_process_snapshot(cfg: AppConfig, detector: CodexProcessDetector | No
 def _build_indexes(
     cfg: AppConfig, local_dir: Path, cloud_dir: Path, *,
     scheduler: WorkScheduler | None = None,
+    cancellation: CancellationToken | None = None,
 ) -> tuple[dict[str, FileMeta], dict[str, FileMeta]]:
     path_filter = PathFilter(cfg.filters.exclude_globs)
 
     def read_index(root: Path) -> dict[str, FileMeta]:
-        index = scan_tree(root, cfg.targets.include_roots, path_filter)
-        return _without_programs({rel: meta for rel, meta in index.items() if _is_plain_copy_candidate(rel)})
+        index = scan_tree(root, cfg.targets.include_roots, path_filter, cancellation=cancellation)
+        return _without_programs({rel: meta for rel, meta in index.items() if _is_plain_copy_candidate(rel)},
+                                 cancellation=cancellation)
 
     if scheduler is None:
         local_idx, cloud_idx = read_index(local_dir), read_index(cloud_dir)
     else:
-        local_idx, cloud_idx = scheduler.map_read(read_index, (local_dir, cloud_dir))
+        local_idx, cloud_idx = scheduler.map_read(read_index, (local_dir, cloud_dir), cancellation=cancellation)
     return _apply_session_mode(local_idx, cloud_idx, cfg.sync.session_mode)
 
-def _without_programs(index: dict[str, FileMeta]) -> dict[str, FileMeta]:
+def _without_programs(index: dict[str, FileMeta], *, cancellation: CancellationToken | None = None) -> dict[str, FileMeta]:
     """The index without compiled programs, whatever the config says (D-021).
 
     Each side is judged by its own copy, so a program that exists on one side
     only is not seen as missing on the other: it is simply not part of the sync.
     """
-    kept = {rel: meta for rel, meta in index.items() if not is_native_program(meta.abs_path)}
+    kept = {}
+    for rel, meta in index.items():
+        if cancellation is not None:
+            cancellation.checkpoint()
+        if not is_native_program(meta.abs_path):
+            kept[rel] = meta
     if len(kept) != len(index):
         LOG.info("%d program file(s) left out of sync; an installer restores them", len(index) - len(kept))
     return kept
@@ -369,11 +377,13 @@ def _is_ymd_triplet(year: str, month: str, day: str) -> bool:
         return False
     return True
 
-def _plan_hash(plan: SyncPlan) -> str:
+def _plan_hash(plan: SyncPlan, *, cancellation: CancellationToken | None = None) -> str:
     """Freeze action direction and source bytes without persisting local paths."""
     digest = hashlib.sha256()
     for direction, actions in (("to_local", plan.to_local), ("to_cloud", plan.to_cloud)):
         for action in sorted(actions, key=lambda item: item.relative_path):
+            if cancellation is not None:
+                cancellation.checkpoint()
             digest.update(direction.encode("ascii"))
             digest.update(b"\0")
             digest.update(action.relative_path.encode("utf-8"))
@@ -385,6 +395,8 @@ def _plan_hash(plan: SyncPlan) -> str:
     # A deletion is the one action a rerun cannot undo, so the hash names it
     # and the bytes it removes, as a copy names the bytes it writes.
     for deletion in sorted(plan.deletions, key=lambda item: (item.side, item.relative_path)):
+        if cancellation is not None:
+            cancellation.checkpoint()
         digest.update(b"delete\0")
         digest.update(deletion.side.encode("ascii"))
         digest.update(b"\0")
@@ -397,6 +409,8 @@ def _plan_hash(plan: SyncPlan) -> str:
     for conflict in sorted(plan.conflicts):
         digest.update(b"conflict\0")
         digest.update(conflict.encode("utf-8"))
+    if cancellation is not None:
+        cancellation.checkpoint()
     return digest.hexdigest()
 
 def _require_within(path: Path, root: Path, label: str) -> None:

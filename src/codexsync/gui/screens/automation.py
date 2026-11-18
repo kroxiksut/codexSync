@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...cancellation import CancellationToken
 from ..controller import (
     BROKEN_TASK_CODES,
     DEFAULT_SCHEDULER_INTERVAL_SECONDS,
@@ -290,7 +291,7 @@ class AutomationScreen(ConfigFormScreen):
         self.read(self.host.controller.handoff, apply, kind="handoff_board")
 
     def run_handoff_now(self) -> None:
-        """Load and hand off now. A write: asked first, never cancellable."""
+        """Load and hand off now, with cooperative stop during preparation."""
         model = self.model
         if model.handoff_run_busy or self.shared_busy("full_sync"):
             return
@@ -314,8 +315,8 @@ class AutomationScreen(ConfigFormScreen):
         # The outcome is the full sync's own, so the Synchronisation page can
         # show the very same result (CS-336).
         self.host.run(
-            self.page, lambda progress=None: controller.handoff_now(progress=progress),
-            apply, progress=True, kind="full_sync",
+            self.page, controller.handoff_now,
+            apply, progress=True, kind="full_sync", cancellation=CancellationToken(allow_rollback=False),
         )
 
     def create_copy(self) -> None:

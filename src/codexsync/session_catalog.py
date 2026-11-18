@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 from typing import Callable, Iterator
 
+from .cancellation import CancellationToken
 from .fs_links import is_link
 from .jsonl_codec import (
     JSONL_READ_ERRORS,
@@ -198,7 +199,15 @@ def _find_sessions(
         observer = on_tree_file
         if observer is not None and (directory.is_symlink() or _is_reparse(directory)):
             observer = None
-        found.extend((path, state) for path in _walk_jsonl(directory, root, on_tree_file=observer))
+        # Keep the original two-argument seam when no observer is needed.
+        # Besides avoiding needless callback plumbing, this preserves callers
+        # that wrap/patch the walker to model a branch disappearing mid-scan.
+        walked = (
+            _walk_jsonl(directory, root)
+            if observer is None
+            else _walk_jsonl(directory, root, on_tree_file=observer)
+        )
+        found.extend((path, state) for path in walked)
 
     return root, found
 
@@ -208,12 +217,15 @@ def _scan_catalogs(
     progress: ProgressCallback | None, phase: str, scheduler: WorkScheduler | None,
     on_tree_file: Callable[[Path], None] | None = None,
     on_tree_complete: Callable[[], None] | None = None,
+    cancellation: CancellationToken | None = None,
 ) -> list[SessionCatalog]:
     # Flatten both roots into one read batch: a scan never runs inside a
     # scheduler worker and therefore cannot multiply pools or deadlock them.
     jobs: list[tuple[Path, Path, SessionState, str | None]] = []
     sizes: list[int] = []
     for state_root, source_machine in sides:
+        if cancellation is not None:
+            cancellation.checkpoint()
         root, found = _find_sessions(state_root, on_tree_file)
         sizes.append(len(found))
         jobs.extend((path, root, state, source_machine) for path, state in found)
@@ -225,6 +237,8 @@ def _scan_catalogs(
     done = 0
 
     def read(index: int) -> SessionDescriptor:
+        if cancellation is not None:
+            cancellation.checkpoint()
         path, root, state, machine = jobs[index]
         return _scan_jsonl(path, root, state, max_line_bytes, volatile, machine)
 
@@ -250,6 +264,7 @@ def _scan_catalogs(
         items = work.map_read(
             read, packed, large_file=lambda _index: True,
             caller_work=plain_steps() if len(packed) < total else None,
+            cancellation=cancellation,
         )
         for index, item in zip(packed, items):
             store(index, item)
@@ -264,6 +279,8 @@ def _scan_catalogs(
             read_packed(owned)
 
     catalogs: list[SessionCatalog] = []
+    if cancellation is not None:
+        cancellation.checkpoint()
     offset = 0
     for size in sizes:
         descriptors = [item for item in results[offset:offset + size] if item is not None]
@@ -726,6 +743,7 @@ def scan_both_sides(
     volatile: bool = False,
     progress: ProgressCallback | None = None,
     scheduler: WorkScheduler | None = None,
+    cancellation: CancellationToken | None = None,
 ) -> tuple[SessionCatalog, SessionCatalog]:
     """`.codex` and the cloud mirror, read at the same time. Reads only.
 
@@ -739,6 +757,6 @@ def scan_both_sides(
     local, remote = _scan_catalogs(
         [(local_root, local_machine), (remote_root, remote_machine)],
         max_line_bytes=max_line_bytes, volatile=volatile, progress=progress,
-        phase="sessions", scheduler=scheduler,
+        phase="sessions", scheduler=scheduler, cancellation=cancellation,
     )
     return local, remote

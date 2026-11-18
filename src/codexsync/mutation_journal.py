@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
+import hashlib
 import json
 import logging
 import os
@@ -46,6 +47,44 @@ _TRANSITIONS = {
 
 
 @dataclass(frozen=True, slots=True)
+class AppliedFile:
+    """Evidence for one completed sync action when its owner requests rollback."""
+
+    relative_path: str
+    side: str
+    existed: bool
+    installed_sha256: str | None
+    installed_identity: tuple[int, int, int, int] | None
+
+    @classmethod
+    def read(cls, raw: dict) -> AppliedFile:
+        path, side, existed = raw["relative_path"], raw["side"], raw["existed"]
+        sha, identity = raw["installed_sha256"], raw["installed_identity"]
+        if (not isinstance(path, str) or not path or "\\" in path or ":" in path
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or side not in {"cloud", "local"} or type(existed) is not bool):
+            raise ValueError("invalid rollback destination")
+        if sha is None:
+            if identity is not None or not existed:
+                raise ValueError("invalid rollback deletion")
+        elif (not isinstance(sha, str) or not re.fullmatch("[0-9a-f]{64}", sha)
+              or not isinstance(identity, list) or len(identity) != 4
+              or any(type(n) is not int for n in identity)):
+            raise ValueError("invalid installed file evidence")
+        return cls(path, side, existed, sha, tuple(identity) if identity is not None else None)
+
+
+def rollback_roots_id(local: Path, cloud: Path) -> str:
+    """Bind a retry to the same two directories without recording absolute paths."""
+    roots = []
+    for path in (local, cloud):
+        canonical = path.resolve(strict=True)
+        info = canonical.stat()
+        roots.append((os.path.normcase(str(canonical)), info.st_dev, info.st_ino))
+    return hashlib.sha256(json.dumps(roots).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
 class MutationJournal:
     operation_id: str
     family: str
@@ -81,6 +120,11 @@ class MutationJournal:
     failure_code: str | None = None
     failure_params: Mapping[str, object] | None = None
     failure_message: str | None = None
+    #: Present only on an explicitly requested rollback of an in-flight sync.
+    #: Relative file names, side and fingerprints; file contents stay in the backup.
+    rollback_files: tuple[AppliedFile, ...] | None = None
+    rollback_roots: str | None = None
+    superseding: str | None = None
 
 
 def snapshot_belongs_to(name: str | None, machine_id: str | None) -> bool:
@@ -200,6 +244,7 @@ class JournalStore:
             dict(counts) if counts is not None else None,
             origin,
             machine_id=normalize_machine_id(machine_id) if machine_id is not None else None,
+            superseding=superseding,
         )
         self.write(journal)
         return journal
@@ -307,6 +352,10 @@ class JournalStore:
                 failure_code=_lenient_str(raw.get("failure_code")),
                 failure_params=raw.get("failure_params") if isinstance(raw.get("failure_params"), dict) else None,
                 failure_message=_lenient_str(raw.get("failure_message")),
+                rollback_files=(tuple(AppliedFile.read(row) for row in raw["rollback_files"])
+                                if raw.get("rollback_files") is not None else None),
+                superseding=_optional_str(raw.get("superseding")),
+                rollback_roots=_optional_str(raw.get("rollback_roots")),
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise FailSafeError("Mutation journal is missing or invalid") from exc

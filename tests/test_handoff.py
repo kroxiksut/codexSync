@@ -304,6 +304,52 @@ class DeliveryTests(_Workspace):
 
 
 class RunHandoffTests(_Workspace):
+    def test_cooperative_stop_joins_the_chat_scan_before_any_handoff_write(self) -> None:
+        from codexsync import session_catalog
+        from codexsync.cancellation import CancellationToken, OperationCancelled
+        from codexsync.progress_log import iter_progress_records
+
+        config, codex = self.machine("desktop")
+        self.session(codex, "first")
+        self.session(codex, "second")
+        settings = self.write(codex / "skills" / "project.txt", "local settings")
+        token = CancellationToken(allow_rollback=False)
+        events = []
+
+        def progress(phase: str, done: int, total: int) -> None:
+            if phase == "sessions" and done == 1:
+                token.request_cancel()
+
+        with mock.patch.object(session_catalog, "_scan_jsonl", wraps=session_catalog._scan_jsonl) as read:
+            with self.assertRaises(OperationCancelled):
+                run_handoff(config, progress=progress, cancellation=token, event_progress=events.append)
+
+        self.assertEqual(read.call_count, 1, "stop before decoding the next chat")
+        self.assertFalse((self.cloud / settings.relative_to(codex)).exists())
+        self.assertFalse(app_module._handoff_owed_marker(load_config(config), "desktop").exists())
+        self.assertFalse(read_board(self.handoff_root).records)
+        self.assertEqual([event.status for event in events], ["cancelled"])
+        folder = app_module.progress_events_folder(config)
+        records = [record for log in folder.glob("sync-*.complete.jsonl") for record in iter_progress_records(log)]
+        self.assertEqual([record["status"] for record in records], ["cancelled"])
+
+    def test_settings_noop_locks_full_sync_into_finish_mode_before_chats(self) -> None:
+        from codexsync.cancellation import CancellationToken
+
+        config, _ = self.machine("desktop")
+        token = CancellationToken(allow_rollback=False)
+        observed = []
+
+        def progress(phase: str, done: int, total: int) -> None:
+            if phase == "sync_chats" and done == 0:
+                observed.append((token.state, token.request_cancel(), token.request_rollback()))
+
+        result = run_handoff(config, progress=progress, cancellation=token)
+        self.assertEqual(result.sync_actions, 0)
+        self.assertTrue(observed)
+        self.assertEqual(set(observed), {("committing", False, False)})
+        self.assertEqual(token.state, "committing", "caller owns the full operation's token")
+
     def test_an_unreadable_file_keeps_the_previous_handoff_id(self) -> None:
         from codexsync.handoff import HandoffError
 

@@ -88,6 +88,7 @@ from ..app import (
     load_config,
     preview_full_sync,
     preview_path,
+    progress_events_folder,
     summarize_full_sync,
     PATH_SUBSTITUTIONS,
     read_guardian_inventory,
@@ -131,6 +132,7 @@ from ..app import (
     check_project_files,
 )
 from ..exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
+from ..cancellation import CancellationToken
 from .locations import find_workspaces as find_workspace_candidates
 
 T = TypeVar("T")
@@ -699,7 +701,11 @@ class Controller:
 
     # --- mutating: always a plan first, then its id ----------------------
 
-    def sync(self, *, dry_run: bool, direction: str | None = None) -> Outcome:
+    def sync(
+        self, *, dry_run: bool, direction: str | None = None,
+        progress: ProgressCallback | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> Outcome:
         """Run a sync through the same context the CLI builds.
 
         ``enforce_safety`` stays on. A GUI that turned it off to show a nicer
@@ -708,10 +714,17 @@ class Controller:
         """
 
         def go() -> SyncResult:
+            if cancellation is not None:
+                cancellation.checkpoint()
             if not dry_run:
                 close_codex_for_sync(self._config_path)
-            context = build_context(self._config_path, enforce_safety=True, direction=direction)
-            run_sync(context, dry_run=dry_run, origin="window")
+            context = build_context(
+                self._config_path, enforce_safety=True, direction=direction, cancellation=cancellation,
+            )
+            run_sync(
+                context, dry_run=dry_run, origin="window", event_progress=getattr(progress, "event", None),
+                cancellation=cancellation,
+            )
             return SyncResult(
                 applied=not dry_run,
                 actions=context.plan.action_count,
@@ -720,7 +733,11 @@ class Controller:
 
         return run(go)
 
-    def apply_sessions(self, scan: SessionScan, *, confirm_plan: str, dry_run: bool = False) -> Outcome:
+    def apply_sessions(
+        self, scan: SessionScan, *, confirm_plan: str, dry_run: bool = False,
+        progress: ProgressCallback | None = None,
+    ) -> Outcome:
+        observer = getattr(progress, "event", None)
         return run(lambda: apply_session_transfer(
             self._config_path,
             plan_path=scan.plan_path,
@@ -728,6 +745,8 @@ class Controller:
             resolutions_path=scan.resolutions_path if scan.used_resolutions else None,
             dry_run=dry_run,
             origin="window",
+            phase_progress=progress if observer is None else None,
+            event_progress=observer,
         ))
 
     def apply_repair(self, scan: RepairScan, *, confirm_plan: str, dry_run: bool = False) -> Outcome:
@@ -935,7 +954,7 @@ class Controller:
 
     def handoff_now(
         self, *, progress: ProgressCallback | None = None, conflict_policy: str | None = None,
-        direction: str | None = None,
+        direction: str | None = None, cancellation: CancellationToken | None = None,
     ) -> Outcome:
         """Load what others handed off, then hand off this machine.
 
@@ -945,16 +964,27 @@ class Controller:
         one rule instead of `[conflict] policy` -- the buttons a stopped sync
         offers (D-027). ``direction`` is this run's choice over `sync.direction`.
         """
+        observer = getattr(progress, "event", None)
+
         def phase_progress(phase: str, done: int, total: int) -> None:
             # Keep the old two-number callback for other consumers, while the
             # window names staging and application separately.
+            if observer is not None and (
+                (phase == "sync_settings" and total) or phase in {"stage_chats", "apply_chats", "delete_chat_files"}
+            ):
+                return
             if progress is not None and not (phase == "sync_chats" and total):
                 progress(phase, done, total)
 
         return run(lambda: run_handoff(
             self._config_path, origin="window", wait_seconds=0, progress=phase_progress,
             conflict_policy=conflict_policy, direction=direction,
+            event_progress=observer, cancellation=cancellation,
         ))
+
+    def progress_logs(self) -> Outcome:
+        """The event log directory allowed by the active config."""
+        return run(lambda: progress_events_folder(self._config_path))
 
     def remember_conflict_policy(self, policy: str) -> Outcome:
         """Write `[conflict] policy` into the open config, as Settings would.

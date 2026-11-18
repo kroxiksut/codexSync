@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import tomllib
 import unittest
 from unittest import mock
@@ -98,6 +99,62 @@ class _Console(_Workspace):
 
     def settings(self) -> dict:
         return tomllib.loads(self.config.read_text(encoding="utf-8"))
+
+
+class ConsoleCancellationTests(_Console):
+    def test_interrupts_during_sync_request_one_safe_stop_and_restore_handlers(self) -> None:
+        signals = [signal.SIGINT, signal.SIGTERM]
+        if hasattr(signal, "SIGBREAK"):
+            signals.append(signal.SIGBREAK)
+        former = {signum: signal.getsignal(signum) for signum in signals}
+
+        def prepare(*args, **kwargs):
+            for signum in signals:
+                handler = signal.getsignal(signum)
+                self.assertNotEqual(handler, former[signum])
+                handler(signum, None)
+                handler(signum, None)
+            kwargs["cancellation"].checkpoint()
+            self.fail("the stop request passed a preparation checkpoint")
+
+        with mock.patch("codexsync.cli.run_handoff", side_effect=prepare) as run_handoff:
+            code, out = self.run_cli("sync", "--apply")
+        run_handoff.assert_called_once()
+        self.assertEqual(code, 5)
+        self.assertNotIn("Sync finished", out)
+        self.assertEqual({signum: signal.getsignal(signum) for signum in signals}, former)
+
+    def test_repeated_console_interrupts_let_a_committing_handoff_finish(self) -> None:
+        def commit(*args, **kwargs):
+            cancellation = kwargs["cancellation"]
+            cancellation.begin_commit()
+            handler = signal.getsignal(signal.SIGINT)
+            handler(signal.SIGINT, None)
+            handler(signal.SIGINT, None)
+            cancellation.checkpoint()
+            self.assertFalse(cancellation.request_rollback())
+            return mock.sentinel.completed
+
+        with mock.patch("codexsync.cli.run_handoff", side_effect=commit), \
+                mock.patch("codexsync.cli._print_handoff_result") as report:
+            code, _out = self.run_cli("handoff", "sync")
+        self.assertEqual(code, 0)
+        report.assert_called_once_with(mock.sentinel.completed)
+
+
+class ConsoleProgressLogsTests(_Console):
+    def test_history_lists_the_same_progress_logs_the_window_opens(self) -> None:
+        from codexsync.app import progress_events_folder
+
+        folder = progress_events_folder(self.config)
+        assert folder is not None
+        saved = self.write(folder / "sync-example.complete.jsonl", "{}\n")
+        self.write(folder / "unrelated.txt", "hidden")
+        code, out = self.run_cli("history", "--progress-logs", "--json")
+        self.assertEqual(code, 0)
+        payload = json.loads(out[out.index("{"):])
+        self.assertEqual(Path(payload["folder"]), folder)
+        self.assertEqual([Path(path) for path in payload["files"]], [saved])
 
 
 class ConfigSetTests(_Console):

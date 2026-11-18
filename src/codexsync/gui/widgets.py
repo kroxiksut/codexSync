@@ -13,6 +13,7 @@ results are delivered to its slot, which Qt queues onto that thread.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import itertools
 import time
@@ -47,6 +48,8 @@ from PySide6.QtWidgets import (
 
 from . import theme
 from .controller import Failure, Outcome
+from .jobs import EVENT_LIMIT
+from ..progress import ProgressEvent, ProgressObserver
 
 #: A long read reports once per file; the window is redrawn far less often.
 PROGRESS_INTERVAL_MS = 100
@@ -111,6 +114,7 @@ def install_wheel_guard(app: QApplication) -> WheelGuard:
 class _JobSignals(QObject):
     finished = Signal(object)
     progress = Signal(object)
+    events = Signal(object)
 
 
 class _Job(QRunnable):
@@ -134,20 +138,33 @@ class _Job(QRunnable):
         self._with_progress = with_progress
         self._last_report = 0.0
         self._pending_report = None
+        self._pending_events: deque[ProgressEvent] = deque(maxlen=EVENT_LIMIT)
         self.signals = _JobSignals()
 
     def _report(self, phase: str, done: int, total: int) -> None:  # pragma: no cover - worker thread
+        self._pending_report = (phase, done, total)
+        self._flush_progress(force=bool(total and done >= total))
+
+    def _report_event(self, event: ProgressEvent) -> None:
+        self._pending_events.append(event)
+        self._flush_progress()
+
+    def _flush_progress(self, *, force: bool = False) -> None:
+        if self._pending_report is None and not self._pending_events:
+            return
         now = time.monotonic() * 1000
-        self._pending_report = (self._token, phase, done, total)
-        finished = total and done >= total
-        if not finished and now - self._last_report < PROGRESS_INTERVAL_MS:
+        if not force and now - self._last_report < PROGRESS_INTERVAL_MS:
             return
         self._last_report = now
         try:
-            self.signals.progress.emit(self._pending_report)
-            self._pending_report = None
+            if self._pending_report is not None:
+                self.signals.progress.emit((self._token, *self._pending_report))
+            if self._pending_events:
+                self.signals.events.emit((self._token, tuple(self._pending_events)))
         except RuntimeError:
             pass
+        self._pending_report = None
+        self._pending_events.clear()
 
     @Slot()
     def run(self) -> None:  # pragma: no cover - exercised only with a running pool
@@ -162,16 +179,13 @@ class _Job(QRunnable):
         page's busy flag -- cleared only by the result -- stays set for good.
         """
         try:
-            return self._call(progress=self._report) if self._with_progress else self._call()
+            if self._with_progress:
+                return self._call(progress=ProgressObserver(self._report, self._report_event))
+            return self._call()
         except Exception as exc:  # noqa: BLE001 - reported as a bug, never swallowed
             return Outcome(failure=Failure.UNEXPECTED, message=f"{type(exc).__name__}: {exc}")
         finally:
-            if self._pending_report is not None:
-                try:
-                    self.signals.progress.emit(self._pending_report)
-                except RuntimeError:
-                    pass
-                self._pending_report = None
+            self._flush_progress(force=True)
 
     def deliver(self, outcome: Outcome) -> None:  # pragma: no cover - worker thread
         try:
@@ -191,6 +205,7 @@ class JobRunner(QObject):
         self._tokens = itertools.count(1)
         self._pending: dict[int, tuple[_Job, Callable[[Outcome], None]]] = {}
         self._abandoned: dict[int, _Job] = {}
+        self._abandonable: set[int] = set()
         self._watchers: dict[int, Callable[[str, int, int], None]] = {}
 
     def start(
@@ -198,6 +213,8 @@ class JobRunner(QObject):
         call: Callable[..., Outcome],
         done: Callable[[Outcome], None],
         progress: Callable[[str, int, int], None] | None = None,
+        *,
+        abandonable: bool = False,
     ) -> int:
         token = next(self._tokens)
         job = _Job(token, call, with_progress=progress is not None)
@@ -205,10 +222,13 @@ class JobRunner(QObject):
         job.signals.finished.connect(self._deliver)
         if progress is not None:
             job.signals.progress.connect(self._report)
+            job.signals.events.connect(self._report_events)
             self._watchers[token] = progress
         # Held until delivery: a QRunnable collected mid-run takes its signals
         # object with it and the result never arrives.
         self._pending[token] = (job, done)
+        if abandonable:
+            self._abandonable.add(token)
         self._pool.start(job)
         return token
 
@@ -219,6 +239,13 @@ class JobRunner(QObject):
         watcher = self._watchers.get(token)
         if watcher is not None and token in self._pending:
             watcher(phase, done, total)
+
+    @Slot(object)
+    def _report_events(self, payload: object) -> None:
+        token, events = payload  # type: ignore[misc]
+        watcher = getattr(self._watchers.get(token), "events", None)
+        if watcher is not None and token in self._pending:
+            watcher(events)
 
     @property
     def busy(self) -> bool:
@@ -232,9 +259,10 @@ class JobRunner(QObject):
         changes nothing. The job object stays referenced until it finishes, or
         Qt would delete it under the running thread.
         """
-        entry = self._pending.pop(token, None)
-        if entry is None:
+        if token not in self._abandonable:
             return False
+        self._abandonable.remove(token)
+        entry = self._pending.pop(token)
         self._abandoned[token] = entry[0]
         self._watchers.pop(token, None)
         return True
@@ -243,6 +271,7 @@ class JobRunner(QObject):
     def _deliver(self, payload: object) -> None:
         token, outcome = payload  # type: ignore[misc]
         self._abandoned.pop(token, None)
+        self._abandonable.discard(token)
         self._watchers.pop(token, None)
         entry = self._pending.pop(token, None)
         if entry is not None:

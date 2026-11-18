@@ -30,7 +30,7 @@ manifest entry records (CS-293); the global state goes back through
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import json
@@ -42,11 +42,12 @@ from typing import Mapping
 import zipfile
 
 from .config import load_config
+from .cancellation import OperationRolledBack
 from .exceptions import ConfigError, FailSafeError
 from .guardian_models import ValidationStatus, holds_no_projects
 from .guardian_restore import carries_project_state
 from .guardian_schema import validate_global_state_references
-from .models import AppConfig, SyncPlan
+from .models import AppConfig, DeleteAction, DestinationPrecondition, SyncPlan
 from .mutation_journal import (
     BEFORE_COMMIT,
     TERMINAL,
@@ -54,17 +55,20 @@ from .mutation_journal import (
     JournalStore,
     MutationJournal,
     owned_by,
+    rollback_roots_id,
 )
 from .operation_lock import OperationLock
 from .restore import (
     _backup_manifest_path,
     _build_restore_plan_from_snapshot,
     _is_supported_snapshot,
+    _parse_backup_manifest,
     _verify_backup_snapshot,
     execute_restore_plan,
     read_backup_manifest_sides,
 )
-from .runtime import _make_safety_gate, _require_mutation_compatible_config
+from .runtime import _hash_file, _is_plain_copy_candidate, _make_safety_gate, _require_mutation_compatible_config
+from .sync_engine import _identity
 from .safety_gate import OperationKind
 from .state_locator import locate_local_state_dir
 
@@ -388,6 +392,8 @@ def rollback_operation(
             "cannot be proven. Inspect the backup directory and use `restore --from <snapshot>` "
             "explicitly, or `recover resume` to retry the command."
         )
+    if journal.rollback_files is not None:
+        return rollback_applied_files(cfg, journal, gate, target=target, dry_run=dry_run)
     gate.require(OperationKind.RECOVER_ROLLBACK)
     store = JournalStore(cfg.paths.temp_dir)
 
@@ -466,6 +472,100 @@ _FILE_FAMILIES = frozenset({"sync", "restore"})
 _GLOBAL_STATE_FILE = ".codex-global-state.json"
 
 
+def rollback_applied_files(cfg, journal, gate, *, target, dry_run) -> RecoveryOutcome:
+    """Undo just the verified writes completed before an explicit stop.
+
+    Persisted evidence makes a retry use the very same subset. A destination
+    must still hold the installed file, or already hold its original content
+    from a previous rollback attempt. An intervening edit stops the restore.
+    """
+    machine = cfg.identity.machine_id or platform.node()
+    if journal.family != "sync" or not owned_by(journal, machine):
+        raise FailSafeError("A rollback requires this machine's own sync journal")
+    gate.require(OperationKind.RECOVER_ROLLBACK)
+    local = locate_local_state_dir(cfg)
+    store = JournalStore(cfg.paths.temp_dir)
+    with OperationLock(cfg.paths.temp_dir, state_root=local, machine_id=machine, family="recover", reentrant=True):
+        if store.load(journal.operation_id) != journal:
+            raise FailSafeError("The journal changed before rollback", code="STATE_CHANGED_RETRY")
+        files = journal.rollback_files
+        assert files is not None
+        if journal.rollback_roots != rollback_roots_id(local, cfg.paths.cloud_root_dir):
+            raise FailSafeError("The state folders changed since this sync; use its original folders for rollback")
+        if target is not None and any(f.side != target for f in files):
+            raise ConfigError("The selected side does not match the files this sync changed")
+        snapshot = _locate_snapshot(cfg.paths.backup_dir, journal.backup_snapshot)
+        entries = {}
+        if snapshot is not None:
+            _verify_backup_snapshot(snapshot, allow_legacy_snapshot=False)
+            entries = _parse_backup_manifest(snapshot)
+        roots = {"local": local, "cloud": cfg.paths.cloud_root_dir}
+        restore = {}
+        deletions = []
+        seen = set()
+        for file in files:
+            rel, side = file.relative_path, file.side
+            root = roots[side].resolve()
+            path = root / rel
+            if (not path.is_relative_to(root) or path.resolve() != path or path in seen
+                    or not _is_plain_copy_candidate(rel)):
+                raise FailSafeError("Unsafe or duplicate sync rollback destination")
+            seen.add(path)
+            entry = entries.get(rel)
+            if file.existed != (entry is not None) or (entry and entry[2] != side):
+                raise FailSafeError("The verified backup does not cover the changed file")
+            before_hash = entry[0] if entry else None
+            identity = _identity(path)
+            current_hash = _hash_file(path) if identity is not None else None
+            if _identity(path) != identity:
+                raise FailSafeError("A rollback destination changed during verification", code="STATE_CHANGED_RETRY")
+            if current_hash == before_hash:
+                continue  # a previous rollback attempt already restored it
+            if current_hash != file.installed_sha256 or identity != file.installed_identity:
+                raise FailSafeError("A destination changed since the sync wrote it; rollback stopped",
+                                    code="STATE_CHANGED_RETRY")
+            expected = (DestinationPrecondition(True, identity[3], identity[2], identity[0], identity[1])
+                        if identity is not None else DestinationPrecondition(False))
+            if entry:
+                restore[rel] = (side, root, before_hash, expected)
+            else:
+                deletions.append(DeleteAction(path, rel, side, expected))
+
+        plan, staging = SyncPlan(), None
+        if restore:
+            plan, staging = _build_restore_plan_from_snapshot(
+                snapshot, lambda rel: restore[rel][:2] if rel in restore else None,
+                None, [], cfg.paths.temp_dir,
+            )
+        rollback = _FileRollback(plan, staging)
+        try:
+            if plan.action_count != len(restore):
+                raise FailSafeError("Verified backup files disappeared before rollback")
+            for actions in (plan.to_cloud, plan.to_local):
+                for index, action in enumerate(actions):
+                    _, _, sha, expected = restore[action.relative_path]
+                    actions[index] = replace(action, expected_sha256=sha, destination_precondition=expected)
+            plan.deletions.extend(deletions)
+            if dry_run:
+                return RecoveryOutcome(journal.operation_id, journal.family, journal.state.value,
+                    RecoveryAction.WOULD_RECOVER, journal.backup_snapshot, 0,
+                    f"{plan.action_count} completed change(s) would be undone.",
+                    would=RecoveryAction.ROLLED_BACK, snapshot_kept=snapshot is not None)
+            # The original journal stays open. A failed earlier restore of
+            # this very receipt can yield to the freshly verified remaining plan.
+            for child in store.non_terminal():
+                if child.superseding == journal.operation_id and child.family == "restore" and owned_by(child, machine):
+                    _close(store, child)
+            restored = rollback.execute(cfg, gate, superseding=journal.operation_id)
+            store.transition(journal, JournalState.FAILED, failure=OperationRolledBack(),
+                             failure_code=OperationRolledBack.code)
+            return RecoveryOutcome(journal.operation_id, journal.family, journal.state.value,
+                RecoveryAction.ROLLED_BACK, journal.backup_snapshot, restored,
+                f"Undid {restored} completed change(s).", snapshot_kept=snapshot is not None)
+        finally:
+            rollback.discard()
+
+
 def _rollback_refusal(journal: MutationJournal, backup_root: Path, *, own: bool) -> str | None:
     """Why rollback would refuse this non-terminal journal, cheaply; ``None`` if it would not.
 
@@ -480,6 +580,8 @@ def _rollback_refusal(journal: MutationJournal, backup_root: Path, *, own: bool)
         )
     if journal.backup_snapshot is None:
         return "no backup snapshot is recorded"
+    if journal.rollback_files is not None and not any(f.existed for f in journal.rollback_files):
+        return None
     if journal.state in _BEFORE_COMMIT:
         return None
     if journal.family == "sessions":

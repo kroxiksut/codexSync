@@ -11,10 +11,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .backup import BackupManager
+from .cancellation import CancellationToken, OperationCancelled, RollbackRequested
+from .mutation_journal import AppliedFile
 from .exceptions import FailSafeError
 from .fs_replace import replace_with_retry
 from .jsonl_codec import CONTAINER_DECODE_ERRORS, JsonlCodec, codec_of, open_jsonl, transcode
 from .models import CopyAction, DeleteAction, DestinationPrecondition, SyncPlan
+from .progress_log import ProgressLog
 from .work_scheduler import WorkScheduler
 
 LOG = logging.getLogger(__name__)
@@ -76,6 +79,8 @@ class SyncEngine:
         phase_progress: Callable[[str, int, int], None] | None = None,
         scheduler: WorkScheduler | None = None,
         stage_operation_id: str | None = None,
+        progress_events: ProgressLog | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> None:
         self._backup_manager = backup_manager
         self._temp_dir = temp_dir
@@ -99,6 +104,16 @@ class SyncEngine:
         # their existing staging path and container-specific guarantees.
         self._scheduler = scheduler
         self._stage_operation_id = stage_operation_id
+        self._progress_events = progress_events
+        self._cancellation = cancellation
+        self.applied_files: list[AppliedFile] = []
+        self._event_phase = "stage_chats"
+        self._event_done = 0
+        self._event_total: int | None = None
+        self._event_bytes = 0
+        self._event_bytes_total: int | None = None
+        self._event_action: CopyAction | DeleteAction | None = None
+        self._event_local: set[int] = set()
         self.failure_item: dict[str, object] = {}
         self.staged_count = 0
         self.applied_count = 0
@@ -106,17 +121,25 @@ class SyncEngine:
         self._replacement_completed = False
 
     def execute(self, plan: SyncPlan, dry_run: bool = True) -> None:
-        if self._scheduler is not None and not dry_run:
-            with self._scheduler.mutation() as work:
-                self._execute(plan, dry_run, prepare=work.map_prepare)
-        else:
-            self._execute(plan, dry_run)
+        self._event_local = {id(action) for action in plan.to_local}
+        try:
+            if self._scheduler is not None and not dry_run:
+                with self._scheduler.mutation() as work:
+                    self._execute(plan, dry_run, prepare=work.map_prepare)
+            else:
+                self._execute(plan, dry_run)
+        except (OperationCancelled, RollbackRequested):
+            raise
+        except Exception:
+            self._emit_event("failed", self._event_action)
+            raise
 
     def _execute(
         self, plan: SyncPlan, dry_run: bool, *,
         prepare: Callable[..., list[_PreparedCopy]] | None = None,
     ) -> None:
         actions = [*plan.to_local, *plan.to_cloud]
+        self._checkpoint()
         deletions = list(plan.deletions)
         for action in actions:
             LOG.info("copy %s -> %s", action.src, action.dst)
@@ -140,6 +163,7 @@ class SyncEngine:
         # interrupted: that half-written payload is this module's to remove too.
         stage_paths: list[Path] = []
         reservations: dict[Path, _Identity] = {}
+        stage_dirs: dict[Path, _Identity] = {}
         prepared: dict[int, _PreparedCopy] = {}
         try:
             # Stage and verify *every* payload before backing up or replacing
@@ -155,6 +179,8 @@ class SyncEngine:
             total = len(actions) + len(deletions)
             self._report(0, total)
             self._report_phase("stage_chats", 0, len(actions))
+            self._begin_event_phase("stage_chats", len(actions))
+            sizes: dict[int, int] = {}
             if self._scheduler is not None:
                 if any(action.codec is not None for action in actions):
                     raise ValueError("parallel staging is for ordinary file sync only")
@@ -163,8 +189,10 @@ class SyncEngine:
                 # The caller reserves every sibling exclusively. A collision
                 # belongs to somebody else, regardless of its name or age.
                 for index, action in enumerate(actions, start=1):
+                    self._checkpoint()
+                    self._event_action = action
                     self.failure_item = {"phase": "stage_chats", "index": index, "relative_path": action.relative_path}
-                    self._ensure_parent(action.dst)
+                    self._ensure_stage_parent(action.dst.parent, stage_dirs)
                     path = _stage_path(action.dst, operation)
                     with path.open("xb") as handle:
                         # Record the opened file, not whatever a cloud rename
@@ -176,21 +204,37 @@ class SyncEngine:
                 # Treat every payload as large: the shared budget bounds
                 # whole copy/hash jobs without a racy size classification.
                 assert prepare is not None
-                results = prepare(self._prepare_copy, inputs, large_file=lambda _item: True)
+                self._event_action = None
+
+                def staged_result(index: int, _input, result: _PreparedCopy) -> None:
+                    size = result.stage_identity[2] if result.stage_identity is not None else None
+                    if size is not None:
+                        sizes[id(result.action)] = size
+                    self._count_event(index + 1, "pending", result.action, size)
+
+                results = prepare(
+                    self._prepare_copy, inputs, large_file=lambda _item: True, on_result=staged_result,
+                    cancellation=self._cancellation,
+                )
                 # A fast worker's source may change while another is copying.
                 # Re-prove the entire set after joining, using the same pool
                 # and large-file budget, before any backup or target write.
-                results = prepare(self._verify_prepared, results, large_file=lambda _item: True)
+                results = prepare(self._verify_prepared, results, large_file=lambda _item: True,
+                                  cancellation=self._cancellation)
                 for index, result in enumerate(results, start=1):
+                    self._checkpoint()
                     prepared[id(result.action)] = result
                     staged.append((result.action, result.path))
                     self.staged_count = index
                     self._report(index, total)
                     self._report_phase("stage_chats", index, len(actions))
                 for result in results:
+                    self._checkpoint()
+                    self._event_action = result.action
                     self._require_prepared(result)
             else:
                 for index, action in enumerate(actions, start=1):
+                    self._event_action = action
                     self.failure_item = {"phase": "stage_chats", "index": index, "relative_path": action.relative_path}
                     self._ensure_parent(action.dst)
                     self._sweep_stale_stage_files(action.dst.parent, swept)
@@ -203,6 +247,12 @@ class SyncEngine:
                     self.staged_count = len(staged)
                     self._report(len(staged), total)
                     self._report_phase("stage_chats", len(staged), len(actions))
+                    if self._progress_events is not None:
+                        try:
+                            sizes[id(action)] = staged_path.stat().st_size
+                        except OSError:
+                            pass
+                    self._count_event(index, "pending", action, sizes.get(id(action)))
 
             # A complete backup set exists before any destination mutation.
             # Each entry names its side, so a rollback puts it back into the
@@ -214,7 +264,10 @@ class SyncEngine:
             # the backup phase had that edit overwritten, kept nowhere.
             backed_up: dict[int, _Identity] = {}
             self.failure_item = {}
+            self._begin_event_phase("backup_chats", total)
             for index, (action, _) in enumerate(staged, start=1):
+                self._checkpoint()
+                self._event_action = action
                 self.failure_item = {"phase": "backup_chats", "index": index, "relative_path": action.relative_path}
                 _require_planned_destination(
                     action.dst, action.relative_path, action.destination_precondition,
@@ -228,8 +281,12 @@ class SyncEngine:
                     if backup_path is None:
                         raise FailSafeError("Failed to create required backup before mutation")
                     backed_up[id(action)] = _same_while_backed_up(action.dst, action.relative_path, before)
+                identity = backed_up.get(id(action))
+                self._count_event(index, "pending", action, identity[2] if identity else None)
             deleted_as: dict[int, _Identity] = {}
             for index, deletion in enumerate(deletions, start=1):
+                self._checkpoint()
+                self._event_action = deletion
                 self.failure_item = {"phase": "backup_chats", "index": index, "relative_path": deletion.relative_path}
                 _require_planned_destination(
                     deletion.path, deletion.relative_path, deletion.destination_precondition,
@@ -246,7 +303,10 @@ class SyncEngine:
                     )
                 deleted_as[id(deletion)] = _same_while_backed_up(deletion.path, deletion.relative_path, before)
                 LOG.warning("backup before delete %s -> %s", deletion.path, backup_path)
+                self._count_event(len(actions) + index, "pending", deletion, before[2] if before else None)
 
+            self._event_action = None
+            self._checkpoint()
             self._backup_manager.finalize()
             self.failure_item = {}
 
@@ -254,9 +314,15 @@ class SyncEngine:
                 self._after_backup()
 
             if self._pre_commit_check is not None:
+                self._checkpoint()
                 self._pre_commit_check()
             self._report_phase("apply_chats", 0, len(actions))
+            self._begin_event_phase(
+                "apply_chats", len(actions), sum(sizes.values()) if len(sizes) == len(actions) else None,
+            )
             for index, (action, staged_path) in enumerate(staged, start=1):
+                self._checkpoint()
+                self._event_action = action
                 self.failure_item = {"phase": "apply_chats", "index": index, "relative_path": action.relative_path}
                 if self._scheduler is None and self._before_replace_check is not None:
                     self._before_replace_check()
@@ -293,11 +359,24 @@ class SyncEngine:
                     if self._replacement_completed:
                         self.applied_count = index
                         self._report_phase("apply_chats", index, len(actions))
+                        self._event_done = index
+                        self._event_bytes += sizes.get(id(action), 0)
                     raise
+                finally:
+                    if self._replacement_completed and self._cancellation is not None:
+                        result = prepared[id(action)]
+                        self.applied_files.append(AppliedFile(
+                            action.relative_path, "local" if id(action) in to_local else "cloud",
+                            id(action) in backed_up, result.sha256, result.stage_identity,
+                        ))
                 self.applied_count = index
                 self._report_phase("apply_chats", index, len(actions))
+                self._count_event(index, "applied", action, sizes.get(id(action)))
             self._report_phase("delete_chat_files", 0, len(deletions))
+            self._begin_event_phase("delete_chat_files", len(deletions))
             for index, deletion in enumerate(deletions, start=1):
+                self._checkpoint()
+                self._event_action = deletion
                 self.failure_item = {"phase": "delete_chat_files", "index": index, "relative_path": deletion.relative_path}
                 if self._before_replace_check is not None:
                     self._before_replace_check()
@@ -308,11 +387,20 @@ class SyncEngine:
                         "it was not deleted; run the sync again",
                         code="STATE_CHANGED_RETRY",
                     )
-                self._remove_backed_up(deletion)
+                self._replacement_completed = False
+                try:
+                    self._remove_backed_up(deletion)
+                finally:
+                    if self._replacement_completed and self._cancellation is not None:
+                        self.applied_files.append(AppliedFile(deletion.relative_path, deletion.side, True, None, None))
                 self.deleted_count = index
                 self._report(len(actions) + index, total)
                 self._report_phase("delete_chat_files", index, len(deletions))
+                identity = deleted_as[id(deletion)]
+                self._count_event(index, "applied", deletion, identity[2] if identity else None)
             self.failure_item = {}
+            self._event_action = None
+            self._checkpoint()
             if self._after_success is not None:
                 self._after_success()
         finally:
@@ -330,6 +418,61 @@ class SyncEngine:
             for staged_path in stage_paths:
                 # Already gone for every action that was replaced into place.
                 staged_path.unlink(missing_ok=True)
+            if not self.applied_count and not self.deleted_count:
+                for path, identity in reversed(stage_dirs.items()):
+                    try:
+                        current = _identity(path)
+                        if current is not None and identity is not None and current[:2] == identity[:2]:
+                            path.rmdir()  # atomic refusal if a peer populated it
+                    except OSError:
+                        LOG.debug("could not remove empty staging directory %s", path, exc_info=True)
+
+    @classmethod
+    def _ensure_stage_parent(cls, parent: Path, created: dict[Path, _Identity]) -> None:
+        if parent.is_dir():
+            return
+        if parent == parent.parent:
+            raise FileNotFoundError(f"Staging volume is unavailable: {parent}")
+        cls._ensure_stage_parent(parent.parent, created)
+        try:
+            parent.mkdir()
+        except FileExistsError:
+            if not parent.is_dir():
+                raise
+        else:
+            created[parent] = _identity(parent)
+
+    def _checkpoint(self) -> None:
+        if self._cancellation is not None:
+            self._cancellation.checkpoint()
+
+    def _begin_event_phase(self, phase: str, total: int, bytes_total: int | None = None) -> None:
+        self._event_phase, self._event_done, self._event_total = phase, 0, total
+        self._event_bytes, self._event_bytes_total = 0, bytes_total
+        self._event_action = None
+        self._emit_event("running")
+
+    def _count_event(self, done: int, status: str, action: CopyAction | DeleteAction, size: int | None) -> None:
+        self._event_done = done
+        self._event_bytes += size or 0
+        self._emit_event(status, action, size)
+
+    def _emit_event(
+        self, status: str, action: CopyAction | DeleteAction | None = None, size: int | None = None,
+    ) -> None:
+        if self._progress_events is None:
+            return
+        direction = None
+        if isinstance(action, CopyAction):
+            direction = "local" if id(action) in self._event_local else "cloud"
+        elif isinstance(action, DeleteAction):
+            direction = action.side
+        self._progress_events.report(
+            self._event_phase, self._event_done, self._event_total, status=status,
+            bytes_completed=self._event_bytes, bytes_total=self._event_bytes_total, item_bytes=size,
+            relative_path=action.relative_path if action else None,
+            item_id=action.session_hash if action else None, direction=direction,
+        )
 
     def _prepare_copy(self, item: tuple[CopyAction, Path, _Identity]) -> _PreparedCopy:
         action, path, reserved = item
@@ -393,6 +536,7 @@ class SyncEngine:
         """
         try:
             deletion.path.unlink()
+            self._replacement_completed = True
         except FileNotFoundError:
             # Someone else removed it while this ran. The end state is the one
             # the plan asked for, and the backup still holds the content.
@@ -505,12 +649,12 @@ class SyncEngine:
             if codec is None or source_codec is codec:
                 # Carried across untouched. A branch is still compared by what
                 # it holds, because that is the hash its plan recorded.
-                if expected_sha256 is None:
+                if expected_sha256 is None or codec is None:
                     before = _sha256_file(source)
                 else:
                     before = _sha256_stream(source, source_codec)
                 shutil.copy2(source, staged)
-                if expected_sha256 is None:
+                if expected_sha256 is None or codec is None:
                     staged_hash = _sha256_file(staged)
                     after = _sha256_file(source)
                 else:

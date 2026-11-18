@@ -12,6 +12,8 @@ import os
 from threading import Condition, Lock, Semaphore, local
 from typing import Callable, Iterable, Iterator, TypeVar
 
+from .cancellation import CancellationToken, OperationCancelled
+
 _Item = TypeVar("_Item")
 _Result = TypeVar("_Result")
 
@@ -35,9 +37,14 @@ class _MutationWork:
     def map_prepare(
         self, function: Callable[[_Item], _Result], items: Iterable[_Item], *,
         pool: str = "io", large_file: Callable[[_Item], bool] | None = None,
+        on_result: Callable[[int, _Item, _Result], None] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> list[_Result]:
+        """Accept ordered results on the caller as they become available."""
         self._require_open()
-        return self._scheduler._ordered_map(function, items, pool=pool, large_file=large_file)
+        return self._scheduler._ordered_map(
+            function, items, pool=pool, large_file=large_file, on_result=on_result, cancellation=cancellation,
+        )
 
     def commit(self, key: str, function: Callable[[], _Result]) -> _Result:
         """Run one final mutation step on the operation's calling thread."""
@@ -136,6 +143,7 @@ class WorkScheduler:
         self, function: Callable[[_Item], _Result], items: Iterable[_Item], *,
         pool: str = "io", large_file: Callable[[_Item], bool] | None = None,
         caller_work: Iterable[Callable[[], None]] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> list[_Result]:
         """Run read-only work with bounded submission and ordered results.
 
@@ -147,7 +155,7 @@ class WorkScheduler:
         """
         with self._activity():
             return self._ordered_map(
-                function, items, pool=pool, large_file=large_file, caller_work=caller_work,
+                function, items, pool=pool, large_file=large_file, caller_work=caller_work, cancellation=cancellation,
             )
 
     @contextmanager
@@ -206,14 +214,16 @@ class WorkScheduler:
         self, function: Callable[[_Item], _Result], items: Iterable[_Item], *,
         pool: str, large_file: Callable[[_Item], bool] | None,
         caller_work: Iterable[Callable[[], None]] | None = None,
+        on_result: Callable[[int, _Item, _Result], None] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> list[_Result]:
         if pool not in {"cpu", "io"}:
             raise ValueError("pool must be 'cpu' or 'io'")
         executor, limit = (self._cpu, self.cpu_workers) if pool == "cpu" else (self._io, self.io_workers)
         iterator = iter(items)
-        pending: dict[Future[_Result], int] = {}
+        pending: dict[Future[_Result], tuple[int, _Item]] = {}
         results: list[_Result] = []
-        completed: dict[int, _Result] = {}
+        completed: dict[int, tuple[_Item, _Result]] = {}
         exhausted = False
         next_index = 0
         caller_steps = iter(caller_work) if caller_work is not None else iter(())
@@ -228,6 +238,8 @@ class WorkScheduler:
 
         def submit_one() -> None:
             nonlocal exhausted, next_index
+            if cancellation is not None:
+                cancellation.checkpoint()
             try:
                 item = next(iterator)
             except StopIteration:
@@ -240,10 +252,14 @@ class WorkScheduler:
             def invoke() -> _Result:
                 if is_large:
                     with self._large_files:
+                        if cancellation is not None:
+                            cancellation.checkpoint()
                         return function(item)
+                if cancellation is not None:
+                    cancellation.checkpoint()
                 return function(item)
 
-            pending[executor.submit(invoke)] = index
+            pending[executor.submit(invoke)] = index, item
 
         failure: BaseException | None = None
         try:
@@ -255,6 +271,8 @@ class WorkScheduler:
                 submit_one()
             while pending or caller_pending:
                 if caller_pending:
+                    if cancellation is not None:
+                        cancellation.checkpoint()
                     try:
                         step = next(caller_steps)
                     except StopIteration:
@@ -265,35 +283,36 @@ class WorkScheduler:
                     done = {future for future in pending if future.done()}
                 else:
                     done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in sorted(done, key=pending.get):
+                for future in sorted(done, key=lambda future: pending[future][0]):
                     error = future.exception()
-                    if error is not None and failure is None:
+                    if error is not None and (failure is None or isinstance(failure, OperationCancelled)):
                         failure = error
                 for future in done:
-                    index = pending.pop(future)
+                    index, item = pending.pop(future)
                     if failure is None:
-                        completed[index] = future.result()
+                        completed[index] = item, future.result()
                 if failure is not None:
                     break
                 while len(results) in completed:
-                    results.append(completed.pop(len(results)))
+                    index = len(results)
+                    item, result = completed.pop(index)
+                    if on_result is not None:
+                        on_result(index, item, result)
+                    results.append(result)
                 while next_index - len(results) < limit and not exhausted:
                     submit_one()
-        except BaseException:
-            release_caller()
-            for future in pending:
-                try:
-                    future.result()
-                except BaseException:
-                    pass
-            raise
+            if failure is None and cancellation is not None:
+                cancellation.checkpoint()
+        except BaseException as exc:
+            failure = exc
         finally:
             release_caller()
         if failure is not None:
             for future in pending:
                 try:
                     future.result()
-                except BaseException:
-                    pass
+                except BaseException as exc:
+                    if isinstance(failure, OperationCancelled) and not isinstance(exc, OperationCancelled):
+                        failure = exc
             raise failure
         return results

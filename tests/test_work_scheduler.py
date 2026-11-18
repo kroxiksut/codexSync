@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
-from threading import Barrier, Event, Lock
+from threading import Barrier, Event, Lock, get_ident
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +11,29 @@ from codexsync.work_scheduler import WorkClass, WorkScheduler
 
 
 class WorkSchedulerTests(unittest.TestCase):
+    def test_prepare_observer_accepts_results_in_order_on_the_caller_while_workers_run(self) -> None:
+        release_second = Event()
+        caller = get_ident()
+        observed = []
+
+        def prepare(item):
+            if item == "second":
+                self.assertTrue(release_second.wait(timeout=5))
+            return item.upper()
+
+        def accept(index, item, result):
+            observed.append((index, item, result, get_ident()))
+            if index == 0:
+                release_second.set()
+
+        with WorkScheduler(io_workers=2) as scheduler:
+            with scheduler.mutation() as work:
+                result = work.map_prepare(prepare, ["first", "second", "third"], on_result=accept)
+        self.assertEqual(result, ["FIRST", "SECOND", "THIRD"])
+        self.assertEqual(observed, [
+            (0, "first", "FIRST", caller), (1, "second", "SECOND", caller), (2, "third", "THIRD", caller),
+        ])
+
     def test_caller_steps_refill_a_bounded_window_before_the_next_step(self) -> None:
         """A long plain scan must not leave decompression idle after its first window."""
         completed = [Event() for _ in range(20)]

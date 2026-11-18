@@ -26,6 +26,7 @@ import time
 from typing import Any, Callable, Iterable
 
 from .controller import Failure, Outcome
+from ..cancellation import CancellationToken
 from ..progress import ProgressEstimate, ProgressEstimator, ProgressEvent
 
 #: Every kind a page may name. Each has a ``job.<kind>`` sentence in every
@@ -94,6 +95,7 @@ SHARED_KINDS: dict[str, tuple[str, ...]] = {
 
 #: How many ended jobs the task list keeps.
 RECENT_LIMIT = 12
+EVENT_LIMIT = 500
 
 
 @dataclass
@@ -116,6 +118,7 @@ class RunningJob:
     progress_estimate: ProgressEstimate | None = None
     estimator: ProgressEstimator | None = None
     estimate_phase: str | None = None
+    cancellation: CancellationToken | None = None
 
     @property
     def shared(self) -> bool:
@@ -137,6 +140,7 @@ class FinishedJob:
     #: The person stopped waiting; the work itself may have run on.
     abandoned: bool = False
     progress: tuple[str, int, int] | None = None
+    code: str | None = None
 
 
 class JobBook:
@@ -147,6 +151,8 @@ class JobBook:
         self._wall = wall
         self.running: dict[Any, RunningJob] = {}
         self.recent: deque[FinishedJob] = deque(maxlen=RECENT_LIMIT)
+        self.events: deque[ProgressEvent] = deque(maxlen=EVENT_LIMIT)
+        self.events_revision = 0
 
     def start(
         self,
@@ -158,13 +164,17 @@ class JobBook:
         model: Any,
         cancellable: bool,
         dry_run: bool = False,
+        cancellation: CancellationToken | None = None,
     ) -> RunningJob:
         if kind is not None and kind not in JOB_KINDS:
             raise ValueError(f"unknown job kind: {kind!r}")
+        if cancellable and cancellation is not None:
+            raise ValueError("a cooperative job cannot be abandoned")
         job = RunningJob(
             page=page, kind=kind, apply=apply, model=model, cancellable=cancellable,
             dry_run=dry_run, started=self._clock(), started_at=self._wall(),
             estimator=ProgressEstimator(),
+            cancellation=cancellation,
         )
         self.running[token] = job
         return job
@@ -177,9 +187,10 @@ class JobBook:
 
     def finish(self, token: Any, outcome: Outcome | None, *, abandoned: bool = False) -> RunningJob | None:
         """Forget a running job and remember how it ended."""
-        job = self.running.pop(token, None)
-        if job is None:
+        job = self.running.get(token)
+        if job is None or (abandoned and not job.cancellable):
             return None
+        del self.running[token]
         self.recent.appendleft(FinishedJob(
             page=job.page, kind=job.kind, dry_run=job.dry_run, cancellable=job.cancellable,
             started_at=job.started_at,
@@ -187,6 +198,7 @@ class JobBook:
             failure=None if outcome is None else outcome.failure,
             abandoned=abandoned,
             progress=job.progress,
+            code=None if outcome is None else outcome.code,
         ))
         return job
 
@@ -210,20 +222,36 @@ class JobBook:
         job = self.running.get(token)
         if job is None:
             return False
-        job.progress = (phase, done, total)
         event = ProgressEvent(
             operation=job.kind or job.page,
             phase=phase,
             completed=done,
             total=total if total > 0 else None,
         )
+        self._update_progress(job, event)
+        return True
+
+    def report_events(self, token: Any, events: Iterable[ProgressEvent]) -> bool:
+        job = self.running.get(token)
+        if job is None:
+            return False
+        for event in events:
+            self.events.append(event)
+            self.events_revision += 1
+            if event.phase != "transfer":
+                self._update_progress(job, event)
+        return True
+
+    def _update_progress(self, job: RunningJob, event: ProgressEvent) -> None:
+        phase = event.phase
+        job.progress = (phase, event.completed, event.total or 0)
         job.progress_event = event
         if job.estimate_phase != phase:
             job.estimator = ProgressEstimator()
             job.estimate_phase = phase
         if job.estimator is not None:
-            job.progress_estimate = job.estimator.update(event, now=self._clock())
-        return True
+            now = self._clock() if event.monotonic_at is None else event.monotonic_at
+            job.progress_estimate = job.estimator.update(event, now=now)
 
 
 def sharing_pages(kind: str | None, page: str) -> tuple[str, ...]:

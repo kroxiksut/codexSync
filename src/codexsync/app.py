@@ -8,7 +8,7 @@ the CLI and the tests.
 """
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import hashlib
 import logging
 import json
@@ -20,10 +20,11 @@ import uuid
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .config import PATH_SUBSTITUTIONS, load_config, preview_path
-from .progress import PHASES, ProgressCallback, report as report_progress
+from .progress import PHASES, ProgressCallback, ProgressEventCallback, report as report_progress
+from .progress_log import ProgressLog, progress_log_dir
 from .task_items import TaskItem, filter_task_rows, load_latest_session_task, task_rows
 from .mapping_hints import MappingHints, build_mapping_hints
 from .sync_candidates import SyncCandidate, list_sync_candidates
@@ -149,6 +150,7 @@ from .preflight import (
 from .repair_plan import RepairActionKind, RepairPlan, build_repair_plan, conflicting_bindings, load_repair_plan, save_repair_plan
 from .restore import BackupSnapshotInfo, RestoreResult, list_backup_snapshots, restore_from_backup
 from .recovery import (
+    rollback_applied_files,
     JournalInfo,
     RecoveryOutcome,
     list_history,
@@ -288,6 +290,8 @@ from .stable_reader import SourceMissingError, SourceTooLargeError, SourceUnstab
 from .state_locator import locate_local_state_dir, locate_state_dirs
 from .sync_engine import SyncEngine
 from .work_scheduler import WorkScheduler
+from .cancellation import CancellationState, CancellationToken, OperationCancelled, OperationRolledBack, RollbackRequested
+from .mutation_journal import rollback_roots_id
 from .handoff import (
     Board,
     Delivery,
@@ -382,6 +386,7 @@ __all__ = [
     "list_sync_candidates",
     "PHASES",
     "ProgressCallback",
+    "progress_events_folder",
     "preview_path",
     "GuardianRestorePlan",
     "GuardianAcceptPlan",
@@ -571,7 +576,10 @@ def build_context(
     direction: str | None = None,
     *,
     scheduler: WorkScheduler | None = None,
+    cancellation: CancellationToken | None = None,
 ) -> AppContext:
+    if cancellation is not None:
+        cancellation.checkpoint()
     cfg = with_run_choices(load_config(config_path), conflict_policy, direction)
     safety_gate = _make_safety_gate(cfg)
     if enforce_safety:
@@ -592,7 +600,7 @@ def build_context(
     # One owner for the whole preparation, never a pool per file. An injected
     # scheduler belongs to its caller and may also serve other read operations.
     with nullcontext(scheduler) if scheduler is not None else WorkScheduler() as work:
-        local_idx, cloud_idx = _build_indexes(cfg, local_dir, cloud_dir, scheduler=work)
+        local_idx, cloud_idx = _build_indexes(cfg, local_dir, cloud_dir, scheduler=work, cancellation=cancellation)
         manifest = load_manifest(
             cfg.state.manifest_file, cfg.state.data_version, machine_id=sync_machine_id(cfg)
         )
@@ -610,7 +618,10 @@ def build_context(
             delete_policy=cfg.sync.delete_policy,
             include_roots=cfg.targets.include_roots,
             scheduler=work,
+            cancellation=cancellation,
         )
+    if cancellation is not None:
+        cancellation.checkpoint()
     return AppContext(
         config=cfg,
         local_dir=local_dir,
@@ -2469,6 +2480,7 @@ def scan_session_transfer(
     scope: SessionScope | None = None,
     conflict_policy: str | None = None,
     direction: str | None = None,
+    cancellation: CancellationToken | None = None,
 ) -> TransferPlan:
     """Classify every session branch on both sides. Reads only.
 
@@ -2494,6 +2506,7 @@ def scan_session_transfer(
     local_catalog, remote_catalog = scan_both_sides(
         local_dir, cloud_dir, local_machine=source_machine, remote_machine=target_machine,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes, volatile=volatile, progress=progress,
+        cancellation=cancellation,
     )
     resolutions = load_branch_resolutions(resolutions_path) if resolutions_path else {}
     placements = read_thread_placements(local_dir)
@@ -2739,6 +2752,7 @@ def apply_session_transfer(
     origin: str | None = None,
     progress: Callable[[int, int], None] | None = None,
     phase_progress: ProgressCallback | None = None,
+    event_progress: ProgressEventCallback | None = None,
 ) -> int:
     """Apply one exact session transfer plan with Codex closed.
 
@@ -2838,7 +2852,10 @@ def apply_session_transfer(
         return _branches_written(copies)
 
     machine = cfg.identity.machine_id or platform.node()
-    with OperationLock(cfg.paths.temp_dir, state_root=local_dir, machine_id=machine, family="sessions"):
+    with (
+        OperationLock(cfg.paths.temp_dir, state_root=local_dir, machine_id=machine, family="sessions"),
+        ProgressLog(progress_log_dir(cfg.paths.temp_dir, local_dir), "sessions", event_progress) as events,
+    ):
         journals = JournalStore(cfg.paths.temp_dir)
         # The same numbers a settings sync records, so a history row can say
         # how many chats went each way (`to_cloud` is the mirror).
@@ -2867,6 +2884,7 @@ def apply_session_transfer(
             before_stage_check=lambda: gate.require(OperationKind.SESSION_APPLY),
             progress=progress,
             phase_progress=phase_progress,
+            progress_events=events,
         )
         try:
             engine.execute(copies, dry_run=False)
@@ -3070,6 +3088,7 @@ def _transfer_copy_actions(
                 # What the confirmed plan saw on the source side; staging
                 # refuses anything else (CS-515).
                 expected_sha256=(item.remote_sha256 if towards_local else item.local_sha256) or None,
+                session_hash=item.session_hash,
             )
         )
         if (
@@ -3086,6 +3105,7 @@ def _transfer_copy_actions(
             deletions.append(DeleteAction(
                 path=old_path, relative_path=old.relative_path,
                 side="local" if towards_local else "cloud",
+                session_hash=item.session_hash,
             ))
     return SyncPlan(to_local=to_local, to_cloud=to_cloud, deletions=deletions)
 
@@ -3290,10 +3310,20 @@ def sync_plan_counts(plan: SyncPlan) -> dict[str, int]:
     }
 
 
+def progress_events_folder(config_path: Path) -> Path | None:
+    """Locate the progress log folder without creating it."""
+    cfg = load_config(config_path)
+    return progress_log_dir(cfg.paths.temp_dir, locate_local_state_dir(cfg))
+
+
 def run_sync(
     ctx: AppContext, dry_run: bool, *, origin: str | None = None,
     progress: Callable[[int, int], None] | None = None,
     scheduler: WorkScheduler | None = None,
+    event_progress: ProgressEventCallback | None = None,
+    cancellation: CancellationToken | None = None,
+    finish_cancellation: bool = True,
+    on_commit: Callable[[], None] | None = None,
 ) -> None:
     """Apply (or dry-run) the plan in `ctx`.
 
@@ -3304,6 +3334,8 @@ def run_sync(
     # says: a policy that resolves one never leaves it here, and what is left
     # (equal times under `manual_abort`, a disputed or mass deletion, a case
     # collision) would otherwise be recorded as agreement (CS-295).
+    if cancellation is not None:
+        cancellation.checkpoint()
     if ctx.plan.conflicts:
         details = ", ".join(ctx.plan.conflicts)
         if not ctx.config.conflict.report_conflicts:
@@ -3325,19 +3357,21 @@ def run_sync(
             backup_before_overwrite=True,
             fail_on_unknown=True,
         ).execute(ctx.plan, dry_run=True)
+        if cancellation is not None:
+            cancellation.checkpoint()
+            cancellation.finish()
         return
 
     machine = ctx.config.identity.machine_id or platform.node()
-    with OperationLock(
-        ctx.config.paths.temp_dir,
-        state_root=ctx.local_dir,
-        machine_id=machine,
-        family="sync",
+    with (
+        OperationLock(ctx.config.paths.temp_dir, state_root=ctx.local_dir, machine_id=machine, family="sync") as lock,
+        ProgressLog(progress_log_dir(ctx.config.paths.temp_dir, ctx.local_dir), "sync", event_progress) as events,
     ):
         journals = JournalStore(ctx.config.paths.temp_dir)
+        roots_id = rollback_roots_id(ctx.local_dir, ctx.cloud_dir) if cancellation is not None else None
         journal = journals.begin(
             "sync",
-            _plan_hash(ctx.plan),
+            _plan_hash(ctx.plan, cancellation=cancellation),
             ctx.plan.action_count,
             backup_snapshot=mgr.snapshot_name,
             counts=sync_plan_counts(ctx.plan),
@@ -3351,7 +3385,16 @@ def run_sync(
 
         def pre_commit() -> None:
             ctx.safety_gate.require(OperationKind.SYNC, final=True)
+            if cancellation is not None:
+                cancellation.begin_commit()
+            if on_commit is not None:
+                on_commit()
             current[0] = journals.transition(current[0], JournalState.COMMITTING)
+
+        def before_replace() -> None:
+            if current[0].state == JournalState.BACKED_UP:
+                pre_commit()
+            ctx.safety_gate.require(OperationKind.SYNC, final=True)
 
         try:
             with nullcontext(scheduler) if scheduler is not None else WorkScheduler() as work:
@@ -3360,27 +3403,50 @@ def run_sync(
                     temp_dir=ctx.config.paths.temp_dir,
                     backup_before_overwrite=True,
                     fail_on_unknown=True,
-                    pre_commit_check=pre_commit,
-                    before_replace_check=lambda: ctx.safety_gate.require(OperationKind.SYNC, final=True),
+                    pre_commit_check=pre_commit if cancellation is None else None,
+                    before_replace_check=before_replace,
                     after_backup=after_backup,
                     before_stage_check=lambda: ctx.safety_gate.require(OperationKind.SYNC),
                     progress=progress,
                     scheduler=work,
                     stage_operation_id=journal.operation_id,
+                    progress_events=events,
+                    cancellation=cancellation,
                 )
                 engine.execute(ctx.plan, dry_run=False)
+            if current[0].state == JournalState.BACKED_UP:
+                pre_commit()  # no actions, but the handoff may have later phases
+            if cancellation is not None:
+                cancellation.complete_commit(finish=finish_cancellation)
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
+        except RollbackRequested as exc:
+            events.recovery_required = True
+            current[0] = journals.transition(
+                replace(current[0], rollback_files=tuple(engine.applied_files), rollback_roots=roots_id),
+                JournalState.RECOVERY_REQUIRED, failure=exc,
+            )
+            with lock.allow_nested_recovery(), scheduler.exclusive() if scheduler is not None else nullcontext():
+                rollback_applied_files(ctx.config, current[0], ctx.safety_gate, target=None, dry_run=False)
+            events.recovery_required = False
+            raise OperationRolledBack("Stopped by the user. The changed files were rolled back.") from None
         except Exception as exc:
             failure = (
                 JournalState.RECOVERY_REQUIRED
                 if current[0].state is JournalState.COMMITTING
                 else JournalState.FAILED
             )
+            events.recovery_required = failure == JournalState.RECOVERY_REQUIRED
+            if cancellation is not None and cancellation.finish() == CancellationState.ROLLING_BACK and events.recovery_required:
+                current[0] = replace(current[0], rollback_files=tuple(engine.applied_files), rollback_roots=roots_id)
             try:
-                current[0] = journals.transition(current[0], failure, failure=exc)
+                kwargs = {"failure_code": exc.code} if isinstance(exc, OperationCancelled) else {}
+                current[0] = journals.transition(current[0], failure, failure=exc, **kwargs)
             except Exception:
                 LOG.exception("Could not persist terminal mutation journal state")
             raise
+        finally:
+            if cancellation is not None and finish_cancellation:
+                cancellation.finish()
         # Every file is in place and the journal says so. Nothing after this
         # line may turn the run into a failure (CS-513): a rescan that hit a
         # file a cloud client was replacing made a finished sync
@@ -3637,6 +3703,7 @@ def _wait_for_delivery(
     monotonic: Callable[[], float],
     sleep: Callable[[float], None],
     on_wait: Callable[[Sequence[Delivery]], None] | None,
+    cancellation: CancellationToken | None = None,
 ) -> float:
     """Return once every pending handoff is in the cloud copy; the seconds waited.
 
@@ -3646,6 +3713,8 @@ def _wait_for_delivery(
     started = monotonic()
     wanted = handoff_wanted_keys(waiting)
     while True:
+        if cancellation is not None:
+            cancellation.checkpoint()
         current = fingerprints.files(cfg, wanted=wanted)
         late = [item for item in (delivery(record, current) for record in waiting) if not item.delivered]
         waited = monotonic() - started
@@ -3735,6 +3804,22 @@ def session_pair_name(source_machine: str, target_machine: str) -> str:
     return f"{_scope_file_safe(source_machine)}-{_scope_file_safe(target_machine)}"
 
 
+@contextmanager
+def _log_handoff_preparation_cancel(
+    cfg: AppConfig, progress: ProgressEventCallback | None,
+) -> Iterator[None]:
+    """Use the regular progress log when no settings operation was started."""
+    try:
+        yield
+    except OperationCancelled:
+        try:
+            folder = progress_log_dir(cfg.paths.temp_dir, locate_local_state_dir(cfg))
+        except (ConfigError, OSError):
+            folder = None
+        with ProgressLog(folder, "sync", progress):
+            raise
+
+
 def run_handoff(
     config_path: Path,
     *,
@@ -3746,9 +3831,11 @@ def run_handoff(
     sleep: Callable[[float], None] = time.sleep,
     on_wait: Callable[[Sequence[Delivery]], None] | None = None,
     progress: ProgressCallback | None = None,
+    event_progress: ProgressEventCallback | None = None,
     conflict_policy: str | None = None,
     direction: str | None = None,
     close_codex: bool = True,
+    cancellation: CancellationToken | None = None,
 ) -> HandoffResult:
     """One full sync with nobody deciding anything, then the handoff record.
 
@@ -3764,99 +3851,113 @@ def run_handoff(
     Other machines' handoffs are waited for first, up to ``wait_seconds``
     (``[handoff] delivery_wait_minutes``); loading half of one is how a file
     the cloud client was still writing would be copied into `.codex`.
+
+    The caller owns the lifetime of a supplied token. Use a token with
+    rollback disabled because settings and chats commit separately.
     """
     cfg = load_config(config_path)
-    root = _handoff_root(cfg)
-    machine = _handoff_machine(cfg)
-    _require_mutation_compatible_config(cfg)
-    # `[sync] close_codex` (D-029): asked once, never forced. The watcher
-    # passes ``close_codex=False`` -- it reacts to Codex closing and must
-    # never close it under someone who just opened it.
-    closed = close_codex_for_sync(config_path) if close_codex else None
-    # Waiting for the cloud is pointless while Codex is open: every write that
-    # follows would be refused anyway.
-    _make_safety_gate(cfg).require(OperationKind.SYNC)
+    with _log_handoff_preparation_cancel(cfg, event_progress):
+        if cancellation is not None:
+            cancellation.checkpoint()
+        root = _handoff_root(cfg)
+        machine = _handoff_machine(cfg)
+        _require_mutation_compatible_config(cfg)
+        # `[sync] close_codex` (D-029): asked once, never forced. The watcher
+        # passes ``close_codex=False`` -- it reacts to Codex closing and must
+        # never close it under someone who just opened it.
+        closed = close_codex_for_sync(config_path) if close_codex else None
+        # Waiting for the cloud is pointless while Codex is open: every write that
+        # follows would be refused anyway.
+        _make_safety_gate(cfg).require(OperationKind.SYNC)
 
-    board = read_board(root)
-    for name, reason in sorted(board.unreadable.items()):
-        LOG.warning("handoff file %s is not believed: %s", name, reason)
-    twin = board.case_twin(machine)
-    if twin is not None:
-        raise ConfigError(
-            handoff_case_twin_message(machine, twin),
-            code="MACHINE_ID_CASE_TWIN", params={"machine": machine, "other": twin},
-        )
-    pending = board.pending(machine)
-    fingerprints = Fingerprinter()
-    if wait_seconds is None:
-        wait_seconds = float(cfg.handoff.delivery_wait_minutes) * 60.0
-    waited = 0.0
-    if pending:
-        try:
-            waited = _wait_for_delivery(
-                cfg, pending, fingerprints, wait_seconds=wait_seconds, poll_seconds=poll_seconds,
-                monotonic=monotonic, sleep=sleep, on_wait=on_wait,
+        board = read_board(root)
+        for name, reason in sorted(board.unreadable.items()):
+            LOG.warning("handoff file %s is not believed: %s", name, reason)
+        twin = board.case_twin(machine)
+        if twin is not None:
+            raise ConfigError(
+                handoff_case_twin_message(machine, twin),
+                code="MACHINE_ID_CASE_TWIN", params={"machine": machine, "other": twin},
             )
-        except HandoffNotDelivered as exc:
-            if not accept_undelivered:
-                raise
-            LOG.warning("loading anyway, as asked: %s", exc)
+        pending = board.pending(machine)
+        fingerprints = Fingerprinter()
+        if wait_seconds is None:
+            wait_seconds = float(cfg.handoff.delivery_wait_minutes) * 60.0
+        waited = 0.0
+        if pending:
+            try:
+                waited = _wait_for_delivery(
+                    cfg, pending, fingerprints, wait_seconds=wait_seconds, poll_seconds=poll_seconds,
+                    monotonic=monotonic, sleep=sleep, on_wait=on_wait, cancellation=cancellation,
+                )
+            except HandoffNotDelivered as exc:
+                if not accept_undelivered:
+                    raise
+                LOG.warning("loading anyway, as asked: %s", exc)
 
-    # Chats first, and read-only: a decision found here stops the run before
-    # the settings sync has written anything.
-    source, plan, resolutions_path = _full_sync_chat_plan(
-        config_path, cfg, board, machine, pending, progress=progress, conflict_policy=conflict_policy,
-        direction=direction,
-    )
-    plans = _plans_dir(cfg)
-    pair = session_pair_name(source, machine)
-    if plan.volatile:
-        raise SafetyPreconditionError("Codex started while the chats were being read; nothing was written", code="CODEX_STARTED_DURING_READ")
-    # Exactly what the Sessions page lists under "needs a decision", and what
-    # the apply below would refuse: an archive move is applied (D-023), so it
-    # stops nothing (CS-349).
-    unresolved = [item for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS]
-    if unresolved:
-        rewrites = [
-            item for item in unresolved
-            if item.action is TransferAction.BLOCKED_CONFLICT and FORMAT_MIGRATION in item.codes
-        ]
-        held = sum(1 for item in rewrites if OLDER_FORMAT_HAS_LATER_RECORDS in item.codes)
-        raise ChatDecisionsNeeded(
-            source=source, target=machine,
-            format_migrations=len(rewrites) - held,
-            held_migrations=held,
-            divergences=sum(
-                1 for item in unresolved
-                if item.action is TransferAction.BLOCKED_CONFLICT and FORMAT_MIGRATION not in item.codes
-            ),
-            collisions=sum(1 for item in unresolved if item.action is TransferAction.BLOCKED_TARGET_COLLISION),
+        # Chats first, and read-only: a decision found here stops the run before
+        # the settings sync has written anything.
+        if cancellation is not None:
+            cancellation.checkpoint()
+        source, plan, resolutions_path = _full_sync_chat_plan(
+            config_path, cfg, board, machine, pending, progress=progress, conflict_policy=conflict_policy,
+            direction=direction, cancellation=cancellation,
         )
-    plan_path = plans / f"handoff-sessions-plan-{pair}.json"
-    save_transfer_plan(plan, plan_path)
+        if cancellation is not None:
+            cancellation.checkpoint()
+        plans = _plans_dir(cfg)
+        pair = session_pair_name(source, machine)
+        if plan.volatile:
+            raise SafetyPreconditionError("Codex started while the chats were being read; nothing was written", code="CODEX_STARTED_DURING_READ")
+        # Exactly what the Sessions page lists under "needs a decision", and what
+        # the apply below would refuse: an archive move is applied (D-023), so it
+        # stops nothing (CS-349).
+        unresolved = [item for item in plan.blocked_items if item.action in _UNRESOLVED_TRANSFER_BLOCKS]
+        if unresolved:
+            rewrites = [
+                item for item in unresolved
+                if item.action is TransferAction.BLOCKED_CONFLICT and FORMAT_MIGRATION in item.codes
+            ]
+            held = sum(1 for item in rewrites if OLDER_FORMAT_HAS_LATER_RECORDS in item.codes)
+            raise ChatDecisionsNeeded(
+                source=source, target=machine,
+                format_migrations=len(rewrites) - held,
+                held_migrations=held,
+                divergences=sum(
+                    1 for item in unresolved
+                    if item.action is TransferAction.BLOCKED_CONFLICT and FORMAT_MIGRATION not in item.codes
+                ),
+                collisions=sum(1 for item in unresolved if item.action is TransferAction.BLOCKED_TARGET_COLLISION),
+            )
+        plan_path = plans / f"handoff-sessions-plan-{pair}.json"
+        save_transfer_plan(plan, plan_path)
 
-    report_progress(progress, "sync_settings", 0, 0)
-    ctx = build_context(config_path, enforce_safety=True, conflict_policy=conflict_policy, direction=direction)
-    # Remember the handoff is owed before the first write to the cloud copy,
-    # and forget it only once the record says so: a run that fails after
-    # writing -- in the chats, a rescan, the record itself -- would otherwise
-    # leave work in the cloud that no handoff announces (CS-504).
-    owed = _handoff_owed_marker(cfg, machine)
-    will_write_cloud = bool(ctx.plan.to_cloud) or any(
-        transfer_direction(item) == "mirror" for item in plan.items
-    )
-    if will_write_cloud:
-        _remember_handoff_owed(owed)
+        report_progress(progress, "sync_settings", 0, 0)
+        ctx = build_context(
+            config_path, enforce_safety=True, conflict_policy=conflict_policy, direction=direction,
+            cancellation=cancellation,
+        )
+        # Remember the handoff is owed before the first write to the cloud copy,
+        # and forget it only once the record says so: a run that fails after
+        # writing -- in the chats, a rescan, the record itself -- would otherwise
+        # leave work in the cloud that no handoff announces (CS-504).
+        owed = _handoff_owed_marker(cfg, machine)
+        will_write_cloud = bool(ctx.plan.to_cloud) or any(
+            transfer_direction(item) == "mirror" for item in plan.items
+        )
     # "File 3 of 10" while each half writes (CS-339).
     run_sync(
         ctx, dry_run=False, origin=origin,
         progress=lambda done, total: report_progress(progress, "sync_settings", done, total),
+        event_progress=event_progress, cancellation=cancellation, finish_cancellation=False,
+        on_commit=(lambda: _remember_handoff_owed(owed)) if will_write_cloud else None,
     )
     report_progress(progress, "sync_chats", 0, 0)
     session_actions = apply_session_transfer(
         config_path, plan_path=plan_path, confirm_plan=plan.plan_id, resolutions_path=resolutions_path,
         origin=origin, progress=lambda done, total: report_progress(progress, "sync_chats", done, total),
         phase_progress=progress,
+        event_progress=event_progress,
     )
     # Projects, names and the catalogue come after both halves and are each
     # applied by the plan they build. Each is re-done by the next sync, so one
@@ -4015,6 +4116,7 @@ def _full_sync_chat_plan(
     progress: ProgressCallback | None,
     conflict_policy: str | None,
     direction: str | None = None,
+    cancellation: CancellationToken | None = None,
 ):
     """The chat plan a full sync applies: the pair, resolutions and working set it uses.
 
@@ -4032,7 +4134,7 @@ def _full_sync_chat_plan(
     plan = scan_session_transfer(
         config_path, source_machine=source, target_machine=machine,
         resolutions_path=resolutions_path, progress=progress, scope=scope,
-        conflict_policy=conflict_policy, direction=direction,
+        conflict_policy=conflict_policy, direction=direction, cancellation=cancellation,
     )
     return source, plan, resolutions_path
 

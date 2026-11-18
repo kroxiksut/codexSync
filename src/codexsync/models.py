@@ -315,6 +315,8 @@ class CopyAction:
     #: Destination identity captured by the ordinary sync planner. Specialised
     #: restore/session plans leave it unbound and retain their own checks.
     destination_precondition: DestinationPrecondition | None = None
+    #: Semantic transfers use a short reference in their progress log.
+    session_hash: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -365,6 +367,8 @@ class DeleteAction:
     #: Identity of the surviving file at plan time. An ordinary propagated
     #: deletion must not delete a replacement delivered before backup.
     destination_precondition: DestinationPrecondition | None = None
+    #: A semantic move's removal belongs to the same branch as its copy.
+    session_hash: str | None = None
 
 
 @dataclass

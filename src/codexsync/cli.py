@@ -4,9 +4,14 @@ import argparse
 import dataclasses
 import logging
 import json
+import os
+import signal
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from .app import (
     CONFLICT_POLICIES,
@@ -31,6 +36,7 @@ from .app import (
     check_project_files,
     handoff_status,
     run_handoff,
+    progress_events_folder,
     watch_handoff,
     AutomationRun,
     AutomationView,
@@ -102,10 +108,12 @@ from .config_locations import (
     standard_config_path,
 )
 from .exceptions import ConfigError, ConflictError, FailSafeError, SafetyPreconditionError
+from .cancellation import CancellationToken
 from .exit_codes import ExitCode
 from .guardian_inventory import read_guardian_inventory
 from .logging_setup import configure_logging
 from .state_locator import locate_local_state_dir
+from .progress import ProgressEvent
 from .models import AppConfig, LoggingConfig
 from .recovery import resume_operation, rollback_operation
 from .app import _UNRESOLVED_TRANSFER_BLOCKS
@@ -117,6 +125,47 @@ from .system_scheduler import BROKEN_TASK_CODES, FOREIGN_TASK, LEGACY_TASK, job_
 from .version import __version__
 
 LOG = logging.getLogger(__name__)
+
+
+@contextmanager
+def _sync_cancellation(*, allow_rollback: bool = True) -> Iterator[CancellationToken]:
+    """Turn console interrupts into a stop request at the next safe checkpoint."""
+    token = CancellationToken(allow_rollback=allow_rollback)
+    previous = {}
+
+    def stop(_signum, _frame) -> None:
+        token.signal_stop()
+
+    try:
+        if threading.current_thread() is threading.main_thread():
+            signals = [signal.SIGINT, signal.SIGTERM]
+            if hasattr(signal, "SIGBREAK"):
+                signals.append(signal.SIGBREAK)
+            for signum in signals:
+                handler = signal.getsignal(signum)
+                if handler is not None:
+                    signal.signal(signum, stop)
+                    previous[signum] = handler
+        try:
+            yield token
+        except KeyboardInterrupt:
+            # An embedded caller may raise KeyboardInterrupt directly, without
+            # ever delivering a console signal. Translate only a safe stop.
+            token.signal_stop()
+            token.checkpoint()
+            raise
+    finally:
+        token.finish()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def _log_transfer_progress(event: ProgressEvent) -> None:
+    if event.total is None:
+        count = str(event.completed)
+    else:
+        count = f"{event.completed}/{event.total}"
+    LOG.debug("%s %s %s %s", event.operation, event.phase, count, event.status)
 
 
 def safe_print(line: str) -> None:
@@ -1115,6 +1164,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     history.add_argument("--limit", type=int, default=20, help="Newest runs to show (default: 20; 0 = all)")
     history.add_argument("--json", action="store_true", dest="as_json", help="Machine-readable output")
+    history.add_argument("--progress-logs", action="store_true", help="List sync and session progress log files")
 
     codex = sub.add_parser(
         "codex", help="Check why Codex may not start or show its work, and repair what can be repaired",
@@ -1268,14 +1318,17 @@ def _run_full_sync(args: argparse.Namespace, config_path: Path) -> int:
         dry_run = False
     origin = "unattended" if args.unattended else "cli"
     if not dry_run:
-        _print_handoff_result(run_handoff(
-            config_path, origin=origin, conflict_policy=args.conflict_policy, direction=args.direction,
-            # Nobody watches an unattended run: it never asks Codex to quit (CS-446, D-029).
-            close_codex=not args.unattended,
-            on_wait=lambda late: print(
-                "Waiting for the cloud: " + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
-            ),
-        ))
+        with _sync_cancellation(allow_rollback=False) as cancellation:
+            result = run_handoff(
+                config_path, origin=origin, conflict_policy=args.conflict_policy, direction=args.direction,
+                event_progress=_log_transfer_progress, cancellation=cancellation,
+                # Nobody watches an unattended run: it never asks Codex to quit (CS-446, D-029).
+                close_codex=not args.unattended,
+                on_wait=lambda late: print(
+                    "Waiting for the cloud: " + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
+                ),
+            )
+        _print_handoff_result(result)
         return int(ExitCode.OK)
     preview = preview_full_sync(config_path, conflict_policy=args.conflict_policy, direction=args.direction)
     run_sync(preview.files, dry_run=True, origin=origin)
@@ -1790,6 +1843,42 @@ def _print_history(runs) -> None:
             f"{run.created_at_utc or '?'}  {run.family or '?'}  {state}  "
             f"origin={run.origin or '-'}  {changes}  backup={run.backup_snapshot or '-'}"
         )
+
+
+def _print_progress_logs(config_path: Path, args: argparse.Namespace) -> int:
+    folder = progress_events_folder(config_path)
+    entries = []
+    families = tuple(family for family in ("sync", "sessions") if args.family in {"all", family})
+    if folder is not None:
+        try:
+            with os.scandir(folder) as children:
+                for child in children:
+                    if (
+                        child.name.partition("-")[0] not in families
+                        or not child.name.endswith((".partial.jsonl", ".complete.jsonl"))
+                        or not child.is_file(follow_symlinks=False)
+                    ):
+                        continue
+                    try:
+                        entries.append((child.stat(follow_symlinks=False).st_mtime_ns, child.path))
+                    except FileNotFoundError:
+                        continue  # A partial log may have been published during the scan.
+        except FileNotFoundError:
+            pass
+    files = [path for _mtime, path in sorted(entries, reverse=True)]
+    if args.limit > 0:
+        files = files[:args.limit]
+    if args.as_json:
+        print(json.dumps({"folder": str(folder) if folder is not None else None, "files": files}))
+    elif folder is None:
+        print("Progress log folder unavailable.")
+    else:
+        safe_print(f"Progress log folder: {folder}")
+        if not files:
+            print("No progress logs recorded.")
+        for path in files:
+            safe_print(path)
+    return int(ExitCode.OK)
 
 
 #: Said wherever Codex is asked to rebuild its chat list (D-032).
@@ -2799,6 +2888,7 @@ def main(argv: list[str] | None = None) -> int:
                 resolutions_path=Path(args.resolutions).expanduser().resolve() if args.resolutions else None,
                 dry_run=args.dry_run,
                 origin="cli",
+                event_progress=_log_transfer_progress,
             )
             label = "Session transfer dry-run finished" if args.dry_run else "Session transfer finished"
             print(f"{label}. branches={written}")
@@ -3004,23 +3094,27 @@ def main(argv: list[str] | None = None) -> int:
             if args.handoff_command == "sync":
                 if args.wait_minutes is not None and args.wait_minutes < 0:
                     raise ConfigError("--wait-minutes must be 0 or more")
-                result = run_handoff(
-                    config_path,
-                    origin="cli",
-                    wait_seconds=None if args.wait_minutes is None else args.wait_minutes * 60.0,
-                    accept_undelivered=args.accept_undelivered,
-                    on_wait=lambda late: print(
-                        "Waiting for the cloud: "
-                        + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
-                    ),
-                    conflict_policy=args.conflict_policy, direction=args.direction,
-                )
+                with _sync_cancellation(allow_rollback=False) as cancellation:
+                    result = run_handoff(
+                        config_path,
+                        origin="cli",
+                        wait_seconds=None if args.wait_minutes is None else args.wait_minutes * 60.0,
+                        accept_undelivered=args.accept_undelivered,
+                        on_wait=lambda late: print(
+                            "Waiting for the cloud: "
+                            + ", ".join(f"{item.machine} {item.arrived}/{item.total}" for item in late)
+                        ),
+                        conflict_policy=args.conflict_policy, direction=args.direction,
+                        event_progress=_log_transfer_progress, cancellation=cancellation,
+                    )
                 _print_handoff_result(result)
                 return int(ExitCode.OK)
             watch_handoff(config_path)
             return int(ExitCode.OK)
 
         if args.command == "history":
+            if args.progress_logs:
+                return _print_progress_logs(config_path, args)
             runs = list_history(
                 config_path,
                 family=None if args.family == "all" else args.family,
@@ -3063,16 +3157,20 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run = True
             else:
                 dry_run = load_config(config_path).sync.dry_run_default
-            # An unattended run never asks Codex to quit (CS-446, D-029).
-            if not dry_run and not args.unattended and close_codex_for_sync(config_path):
-                print("Codex was open and quit when asked ([sync] close_codex).")
-            ctx = build_context(
-                config_path,
-                manual_terminate_confirmation_override=args.manual_terminate_confirmation_override,
-                enforce_safety=True,
-                conflict_policy=args.conflict_policy, direction=args.direction,
-            )
-            run_sync(ctx, dry_run=dry_run, origin="unattended" if args.unattended else "cli")
+            with _sync_cancellation() as cancellation:
+                # An unattended run never asks Codex to quit (CS-446, D-029).
+                if not dry_run and not args.unattended and close_codex_for_sync(config_path):
+                    print("Codex was open and quit when asked ([sync] close_codex).")
+                ctx = build_context(
+                    config_path,
+                    manual_terminate_confirmation_override=args.manual_terminate_confirmation_override,
+                    enforce_safety=True, cancellation=cancellation,
+                    conflict_policy=args.conflict_policy, direction=args.direction,
+                )
+                run_sync(
+                    ctx, dry_run=dry_run, origin="unattended" if args.unattended else "cli",
+                    event_progress=_log_transfer_progress, cancellation=cancellation,
+                )
             print("Sync finished." if not dry_run else "Dry-run finished.")
             return int(ExitCode.OK)
 

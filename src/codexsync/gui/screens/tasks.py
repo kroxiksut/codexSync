@@ -4,23 +4,26 @@ Opened from the status bar's *Tasks…*. It draws `MainWindow.jobs()` and keeps
 nothing of its own, so closing it loses nothing and two ways of looking at the
 same work -- the status bar and this list -- cannot disagree.
 
-A read can be stopped here, one at a time, exactly as the status bar's *Stop
-waiting* stops all of them: the window drops its result, and the read itself,
-which changes nothing, runs to its end unobserved. A job that may write has no
-such button. A write that is merely no longer watched has not stopped, and a
-button saying otherwise would be the one lie this window must not tell.
+Stop waiting drops a read's result. Cooperative Stop requests cancellation
+and keeps the job visible until the worker reports its outcome.
 """
 from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
-from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QHeaderView, QPushButton, QTableView, QVBoxLayout
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QHeaderView, QHBoxLayout,
+    QPushButton, QTableView, QVBoxLayout, QWidget,
+)
 
 from ..widgets import Cell, fill_table, label, table
 from ..task_items import task_rows
 from ...app import JournalState
+from ...cancellation import CancellationState
+from ...progress_log import progress_record
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..window import MainWindow
@@ -107,12 +110,48 @@ class TasksDialog(QDialog):
         self.items_view.horizontalHeader().setStretchLastSection(True)
         self._layout.addWidget(self.items_view, stretch=2)
 
+        toggle_events = QPushButton(self.t("tasks.events.title"))
+        toggle_events.setCheckable(True)
+        self._layout.addWidget(toggle_events)
+        event_panel = QWidget()
+        event_layout = QVBoxLayout(event_panel)
+        event_layout.setContentsMargins(0, 0, 0, 0)
+        controls = QHBoxLayout()
+        self.events_filter = QComboBox()
+        for value in ("all", "errors", "applied", "pending"):
+            self.events_filter.addItem(self.t(f"tasks.events.filter.{value}"), value)
+        controls.addWidget(self.events_filter)
+        self.copy_events = QPushButton(self.t("tasks.events.copy"))
+        self.copy_events.clicked.connect(self._copy_events)
+        controls.addWidget(self.copy_events)
+        open_events = QPushButton(self.t("tasks.events.open"))
+        open_events.clicked.connect(self._open_events)
+        controls.addWidget(open_events)
+        event_layout.addLayout(controls)
+        self.events_model = _EventsModel(self)
+        self.events_proxy = _EventsFilter(self)
+        self.events_proxy.setSourceModel(self.events_model)
+        self.events_filter.currentIndexChanged.connect(self._filter_events)
+        events_view = QTableView()
+        events_view.setModel(self.events_proxy)
+        events_view.horizontalHeader().setStretchLastSection(True)
+        event_layout.addWidget(events_view)
+        self.events_status = label("", "muted", wrap=True)
+        event_layout.addWidget(self.events_status)
+        self._layout.addWidget(event_panel, stretch=2)
+        event_panel.setVisible(False)
+        toggle_events.toggled.connect(event_panel.setVisible)
+        self._event_revision = -1
+
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.button(QDialogButtonBox.Close).setText(self.t("common.close"))
         buttons.rejected.connect(self.reject)
         self._layout.addWidget(buttons)
         #: token -> the row's stop button, rebuilt with the rows.
         self.stop_buttons: dict[Any, QPushButton] = {}
+        self.finish_buttons: dict[Any, QPushButton] = {}
+        self.rollback_buttons: dict[Any, QPushButton] = {}
+        self._controls: dict[Any, QWidget] = {}
         self._drawn_tokens: list[Any] | None = None
         self.render()
 
@@ -178,9 +217,34 @@ class TasksDialog(QDialog):
         self.items_proxy.category = self.items_filter.currentData()
         self.items_proxy.invalidateFilter()
 
+    def _filter_events(self) -> None:
+        self.events_proxy.category = self.events_filter.currentData()
+        self.events_proxy.invalidate()
+
+    def _copy_events(self) -> None:
+        QApplication.clipboard().setText("".join(progress_record(event) + "\n" for event in self.events_model.rows))
+
+    def _open_events(self) -> None:
+        read = getattr(self.host.controller, "progress_logs", None)
+        if read is None:
+            return
+
+        def done(outcome) -> None:
+            path = outcome.value if outcome.ok else None
+            if path is not None and path.is_dir() and QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                self.events_status.clear()
+            else:
+                self.events_status.setText(self.t("tasks.events.unavailable"))
+
+        self.host._jobs.start(read, done)
+
     def render(self) -> None:
         host = self.host
         book = host.jobs()
+        if self._event_revision != book.events_revision:
+            self.events_model.set_rows(tuple(book.events))
+            self.copy_events.setEnabled(bool(book.events))
+            self._event_revision = book.events_revision
         palette = host.palette()
         running = list(book.running.items())
         transfer_running = any(job.kind == "full_sync" for _token, job in running)
@@ -212,21 +276,48 @@ class TasksDialog(QDialog):
                 for _token, job in running
             ], palette)
             self.stop_buttons = {}
-            width = 0
+            self.finish_buttons = {}
+            self.rollback_buttons = {}
+            self._controls = {}
             for index, (token, job) in enumerate(running):
-                if not job.cancellable:
+                if not job.cancellable and job.cancellation is None:
                     continue
-                stop = QPushButton(self.t("activity.cancel"))
+                cell = QWidget()
+                controls = QHBoxLayout(cell)
+                controls.setContentsMargins(2, 0, 2, 0)
+                stop = QPushButton(self.t("activity.cancel" if job.cancellable else "tasks.cancellation.stop"))
                 stop.setObjectName("statusAction")
                 stop.clicked.connect(lambda _=False, token=token: self.host.cancel_job(token))
-                self.running.setCellWidget(index, STOP_COLUMN, stop)
+                controls.addWidget(stop)
+                self.running.setCellWidget(index, STOP_COLUMN, cell)
                 self.running.setRowHeight(index, max(self.running.rowHeight(index), stop.sizeHint().height() + 4))
                 self.stop_buttons[token] = stop
-                width = max(width, stop.sizeHint().width() + 12)
-            self.running.setColumnWidth(STOP_COLUMN, width)
-        for index, (_token, job) in enumerate(running):
+                self._controls[token] = cell
+                if job.cancellation is not None:
+                    finish = QPushButton(self.t("tasks.cancellation.finish"))
+                    finish.clicked.connect(self.accept)
+                    controls.addWidget(finish)
+                    self.finish_buttons[token] = finish
+        width = 0
+        for index, (token, job) in enumerate(running):
+            cell = self._controls.get(token)
+            if job.cancellation is not None:
+                state = job.cancellation.state
+                self.stop_buttons[token].setEnabled(state == CancellationState.PREPARING)
+                self.finish_buttons[token].setVisible(state == CancellationState.COMMITTING)
+                rollback = self.rollback_buttons.get(token)
+                if job.cancellation.can_rollback and rollback is None:
+                    rollback = QPushButton(self.t("tasks.cancellation.rollback"))
+                    rollback.clicked.connect(lambda _=False, token=token: self._confirm_rollback(token))
+                    cell.layout().addWidget(rollback)
+                    self.rollback_buttons[token] = rollback
+                if rollback is not None:
+                    rollback.setVisible(job.cancellation.can_rollback)
+            if cell is not None:
+                width = max(width, cell.sizeHint().width() + 4)
             self._set(index, ELAPSED_COLUMN, self.duration(book.seconds(job)))
             self._set(index, PROGRESS_COLUMN, host.job_progress_text(job) or self.t("tasks.progress.none"))
+        self.running.setColumnWidth(STOP_COLUMN, width)
         self.running_empty.setText("" if running else self.t("tasks.running.none"))
         self.running_empty.setVisible(not running)
 
@@ -244,6 +335,14 @@ class TasksDialog(QDialog):
         self.recent_empty.setText("" if recent else self.t("tasks.recent.none"))
         self.recent_empty.setVisible(not recent)
 
+    def _confirm_rollback(self, token: Any) -> None:
+        if self.host.confirm(
+            self.t("tasks.cancellation.rollback"),
+            self.t("tasks.cancellation.confirm_rollback"),
+            self.t("tasks.cancellation.rollback"),
+        ):
+            self.host.rollback_job(token)
+
     def _set(self, row: int, column: int, text: str) -> None:
         item = self.running.item(row, column)
         if item is not None and item.text() != text:
@@ -260,6 +359,10 @@ class TasksDialog(QDialog):
             return self.t("tasks.result.abandoned"), "attention"
         if job.failure is None:
             return self.t("tasks.result.done"), "ok"
+        if job.code == "OPERATION_CANCELLED":
+            return self.t("tasks.events.status.cancelled"), "attention"
+        if job.code == "OPERATION_ROLLED_BACK":
+            return self.t("tasks.events.status.rolled_back"), "attention"
         text = self.t(f"failure.{job.failure.value}")
         if job.progress:
             text += " — " + self.host.phase_text(job.progress)
@@ -311,3 +414,49 @@ class _ItemsFilter(QSortFilterProxyModel):
         if self.category == "not_applied":
             return state != "applied"
         return state == self.category
+
+
+class _EventsModel(QAbstractTableModel):
+    _columns = ("time", "phase", "direction", "object", "bytes", "result")
+
+    def __init__(self, dialog: TasksDialog) -> None:
+        super().__init__(dialog)
+        self.dialog = dialog
+        self.rows = ()
+
+    def set_rows(self, rows) -> None:
+        self.beginResetModel()
+        self.rows = rows
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.rows)
+
+    def columnCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._columns)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or role not in (Qt.DisplayRole, Qt.ToolTipRole):
+            return None
+        row = self.rows[index.row()]
+        return (
+            _clock(row.at) if row.at is not None else "—",
+            self.dialog.t(f"progress.phase.{row.phase}"),
+            self.dialog.t(f"tasks.events.direction.{row.direction}") if row.direction else "—",
+            row.item_id or row.relative_path or "—",
+            str(row.item_bytes) if row.item_bytes is not None else "—",
+            self.dialog.t(f"tasks.events.status.{row.status}"),
+        )[index.column()]
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            return self.dialog.t(f"tasks.events.column.{self._columns[section]}")
+        return None
+
+
+class _EventsFilter(QSortFilterProxyModel):
+    category = "all"
+
+    def filterAcceptsRow(self, row, parent) -> bool:
+        status = self.sourceModel().rows[row].status
+        return self.category == "all" or status == ("failed" if self.category == "errors" else self.category)

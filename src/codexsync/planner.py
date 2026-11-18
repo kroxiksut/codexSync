@@ -14,6 +14,7 @@ from .models import (
     SyncPlan,
 )
 from .work_scheduler import WorkScheduler
+from .cancellation import CancellationToken
 
 #: Directions a plan may be built for (`D-012`).
 DIRECTIONS = ("bidirectional", "to_cloud", "to_local")
@@ -34,6 +35,7 @@ def build_sync_plan(
     include_roots: Sequence[str] = (),
     *,
     scheduler: WorkScheduler | None = None,
+    cancellation: CancellationToken | None = None,
 ) -> SyncPlan:
     """Build the copy plan, with conflict detection.
 
@@ -70,9 +72,11 @@ def build_sync_plan(
         def compare(rel: str) -> tuple[str, bool]:
             return rel, _same_content(local_index[rel].abs_path, cloud_index[rel].abs_path)
 
-        same_content = dict(scheduler.map_read(compare, ambiguous, large_file=lambda _rel: True))
+        same_content = dict(scheduler.map_read(compare, ambiguous, large_file=lambda _rel: True, cancellation=cancellation))
 
     for rel in all_paths:
+        if cancellation is not None:
+            cancellation.checkpoint()
         if rel in case_collisions:
             continue
         local_meta = local_index.get(rel)

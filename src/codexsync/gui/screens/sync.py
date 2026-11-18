@@ -31,6 +31,7 @@ from datetime import datetime
 
 from PySide6.QtWidgets import QCheckBox, QComboBox, QLineEdit, QTabWidget
 
+from ...cancellation import CancellationToken
 from ..controller import Failure, Outcome
 from ..widgets import Banner, Cell, button, card, fill_table, label, row, set_tone, table
 from .base import Model, Screen
@@ -335,8 +336,10 @@ class SyncScreen(Screen):
         # called "Synchronise" that left the chats and the project list behind
         # is how a laptop ended up with its own sidebar after a sync.
         self.host.run(
-            self.page, lambda progress=None: controller.handoff_now(progress=progress, direction=direction),
-            apply, progress=True, kind="full_sync",
+            self.page, lambda progress=None, cancellation=None: controller.handoff_now(
+                progress=progress, direction=direction, cancellation=cancellation,
+            ),
+            apply, progress=True, kind="full_sync", cancellation=CancellationToken(allow_rollback=False),
         )
 
     def decide(self, policy: str) -> None:
@@ -366,7 +369,7 @@ class SyncScreen(Screen):
         #: Did `remember_conflict_policy` write the file (CS-481)?
         written = [False]
 
-        def go(progress=None) -> Outcome:
+        def go(progress=None, cancellation=None) -> Outcome:
             if remember:
                 saved = controller.remember_conflict_policy(policy)
                 if not saved.ok:
@@ -374,6 +377,7 @@ class SyncScreen(Screen):
                 written[0] = saved.value is True
             return controller.handoff_now(
                 progress=progress, conflict_policy=policy, direction=self.model.run_direction or None,
+                cancellation=cancellation,
             )
 
         def apply(model: SyncModel, outcome: Outcome) -> None:
@@ -389,7 +393,10 @@ class SyncScreen(Screen):
                 model.result = outcome
                 model.run_kind = "apply"
 
-        self.host.run(self.page, go, apply, progress=True, kind="full_sync")
+        self.host.run(
+            self.page, go, apply, progress=True, kind="full_sync",
+            cancellation=None if remember else CancellationToken(allow_rollback=False),
+        )
 
     def open_decisions(self) -> None:
         """Go to the chats the stopped sync named, for the pair it was syncing."""
