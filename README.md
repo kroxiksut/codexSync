@@ -13,6 +13,7 @@
 <p align="center">
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
+  <a href="https://hub.xerj.org/contributors/kroxiksut"><img src="https://hub.xerj.org/contributors/kroxiksut/badge.svg" alt="XERJ Corpus Hub contributor"></a>
   <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platform: Windows | macOS | Linux">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Runtime dependencies: 0">
@@ -97,21 +98,24 @@ subcommands. Windows 10 (1809) or later.
 **With Node.js**, on Windows or Linux:
 `npm install -g @kroxut/codexsync` ([installing with npm](docs/en/README.md#install)).
 
-**With Python 3.11+**, on Windows, macOS or Linux — `--upgrade` so that an
-installed 0.1 is replaced too. On macOS every read and plan works, but writes are refused
-until the process detector is proven there; on Linux it has been
+**With Python 3.11+**, on Windows, macOS or Linux, use `--pre` to install the
+0.2 alpha and `--upgrade` to replace an earlier installation. On macOS every
+read and plan works, but writes are refused until the process detector is
+proven there. On Linux it has been proven
 ([platforms](docs/en/README.md#platforms)). On Linux the system Python refuses
 `pip install` (PEP 668): use `pipx` or a virtual environment — both, with
 updating and removing, in [installing on Linux](docs/en/README.md#on-linux).
 
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"    # the window and the command line
+python -m pip install --upgrade --pre "codexsync[gui]"    # the window and the command line
 codexsync-gui                                       # on first launch, the window helps you create or open config.toml
 
-python -m pip install --upgrade codexsync           # the command line only, no dependencies
+python -m pip install --upgrade --pre codexsync           # the command line only, no dependencies
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
+
+For the stable 0.1 CLI, use `python -m pip install --upgrade "codexsync<0.2"`.
 
 From source, and the first run step by step:
 [installing and getting started](docs/en/README.md#install).
@@ -136,7 +140,7 @@ Every page in one place: [docs/](docs/README.md). For contributors:
 
 ## Status
 
-**0.2.0** — the first stable release with the window (`codexsync[gui]` or
+**0.2.0a2** — the second alpha of 0.2, with a window (`codexsync[gui]` or
 `codexsync-gui.exe`) next to the command line, and the first with packages for
 Linux and npm. 0.2 understands and changes far more of Codex's state than 0.1, and every
 write goes through the lock, journal and verified backup. If you use Codex on

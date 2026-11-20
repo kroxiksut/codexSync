@@ -24,8 +24,10 @@ says.
 
 *Nothing is replaced until the new copy is proven.* The archive is written as
 ``<name>.zip.partial``, every entry is read back and hashed against the source,
-and only then renamed to its final name. Old copies are pruned after that and
-only by the exact name pattern this module writes, and only this machine's.
+and only then renamed to its final name. The selected files must still have
+the same identities and metadata before publication. Old copies are pruned
+after that, only by the exact name pattern this module writes, and only this
+machine's.
 
 *Read-only towards `.codex`.* Nothing here opens a file in the state directory
 for writing, creates one there, or runs SQLite against it: a database is
@@ -165,7 +167,11 @@ def select_state_files(state_dir: Path) -> list[tuple[str, Path]]:
     holds junctions into folders outside it. A folder that cannot be listed
     fails the copy rather than leaving a silent hole in it.
     """
-    chosen: dict[str, Path] = {}
+    return [(relative, path) for relative, (path, _) in _select_state_files(state_dir).items()]
+
+
+def _select_state_files(state_dir: Path) -> dict[str, tuple[Path, os.stat_result]]:
+    chosen: dict[str, tuple[Path, os.stat_result]] = {}
     try:
         top = sorted(state_dir.iterdir(), key=lambda item: item.name)
     except OSError as exc:
@@ -181,7 +187,7 @@ def select_state_files(state_dir: Path) -> list[tuple[str, Path]]:
             continue
         if stat.S_ISREG(info.st_mode):
             if not is_native_program(entry):
-                chosen[name] = entry
+                chosen[name] = entry, info
             continue
         if not stat.S_ISDIR(info.st_mode):
             continue
@@ -203,8 +209,8 @@ def select_state_files(state_dir: Path) -> list[tuple[str, Path]]:
                 # A program is reinstalled, never restored from a copy (D-021).
                 if is_native_program(path):
                     continue
-                chosen[relative] = path
-    return sorted(chosen.items())
+                chosen[relative] = path, info
+    return dict(sorted(chosen.items()))
 
 
 def _lstat(path: Path) -> os.stat_result:
@@ -323,25 +329,48 @@ def _wait_until_closed(
         sleep(poll_seconds)
 
 
-def _copy_into(archive: zipfile.ZipFile, relative: str, source: Path) -> tuple[str, int]:
+def _identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns
+
+
+def _state_changed(relative: str) -> FailSafeError:
+    return FailSafeError(f"{relative} changed during the copy; no copy was kept", code="STATE_CHANGED_RETRY")
+
+
+def _require_unchanged(relative: str, expected: os.stat_result, current: os.stat_result) -> None:
+    if _identity(expected) != _identity(current) or expected.st_ctime_ns != current.st_ctime_ns:
+        raise _state_changed(relative)
+
+
+def _copy_into(
+    archive: zipfile.ZipFile, relative: str, source: Path, expected: os.stat_result
+) -> tuple[str, int]:
     """Stream one file into the archive; its sha256 and size as read.
 
     The file must look the same before and after: a writer that touched it in
     between means this copy is not a copy of any one moment.
     """
-    before = source.stat()
+    before = source.lstat()
+    _require_unchanged(relative, expected, before)
+    if is_link(source, before):
+        raise _state_changed(relative)
     digest = hashlib.sha256()
     size = 0
     with source.open("rb") as handle, archive.open(
         relative, "w", force_zip64=before.st_size >= _ZIP64_FROM
     ) as target:
+        opened = os.fstat(handle.fileno())
+        # On Windows path stat and handle stat can report different ctimes.
+        if _identity(opened) != _identity(before):
+            raise _state_changed(relative)
         for chunk in iter(lambda: handle.read(_CHUNK), b""):
             digest.update(chunk)
             target.write(chunk)
             size += len(chunk)
-    after = source.stat()
-    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or size != after.st_size:
-        raise FailSafeError(f"{relative} changed while it was being copied; no copy was kept", code="STATE_CHANGED_RETRY")
+        _require_unchanged(relative, opened, os.fstat(handle.fileno()))
+    _require_unchanged(relative, before, source.lstat())
+    if size != before.st_size:
+        raise _state_changed(relative)
     return digest.hexdigest(), size
 
 
@@ -408,7 +437,7 @@ def create_state_backup(
     root.mkdir(parents=True, exist_ok=True)
     with OperationLock(cfg.paths.temp_dir, state_root=state_dir, machine_id=machine, family="state-backup"):
         _sweep_partials(root, machine)
-        files = select_state_files(state_dir)
+        files = _select_state_files(state_dir)
         if not files:
             raise FailSafeError(f"Nothing to copy: {state_dir} holds none of the files a copy takes", code="NOTHING_TO_COPY")
         created = now()
@@ -421,17 +450,13 @@ def create_state_backup(
         total = 0
         LOG.info("Copying %d files of the Codex state into %s", len(files), final)
         try:
-            with zipfile.ZipFile(partial, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-                for index, (relative, source) in enumerate(files):
+            with zipfile.ZipFile(partial, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+                for index, (relative, (source, expected)) in enumerate(files.items()):
                     report(progress, "state_backup", index, len(files))
                     try:
-                        digest, size = _copy_into(archive, relative, source)
-                    except FileNotFoundError:
-                        # Gone between the listing and the read: with Codex
-                        # closed that is a file something else removed. The
-                        # copy describes what was there when it was read.
-                        LOG.warning("Skipped %s: it disappeared before it was copied", relative)
-                        continue
+                        digest, size = _copy_into(archive, relative, source, expected)
+                    except FileNotFoundError as exc:
+                        raise _state_changed(relative) from exc
                     except PermissionError as exc:
                         raise FailSafeError(f"Cannot read {relative}: {exc}; no copy was kept") from exc
                     entries.append({"path": relative, "size": size, "sha256": digest})
@@ -450,10 +475,18 @@ def create_state_backup(
             _verify(partial, entries)
             with partial.open("rb+") as handle:
                 os.fsync(handle.fileno())
-            # The last word belongs to the gate: a Codex that opened during the
-            # copy may have written after a file was read.
-            gate.require(OperationKind.STATE_BACKUP, final=True)
-            replace_with_retry(partial, final)
+
+            def check_before_commit() -> None:
+                current = _select_state_files(state_dir)
+                changed_paths = files.keys() ^ current.keys()
+                if changed_paths:
+                    raise _state_changed(min(changed_paths))
+                for relative, (_, original) in files.items():
+                    _require_unchanged(relative, original, current[relative][1])
+                gate.require(OperationKind.STATE_BACKUP, final=True)
+
+            check_before_commit()
+            replace_with_retry(partial, final, before_retry=check_before_commit)
         except BaseException:
             partial.unlink(missing_ok=True)
             raise

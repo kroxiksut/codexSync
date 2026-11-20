@@ -9,8 +9,10 @@ backup, and both branches survive every refusal.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
+from threading import Barrier, BrokenBarrierError, Lock
 import textwrap
 import unittest
 from unittest.mock import patch
@@ -142,6 +144,23 @@ class SessionTransferApplyTests(unittest.TestCase):
             )
 
     # --- the happy path ---------------------------------------------------
+
+    def test_cache_is_published_only_after_successful_apply(self) -> None:
+        self._branch(self.local_dir, "s1", ["one"])
+        remote = self._branch(self.cloud_dir, "s1", ["one"])
+        cache = self.root / "machine-cache"
+        with patch("codexsync.app.cache_dir", return_value=cache):
+            plan = self._plan()
+            self.assertFalse(cache.exists())
+            self.assertEqual(self._apply(plan, dry_run=True), 0)
+            self.assertFalse(cache.exists())
+            self._branch(self.cloud_dir, "s1", ["one", "two"])
+            with self.assertRaises(FailSafeError):
+                self._apply(plan)
+            self.assertFalse(cache.exists())
+            shutil.copyfile(self.local_dir / "sessions" / remote.name, remote)
+            self.assertEqual(self._apply(plan), 0)
+            self.assertEqual(len(list(cache.rglob("*.json"))), 1)
 
     def test_a_fast_forward_replaces_the_ancestor_whole(self) -> None:
         self._branch(self.local_dir, "s1", ["one"])
@@ -518,9 +537,9 @@ class SessionTransferApplyTests(unittest.TestCase):
         plan = self._plan()
         from codexsync.app import _verify_transferred_branches
 
-        def corrupt_then_verify(*args):
+        def corrupt_then_verify(*args, **kwargs):
             local.write_text("corrupt", encoding="utf-8")
-            return _verify_transferred_branches(*args)
+            return _verify_transferred_branches(*args, **kwargs)
 
         with patch("codexsync.app._verify_transferred_branches", new=corrupt_then_verify):
             with self.assertRaises(FailSafeError):
@@ -529,20 +548,85 @@ class SessionTransferApplyTests(unittest.TestCase):
         self.assertEqual(journal.failure_code, "TRANSFER_READBACK_MISMATCH")
         self.assertEqual(journal.failure_params["relative_path"], "sessions/s1.jsonl")
 
-    def test_failed_immediate_verification_counts_the_file_already_replaced(self) -> None:
+    def test_semantic_readback_checks_overlap_but_commit_remains_complete(self) -> None:
+        """Many cloud files must not pay their read-back latency one by one."""
+        for name in ("s1", "s2", "s3"):
+            self._branch(self.local_dir, name, ["one"])
+            self._branch(self.cloud_dir, name, ["one", "two"])
+        plan = self._plan()
+        from codexsync import app
+
+        real_open = app.open_jsonl
+        rendezvous = Barrier(2)
+        lock = Lock()
+        active = maximum = 0
+
+        @contextmanager
+        def delayed_open(path):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            try:
+                try:
+                    rendezvous.wait(timeout=0.5)
+                except BrokenBarrierError:
+                    pass
+                with real_open(path) as handle:
+                    yield handle
+            finally:
+                with lock:
+                    active -= 1
+
+        with patch.object(app, "open_jsonl", new=delayed_open):
+            self.assertEqual(self._apply(plan), 3)
+        self.assertGreaterEqual(maximum, 2)
+
+    def test_serial_commit_does_not_rehash_cloud_payloads_before_record_readback(self) -> None:
+        self._branch(self.local_dir, "s1", ["one"])
+        self._branch(self.cloud_dir, "s1", ["one", "two"])
+        plan = self._plan()
+        from codexsync import sync_engine
+        from codexsync.sync_engine import SyncEngine
+
+        real_replace = SyncEngine._replace_with_retry
+        real_hash = sync_engine._sha256_file
+        commit_started = False
+        commit_hashes = []
+
+        def replace(engine, *args, **kwargs):
+            nonlocal commit_started
+            commit_started = True
+            return real_replace(engine, *args, **kwargs)
+
+        def digest(path):
+            if commit_started:
+                commit_hashes.append(path)
+            return real_hash(path)
+
+        with patch.object(SyncEngine, "_replace_with_retry", new=replace), patch.object(
+            sync_engine, "_sha256_file", new=digest,
+        ):
+            self.assertEqual(self._apply(plan), 1)
+        self.assertEqual(commit_hashes, [])
+
+    def test_failed_deferred_verification_counts_the_file_already_replaced(self) -> None:
         local = self._branch(self.local_dir, "s1", ["one"])
         self._branch(self.cloud_dir, "s1", ["one", "two"])
         plan = self._plan()
-        from codexsync.sync_engine import _sha256_file
+        from codexsync.sync_engine import SyncEngine
+        real_replace = SyncEngine._replace_staged
 
-        def mismatched(path):
-            return "bad-hash" if path == local else _sha256_file(path)
+        def corrupt_after_replace(engine, *args, **kwargs):
+            result = real_replace(engine, *args, **kwargs)
+            local.write_text("corrupt", encoding="utf-8")
+            return result
 
-        with patch("codexsync.sync_engine._sha256_file", new=mismatched):
+        with patch.object(SyncEngine, "_replace_staged", new=corrupt_after_replace):
             with self.assertRaises(FailSafeError):
                 self._apply(plan)
         (journal,) = JournalStore(self.root / ".tmp").non_terminal()
-        self.assertEqual(journal.failure_code, "DESTINATION_VERIFY_FAILED")
+        self.assertEqual(journal.failure_code, "TRANSFER_READBACK_MISMATCH")
         self.assertEqual(journal.failure_params["applied"], 1)
 
     def test_operating_system_failure_records_errno_without_private_message(self) -> None:

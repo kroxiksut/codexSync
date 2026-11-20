@@ -30,8 +30,9 @@ journal and verified backup, and none happens while Codex is open.
   backup, and more — see *Fixed* below.
 
 **Install**
-- `python -m pip install --upgrade "codexsync[gui]"` — the same command
-  installs it fresh or replaces 0.1 or the alpha.
+- `python -m pip install --upgrade --pre "codexsync[gui]"` installs the
+  pre-release or upgrades an earlier installation. For the stable 0.1 CLI,
+  use `python -m pip install --upgrade "codexsync<0.2"`.
 - Windows builds, no Python needed: `codexsync-gui-<tag>-windows-amd64.zip` or
   `-arm64.zip` (the window, which also runs every command) and
   `codexsync-<tag>-windows-amd64|arm64.zip` (the command line only).
@@ -50,10 +51,13 @@ experimental, as Codex for Linux is itself a preview (`D-031`). Some Codex
 behaviours are deliberately left unused until an experiment records them:
 [what is not proven yet](https://github.com/kroxiksut/codexSync/blob/main/docs/en/README.md#what-is-not-proven-yet).
 
-**Validation.** On Windows, 2026-10-25, Codex 26.1021: with Codex open every
-write is refused and nothing changes; with Codex closed a sync writes after a
-verified backup and its journal ends committed; an interrupted write is
-recovered from the console and from the Recovery page.
+**Validation.** For this alpha candidate, the Windows safety and recovery
+checks (scenarios 1–3) are pending. Scenarios 4–10 (config upgrade, handoff,
+chat visibility and names, projects, conflicts, and asking Codex to quit)
+are also pending. Earlier builds had Windows safety and recovery checks, a
+partial 0.1 config upgrade, and an Ubuntu exercise of scenarios 5–10 using
+two Codex homes on one laptop. The checklist records the scope of those runs.
+[Publishing checklist](https://github.com/kroxiksut/codexSync/blob/main/docs/dev/PUBLISHING.md#1-prove-the-tree-is-releasable)
 
 **Please tell us** what happened on your machines in an
 [issue](https://github.com/kroxiksut/codexSync/issues/new/choose). Never attach

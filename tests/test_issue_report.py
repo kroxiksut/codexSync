@@ -83,6 +83,24 @@ class IssueReportTests(unittest.TestCase):
             self.assertNotIn(private, text, private)
         self.assertNotIn(str(self.root), text)
 
+    def test_plugin_inventory_reports_counts_without_declaration_or_source_values(self) -> None:
+        (self.codex / "config.toml").write_text(
+            '[plugins]\n"private-plugin@private-market" = { enabled = true }\n'
+            '"invalid@private-market" = { enabled = "private-setting" }\n'
+            '[marketplaces.private-market]\nsource = "private-source"\n',
+            encoding="utf-8",
+        )
+        report = build_issue_report(self.config)
+        self.assertEqual(report["checks"]["plugin_inventory"], "WARN")
+        self.assertEqual(report["plugin_inventory"], {
+            "declared": 1,
+            "with_cache_marker": 0,
+            "with_configured_marketplace": 1,
+            "findings": {"DECLARED_PLUGIN_PAYLOAD_MISSING": 1, "MALFORMED_PLUGIN_DECLARATION": 1},
+        })
+        for private in ("private-plugin", "private-market", "private-setting", "private-source"):
+            self.assertNotIn(private, json.dumps(report))
+
     def test_it_says_what_an_issue_needs(self) -> None:
         report = build_issue_report(self.config)
         self.assertEqual(report["format"], REPORT_FORMAT)

@@ -30,6 +30,7 @@ OPEN_EXISTING = 3
 FILE_ATTRIBUTE_NORMAL = 0x80
 
 _create_file = None
+_get_file_information = None
 
 
 def shares_deletion() -> bool:
@@ -76,3 +77,32 @@ def read_shared(path: Path | str) -> bytes:
     """The whole file, read with `open_shared`."""
     with open_shared(path) as handle:
         return handle.read()
+
+
+def windows_change_time(handle: BinaryIO) -> int:
+    """Return a Windows handle's change time in native 100 ns ticks."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("creation_time", ctypes.c_int64),
+            ("last_access_time", ctypes.c_int64),
+            ("last_write_time", ctypes.c_int64),
+            ("change_time", ctypes.c_int64),
+            ("file_attributes", wintypes.DWORD),
+        ]
+
+    global _get_file_information
+    if _get_file_information is None:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = kernel.GetFileInformationByHandleEx
+        function.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        function.restype = wintypes.BOOL
+        _get_file_information = function
+    info = FileBasicInfo()
+    # FileBasicInfo is information class 0.
+    if not _get_file_information(msvcrt.get_osfhandle(handle.fileno()), 0, ctypes.byref(info), ctypes.sizeof(info)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return info.change_time

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import os
+import time
 from threading import Barrier, Event, Lock, get_ident
 import unittest
 from unittest.mock import patch
@@ -10,7 +12,19 @@ from unittest.mock import patch
 from codexsync.work_scheduler import WorkClass, WorkScheduler
 
 
+def _process_identity(item: int) -> tuple[int, int]:
+    """Picklable work whose overlap is observable across spawned processes."""
+    time.sleep(0.05)
+    return os.getpid(), item
+
+
 class WorkSchedulerTests(unittest.TestCase):
+    def test_process_jobs_use_more_than_one_process_and_keep_input_order(self) -> None:
+        with WorkScheduler(cpu_workers=2, io_workers=1) as scheduler:
+            results = scheduler.map_process(_process_identity, range(8))
+        self.assertEqual([item for _pid, item in results], list(range(8)))
+        self.assertGreaterEqual(len({pid for pid, _item in results}), 2)
+
     def test_prepare_observer_accepts_results_in_order_on_the_caller_while_workers_run(self) -> None:
         release_second = Event()
         caller = get_ident()

@@ -116,6 +116,62 @@ class PypiReadmeTests(unittest.TestCase):
         self.assertNotIn("[!", out)
 
 
+class PrereleaseDocsTests(unittest.TestCase):
+    def test_install_commands_do_not_silently_select_the_stable_cli(self) -> None:
+        readmes = [REPO_ROOT / name for name in ("README.md", "README.ru.md", "README.zh.md")]
+        for lang in ("en", "ru", "zh"):
+            readmes.append(REPO_ROOT / "docs" / lang / "README.md")
+        gui_pages = [REPO_ROOT / "docs" / lang / "GUI.md" for lang in ("en", "ru", "zh")]
+        for path in readmes + gui_pages:
+            with self.subTest(page=path.relative_to(REPO_ROOT)):
+                contents = path.read_text(encoding="utf-8")
+                self.assertRegex(contents, r'pip install --upgrade --pre "codexsync\[gui\]"')
+                if path in readmes:
+                    self.assertRegex(contents, r"(?m)^python -m pip install --upgrade --pre codexsync\b")
+                    self.assertIn('pip install --upgrade "codexsync<0.2"', contents)
+                if path.parent.parent == REPO_ROOT / "docs" and path in readmes:
+                    self.assertIn('pipx install --pip-args="--pre" "codexsync[gui]"', contents)
+                    self.assertIn('pipx upgrade --pip-args="--pre" codexsync', contents)
+                    self.assertRegex(contents, r"/bin/pip install --pre ")
+                    self.assertRegex(contents, r"/bin/pip install --upgrade --pre ")
+
+    def test_release_notes_distinguish_candidate_checks_from_historical_checks(self) -> None:
+        notes = meta.release_notes("v0.2.0-alpha.2", REPO_ROOT)
+        self.assertIn('pip install --upgrade --pre "codexsync[gui]"', notes)
+        self.assertRegex(notes, r"(?is)validation.*?1–3.*?pending.*?4–10.*?pending")
+        self.assertIn("docs/dev/PUBLISHING.md", notes)
+
+    def test_support_policy_does_not_require_stable_users_to_install_an_alpha(self) -> None:
+        policy = (REPO_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        self.assertRegex(policy, r"(?m)^\| 0\.2\.0 pre-releases and main \|")
+        self.assertRegex(policy, r"(?m)^\| 0\.1\.x \(stable\) \|.*until 0\.2\.0 is released")
+
+    def test_new_chat_visibility_requires_a_person_to_request_rebuild(self) -> None:
+        checklist = (REPO_ROOT / "docs/dev/PUBLISHING.md").read_text(encoding="utf-8")
+        scenario = checklist.split("6. **A new chat travels**", 1)[1].split("7. **", 1)[0]
+        self.assertIn("D-032", scenario)
+        self.assertIn("sessions catalogue", scenario)
+        self.assertIn("--confirm-plan <id>", scenario)
+        self.assertIn("not_listed=0", scenario)
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_publishers_wait_for_all_artifact_builds_and_checks(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        jobs = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split("\njobs:\n", 1)[1]))
+        required = {"meta", "dist", "exe", "linux", "linux-check", "npm", "npm-check"}
+        for job, switch in (("pypi", "publish_pypi"), ("npm-publish", "publish_npm"), ("github-release", "github_release")):
+            with self.subTest(job=job):
+                needs = re.search(r"(?m)^    needs: \[([^\]]+)\]$", jobs[job])
+                self.assertIsNotNone(needs)
+                self.assertEqual(set(needs[1].split(", ")), required)
+                self.assertIn(f"    if: ${{{{ inputs.{switch} && inputs.ref == '' }}}}", jobs[job])
+
+        # Both npm jobs must also run in a rehearsal, when publication is disabled.
+        for job in ("npm", "npm-check"):
+            with self.subTest(job=job):
+                self.assertNotRegex(jobs[job], r"(?m)^    if:")
+
 
 class PackageMetadataTests(unittest.TestCase):
     """What PyPI shows and what builds the wheel must agree with the release (CS-555/556)."""

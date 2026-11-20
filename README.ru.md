@@ -13,6 +13,7 @@
 <p align="center">
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
+  <a href="https://hub.xerj.org/contributors/kroxiksut"><img src="https://hub.xerj.org/contributors/kroxiksut/badge.svg" alt="XERJ Corpus Hub contributor"></a>
   <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Платформы: Windows | macOS | Linux">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Внешних зависимостей: 0">
@@ -103,21 +104,24 @@ codexSync считает перенос этого состояния защищ
 **С Node.js**, на Windows или Linux:
 `npm install -g @kroxut/codexsync` ([установка через npm](docs/ru/README.md#установка)).
 
-**С Python 3.11+**, на Windows, macOS или Linux — с `--upgrade`, чтобы
-заменилась и уже установленная 0.1. На macOS работают все чтения и планы, но запись запрещена, пока
-определение процесса там не подтверждено; на Linux оно подтверждено
+**С Python 3.11+**, на Windows, macOS или Linux, ключ `--pre` разрешает установку
+альфы 0.2, а `--upgrade` обновляет уже установленную версию. На macOS работают
+все чтения и планы, но запись запрещена, пока определение процесса там не
+подтверждено. На Linux оно подтверждено
 ([платформы](docs/ru/README.md#платформы)). На Linux системный Python не даёт
 делать `pip install` (PEP 668): используйте `pipx` или виртуальное окружение —
 оба способа, с обновлением и удалением, в [установке в Linux](docs/ru/README.md#в-linux).
 
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"    # окно и командная строка
+python -m pip install --upgrade --pre "codexsync[gui]"    # окно и командная строка
 codexsync-gui                                       # при первом запуске окно поможет создать или открыть config.toml
 
-python -m pip install --upgrade codexsync           # только командная строка, без зависимостей
+python -m pip install --upgrade --pre codexsync           # только командная строка, без зависимостей
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
+
+Для стабильной командной строки 0.1 выполните `python -m pip install --upgrade "codexsync<0.2"`.
 
 Из исходников и первый запуск по шагам:
 [установка и начало работы](docs/ru/README.md#установка).
@@ -142,8 +146,9 @@ codexsync -c config.toml doctor
 
 ## Статус
 
-**0.2.0** — первый стабильный выпуск с окном (`codexsync[gui]` или
-`codexsync-gui.exe`) рядом с командной строкой и первый с пакетами для Linux и npm. 0.2 понимает и меняет
+**0.2.0a2** — вторая альфа 0.2 с окном (`codexsync[gui]` или
+`codexsync-gui.exe`) рядом с командной строкой и первый выпуск с пакетами для
+Linux и npm. Версия 0.2 понимает и меняет
 гораздо больше состояния Codex, чем 0.1, и каждая запись проходит через
 блокировку, журнал и проверенную резервную копию. Если вы работаете в Codex на
 двух машинах или больше —

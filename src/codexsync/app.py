@@ -206,6 +206,7 @@ from .semantic_transfer import (
     BranchResolution,
     ResolutionChoice,
     TransferAction,
+    TransferItem,
     TransferPlan,
     ARCHIVE_FOLLOWS_LOCAL,
     FORMAT_MIGRATION,
@@ -278,7 +279,7 @@ from .codex_health import (
     diagnose_journals,
     measure_chat_files,
 )
-from .session_catalog import one_per_chat, scan_both_sides, scan_sessions
+from .session_catalog import SessionParseCache, one_per_chat, scan_both_sides, scan_sessions
 from .session_index import (
     PROVEN_CONTRACTS,
     SESSION_INDEX_FILE,
@@ -1200,9 +1201,11 @@ def _root_mapper(
     return map_root
 
 
-def _chat_folders(local_dir: Path, cfg: AppConfig) -> list[tuple[str, str | None]]:
+def _chat_folders(
+    local_dir: Path, cfg: AppConfig, parse_cache: SessionParseCache | None,
+) -> list[tuple[str, str | None]]:
     """``(thread id, cwd)`` of every chat here that is not a spawned sub-thread."""
-    catalog = scan_sessions(local_dir, max_line_bytes=cfg.semantic.max_jsonl_line_bytes)
+    catalog = scan_sessions(local_dir, max_line_bytes=cfg.semantic.max_jsonl_line_bytes, parse_cache=parse_cache)
     return [
         (item.session_id, item.cwd) for item in one_per_chat(catalog.descriptors)
         if item.session_id and not item.parent_id
@@ -1224,6 +1227,7 @@ def sync_projects(
     gate: SafetyGate | None = None,
     origin: str | None = None,
     planned_here: bool = False,
+    parse_cache: SessionParseCache | None = None,
 ) -> ProjectSyncResult:
     """Preview or carry other machines' project lists into this one (CS-333).
 
@@ -1266,7 +1270,7 @@ def sync_projects(
             map_root=_root_mapper(cfg, machine), folder_exists=_folder_exists,
             taken_before=[item for item in board.others(machine) if item.machine not in pending_machines],
             skipped=places.skipped_here(machine),
-            chats=_chat_folders(local_dir, cfg), native=_native_here,
+            chats=_chat_folders(local_dir, cfg, parse_cache), native=_native_here,
             own=_own_list(board, machine), removed_projects=cfg.sync.removed_projects,
         )
     except ProjectSyncUnsupported as exc:
@@ -2470,6 +2474,20 @@ def _selected_chats(
     return tuple(chosen.values())
 
 
+def _session_parse_cache(config_path: Path, cfg: AppConfig, local_dir: Path) -> SessionParseCache | None:
+    try:
+        directory = (cache_dir() / "session-catalogues").resolve()
+        if any(directory.is_relative_to(root.resolve()) for root in (local_dir, cfg.paths.cloud_root_dir)):
+            return None
+        key = hashlib.sha256(os.fsencode(config_path.resolve())).hexdigest()
+        path = directory / f"{key}.json"
+        if path.is_symlink():
+            return None
+        return SessionParseCache(path)
+    except (OSError, RuntimeError):
+        return None
+
+
 def scan_session_transfer(
     config_path: Path,
     *,
@@ -2481,6 +2499,7 @@ def scan_session_transfer(
     conflict_policy: str | None = None,
     direction: str | None = None,
     cancellation: CancellationToken | None = None,
+    parse_cache: SessionParseCache | None = None,
 ) -> TransferPlan:
     """Classify every session branch on both sides. Reads only.
 
@@ -2502,11 +2521,14 @@ def scan_session_transfer(
     cloud_dir = cfg.paths.cloud_root_dir
     decision = _make_safety_gate(cfg).check(OperationKind.SESSION_SCAN)
     volatile = decision.process_state is not ProcessState.STOPPED
+    if parse_cache is None:
+        parse_cache = _session_parse_cache(config_path, cfg, local_dir)
 
     local_catalog, remote_catalog = scan_both_sides(
         local_dir, cloud_dir, local_machine=source_machine, remote_machine=target_machine,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes, volatile=volatile, progress=progress,
         cancellation=cancellation,
+        parse_cache=parse_cache,
     )
     resolutions = load_branch_resolutions(resolutions_path) if resolutions_path else {}
     placements = read_thread_placements(local_dir)
@@ -2753,6 +2775,7 @@ def apply_session_transfer(
     progress: Callable[[int, int], None] | None = None,
     phase_progress: ProgressCallback | None = None,
     event_progress: ProgressEventCallback | None = None,
+    parse_cache: SessionParseCache | None = None,
 ) -> int:
     """Apply one exact session transfer plan with Codex closed.
 
@@ -2791,9 +2814,12 @@ def apply_session_transfer(
     initialize_runtime_paths(cfg)
     local_dir = locate_local_state_dir(cfg)
     cloud_dir = cfg.paths.cloud_root_dir
+    owns_cache = parse_cache is None
+    if owns_cache:
+        parse_cache = _session_parse_cache(config_path, cfg, local_dir)
 
     fresh, local_by_hash, remote_by_hash = _rebuild_transfer_plan(
-        cfg, local_dir, cloud_dir, plan, resolutions_path
+        cfg, local_dir, cloud_dir, plan, resolutions_path, parse_cache=parse_cache,
     )
     if fresh.plan_id != plan.plan_id:
         raise FailSafeError(
@@ -2824,6 +2850,8 @@ def apply_session_transfer(
         LOG.info("session transfer plan %s has nothing to write", plan.plan_id)
         if not dry_run:
             _record_semantic_manifest(cfg, plan, local_by_hash, remote_by_hash)
+            if owns_cache and parse_cache is not None:
+                parse_cache.publish()
         return 0
 
     if not dry_run:
@@ -2885,10 +2913,18 @@ def apply_session_transfer(
             progress=progress,
             phase_progress=phase_progress,
             progress_events=events,
+            # Session transfer performs a stronger record-level read-back below.
+            # Deferring that read avoids opening every cloud file twice in the
+            # serial commit loop while the journal remains COMMITTING.
+            verify_destination_after_replace=False,
         )
         try:
             engine.execute(copies, dry_run=False)
-            _verify_transferred_branches(cfg, plan, local_dir, cloud_dir)
+            with WorkScheduler() as scheduler:
+                _verify_transferred_branches(
+                    cfg, plan, local_dir, cloud_dir,
+                    scheduler=scheduler, phase_progress=phase_progress,
+                )
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
         except Exception as exc:
             failure = (
@@ -2969,6 +3005,8 @@ def apply_session_transfer(
             mgr.prune()
         except Exception:
             LOG.exception("old backups not pruned; the next run prunes them")
+    if owns_cache and parse_cache is not None:
+        parse_cache.publish()
     return _branches_written(copies)
 
 
@@ -2985,10 +3023,13 @@ def _rebuild_transfer_plan(
     cloud_dir: Path,
     plan: TransferPlan,
     resolutions_path: Path | None,
+    *,
+    parse_cache: SessionParseCache | None = None,
 ) -> tuple[TransferPlan, dict[str, object], dict[str, object]]:
     local_catalog, remote_catalog = scan_both_sides(
         local_dir, cloud_dir, local_machine=plan.source_machine, remote_machine=plan.target_machine,
         max_line_bytes=cfg.semantic.max_jsonl_line_bytes,
+        parse_cache=parse_cache,
     )
     placements = read_thread_placements(local_dir)
     local_catalog = prefer_catalogued_copies(local_catalog, placements)
@@ -3230,40 +3271,68 @@ def _transfer_readback_error(message: str, *, code: str, params: dict, session_h
     return error
 
 
-def _verify_transferred_branches(
-    cfg: AppConfig, plan: TransferPlan, local_dir: Path, cloud_dir: Path
+def _verify_transferred_branch(
+    work: tuple[TransferItem, Path, str, int],
 ) -> None:
-    """Re-read what was written and confirm it is the branch that was planned."""
+    """Read one committed branch; callers may safely run these checks in parallel."""
+    item, written, expected, planned_records = work
+    digest = hashlib.sha256()
+    records = 0
+    try:
+        with open_jsonl(written) as handle:
+            for line in handle:
+                records += 1
+                digest.update(line)
+    except JSONL_READ_ERRORS as exc:
+        raise _transfer_readback_error(
+            f"Transferred branch could not be read back after writing: {exc}",
+            code="TRANSFER_READBACK_MISMATCH", params={"relative_path": item.target_relative_path or ""},
+            session_hash=item.session_hash,
+        ) from exc
+    if digest.hexdigest() != expected or records != planned_records:
+        raise _transfer_readback_error(
+            "Transferred branch does not match the plan after writing; recovery is required",
+            code="TRANSFER_READBACK_MISMATCH", params={"relative_path": item.target_relative_path or ""},
+            session_hash=item.session_hash,
+        )
+
+
+def _verify_transferred_branches(
+    cfg: AppConfig, plan: TransferPlan, local_dir: Path, cloud_dir: Path, *,
+    scheduler: WorkScheduler | None = None,
+    phase_progress: ProgressCallback | None = None,
+) -> None:
+    """Re-read every write while the journal still makes failure recoverable."""
+    work = []
     for item in plan.items:
         direction = transfer_direction(item)
         if direction is None:
             continue
         towards_local = direction == "local"
         root = local_dir if towards_local else cloud_dir
-        expected = item.remote_sha256 if towards_local else item.local_sha256
-        written = root / Path(*(item.target_relative_path or "").split("/"))
-        digest = hashlib.sha256()
-        records = 0
-        try:
-            with open_jsonl(written) as handle:
-                for line in handle:
-                    records += 1
-                    digest.update(line)
-        except JSONL_READ_ERRORS as exc:
-            # A branch that cannot be read back is a failed commit, not an
-            # internal error: say so with the exception the recovery path knows.
-            raise _transfer_readback_error(
-                f"Transferred branch could not be read back after writing: {exc}",
-                code="TRANSFER_READBACK_MISMATCH", params={"relative_path": item.target_relative_path or ""},
-                session_hash=item.session_hash,
-            ) from exc
-        planned_records = item.remote_records if towards_local else item.local_records
-        if digest.hexdigest() != expected or records != planned_records:
-            raise _transfer_readback_error(
-                "Transferred branch does not match the plan after writing; recovery is required",
-                code="TRANSFER_READBACK_MISMATCH", params={"relative_path": item.target_relative_path or ""},
-                session_hash=item.session_hash,
-            )
+        work.append((
+            item,
+            root / Path(*(item.target_relative_path or "").split("/")),
+            item.remote_sha256 if towards_local else item.local_sha256,
+            item.remote_records if towards_local else item.local_records,
+        ))
+    if phase_progress is not None:
+        phase_progress("verify_chats", 0, len(work))
+    if scheduler is None:
+        for index, entry in enumerate(work, start=1):
+            _verify_transferred_branch(entry)
+            if phase_progress is not None:
+                phase_progress("verify_chats", index, len(work))
+        return
+
+    def verified(index: int, _entry, _result: None) -> None:
+        if phase_progress is not None:
+            phase_progress("verify_chats", index + 1, len(work))
+
+    scheduler.map_read(
+        _verify_transferred_branch, work, pool="io", large_file=lambda _entry: True,
+        on_result=verified,
+    )
 
 
 def inspect_recovery(config_path: Path, operation_id: str) -> MutationJournal:
@@ -3881,6 +3950,7 @@ def run_handoff(
             )
         pending = board.pending(machine)
         fingerprints = Fingerprinter()
+        parse_cache = _session_parse_cache(config_path, cfg, locate_local_state_dir(cfg))
         if wait_seconds is None:
             wait_seconds = float(cfg.handoff.delivery_wait_minutes) * 60.0
         waited = 0.0
@@ -3901,7 +3971,7 @@ def run_handoff(
             cancellation.checkpoint()
         source, plan, resolutions_path = _full_sync_chat_plan(
             config_path, cfg, board, machine, pending, progress=progress, conflict_policy=conflict_policy,
-            direction=direction, cancellation=cancellation,
+            direction=direction, cancellation=cancellation, parse_cache=parse_cache,
         )
         if cancellation is not None:
             cancellation.checkpoint()
@@ -3958,6 +4028,7 @@ def run_handoff(
         origin=origin, progress=lambda done, total: report_progress(progress, "sync_chats", done, total),
         phase_progress=progress,
         event_progress=event_progress,
+        parse_cache=parse_cache,
     )
     # Projects, names and the catalogue come after both halves and are each
     # applied by the plan they build. Each is re-done by the next sync, so one
@@ -3979,7 +4050,9 @@ def run_handoff(
     # Projects last: a chat binding may name a chat the transfer just wrote.
     # A merge never needs a person (an ambiguous project is left alone).
     report_progress(progress, "sync_projects", 0, 0)
-    projects = step("projects", lambda: sync_projects(config_path, origin=origin, planned_here=True))
+    projects = step("projects", lambda: sync_projects(
+        config_path, origin=origin, planned_here=True, parse_cache=parse_cache,
+    ))
     # A chat archived or brought back on the other machine arrived as a file
     # move; Codex's catalogue row still names the old path and state until it
     # is pointed at the file (D-035).
@@ -4044,6 +4117,8 @@ def run_handoff(
         ) from exc
     if handed_off:
         owed.unlink(missing_ok=True)
+    if parse_cache is not None:
+        parse_cache.publish()
     LOG.info(
         "handoff finished: %d file(s) and %d chat(s) written; took %s; %s",
         ctx.plan.action_count, session_actions,
@@ -4117,6 +4192,7 @@ def _full_sync_chat_plan(
     conflict_policy: str | None,
     direction: str | None = None,
     cancellation: CancellationToken | None = None,
+    parse_cache: SessionParseCache | None = None,
 ):
     """The chat plan a full sync applies: the pair, resolutions and working set it uses.
 
@@ -4135,6 +4211,7 @@ def _full_sync_chat_plan(
         config_path, source_machine=source, target_machine=machine,
         resolutions_path=resolutions_path, progress=progress, scope=scope,
         conflict_policy=conflict_policy, direction=direction, cancellation=cancellation,
+        parse_cache=parse_cache,
     )
     return source, plan, resolutions_path
 
@@ -4223,15 +4300,17 @@ def preview_full_sync(
     machine = _handoff_machine(cfg)
     board = read_board(_handoff_root(cfg))
     pending = board.pending(machine)
+    parse_cache = _session_parse_cache(config_path, cfg, locate_local_state_dir(cfg))
     files = build_context(
         config_path, enforce_safety=enforce_safety, conflict_policy=conflict_policy, direction=direction,
     )
     source, chats, _ = _full_sync_chat_plan(
         config_path, cfg, board, machine, pending, progress=progress, conflict_policy=conflict_policy,
         direction=direction,
+        parse_cache=parse_cache,
     )
     try:
-        projects = sync_projects(config_path)
+        projects = sync_projects(config_path, parse_cache=parse_cache)
     except ProjectsNotCarried as exc:
         LOG.warning("projects would not be carried: %s", exc)
         projects = None

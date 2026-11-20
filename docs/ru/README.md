@@ -46,12 +46,15 @@
 ## Установка
 
 У ядра и командной строки нет зависимостей. Окно — необязательное дополнение.
-С `--upgrade` та же команда заменит и уже установленную 0.1.
+Ключ `--pre` разрешает установку альфы 0.2, а `--upgrade` обновляет уже
+установленную версию.
 
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"    # командная строка и окно (PySide6)
-python -m pip install --upgrade codexsync           # только командная строка
+python -m pip install --upgrade --pre "codexsync[gui]"    # командная строка и окно (PySide6)
+python -m pip install --upgrade --pre codexsync           # только командная строка
 ```
+
+Для стабильной командной строки 0.1 выполните `python -m pip install --upgrade "codexsync<0.2"`.
 
 На Windows можно вместо этого скачать готовую сборку из
 [Releases](https://github.com/kroxiksut/codexSync/releases) — ни одной из них не
@@ -96,7 +99,7 @@ Python 3.11 или новее — `pipx` или виртуальное окру�
 Debian 12, Fedora 36 и новее) и ARM64 (glibc 2.39 и новее: Ubuntu 24.04,
 Debian 13 и новее). В каждом обе программы, `codexsync` и `codexsync-gui`.
 Имя файла состоит из метки выпуска и процессора, например
-`codexsync-v0.2.0-linux-amd64.deb` (`arm64` для ARM64); ниже `<метка>` — это
+`codexsync-v0.2.0-alpha.2-linux-amd64.deb` (`arm64` для ARM64); ниже `<метка>` — это
 метка выпуска.
 
 **Пакет .deb** (Ubuntu, Debian и родственные) ставится в `/opt/codexsync`,
@@ -146,8 +149,8 @@ rm -rf ~/.local/opt/codexsync                                                   
 pipx` или `sudo dnf install pipx`, затем `pipx ensurepath`):
 
 ```sh
-pipx install "codexsync[gui]"   # окно и командная строка; без [gui] — только командная строка
-pipx upgrade codexsync          # обновить
+pipx install --pip-args="--pre" "codexsync[gui]"   # окно и командная строка; без [gui] — только командная строка
+pipx upgrade --pip-args="--pre" codexsync           # обновить
 pipx uninstall codexsync        # удалить
 ```
 
@@ -157,8 +160,8 @@ python3-venv`:
 
 ```sh
 python3 -m venv ~/.venvs/codexsync
-~/.venvs/codexsync/bin/pip install "codexsync[gui]"            # установить
-~/.venvs/codexsync/bin/pip install --upgrade "codexsync[gui]"  # обновить
+~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"            # установить
+~/.venvs/codexsync/bin/pip install --upgrade --pre "codexsync[gui]"  # обновить
 rm -rf ~/.venvs/codexsync                                      # удалить
 ```
 

@@ -20,8 +20,10 @@
 
 ## 启动
 
+使用 `--pre` 安装 0.2 alpha。
+
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"
+python -m pip install --upgrade --pre "codexsync[gui]"
 codexsync-gui                      # 打开上次用过的配置
 codexsync-gui -c config.toml       # 或者：python -m codexsync.gui -c config.toml
 ```

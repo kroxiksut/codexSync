@@ -5,14 +5,14 @@ name: Release
 # first, then run this workflow with it. Steps, and the one-time PyPI setup:
 # docs/dev/PUBLISHING.md.
 #
-# A rehearsal before tagging: give `ref: main` and leave both publishing
+# A rehearsal before tagging: give `ref: main` and leave all three publishing
 # switches off -- everything is checked, tested and built, and the builds are
 # downloadable from the run. Nothing is published from anything but the tag.
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Tag to release, already pushed (v0.2.0-alpha.1, v0.2.0)"
+        description: "Tag to build (for example, v0.2.0-alpha.2). Push it before publishing."
         required: true
         type: string
       ref:
@@ -395,11 +395,10 @@ jobs:
           npm --version
           python scripts/npm_packages.py publish --tag "$RELEASE_TAG" --dir npm
 
-  # Only after every build above succeeded, so PyPI never holds a version whose
-  # Windows or Linux builds failed. Trusted publishing: no token is stored anywhere.
+  # All builds and installation checks must succeed. Trusted publishing uses OIDC.
   pypi:
     name: Publish to PyPI
-    needs: [meta, dist, exe, linux, linux-check]
+    needs: [meta, dist, exe, linux, linux-check, npm, npm-check]
     if: ${{ inputs.publish_pypi && inputs.ref == '' }}
     runs-on: ubuntu-latest
     environment:
@@ -416,7 +415,7 @@ jobs:
 
   github-release:
     name: GitHub release
-    needs: [meta, dist, exe, linux, linux-check]
+    needs: [meta, dist, exe, linux, linux-check, npm, npm-check]
     if: ${{ inputs.github_release && inputs.ref == '' }}
     runs-on: ubuntu-latest
     permissions:

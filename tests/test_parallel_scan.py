@@ -66,6 +66,13 @@ class ParallelScanTests(unittest.TestCase):
         self.assertEqual(pooled.descriptors, alone.descriptors)
         self.assertIn("READ_ERROR", next(d for d in pooled.descriptors if "broken" in d.relative_path).codes)
 
+    def test_a_large_catalog_uses_processes_but_keeps_the_serial_catalog(self) -> None:
+        with patch.object(session_catalog, "SCAN_WORKERS", 1):
+            expected = scan_sessions(self.mirror)
+        with patch.object(session_catalog, "PROCESS_SCAN_MIN_BYTES", 0):
+            actual = scan_sessions(self.mirror)
+        self.assertEqual(actual.descriptors, expected.descriptors)
+
     def test_pooled_progress_only_goes_up_and_ends_at_the_total(self) -> None:
         with patch.object(session_catalog, "SCAN_WORKERS", 4):
             catalog = scan_sessions(self.mirror, progress=self._collect)

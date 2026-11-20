@@ -45,6 +45,6 @@ anonymous.
 
 | Version | Fixes |
 |---|---|
-| 0.2.x and main | yes |
-| 0.1.x | no — upgrade to 0.2 |
+| 0.2.0 pre-releases and main | Yes |
+| 0.1.x (stable) | Yes, until 0.2.0 is released as stable |
 

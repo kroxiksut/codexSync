@@ -224,7 +224,7 @@ def with_codec(relative_path: str, codec: JsonlCodec) -> str:
     return logical_relative_path(relative_path) + codec.suffix
 
 
-def open_jsonl(path: Path, codec: JsonlCodec | None = None) -> BinaryIO:
+def open_jsonl(path: Path, codec: JsonlCodec | None = None, *, raw: BinaryIO | None = None) -> BinaryIO:
     """Open a branch for reading as a binary stream of JSONL bytes.
 
     The returned handle yields exactly the bytes the branch has as plain JSONL,
@@ -234,18 +234,26 @@ def open_jsonl(path: Path, codec: JsonlCodec | None = None) -> BinaryIO:
     ``codec`` is inferred from the file name, which is right for a branch in
     place. Pass it explicitly for a staged payload, whose name is a temporary
     one that says nothing about its container.
+
+    Pass an existing binary stream when the caller has already verified its
+    physical bytes. The returned reader must be closed before moving that
+    stream again.
     """
     if codec is None:
         codec = codec_of(path)
     if codec is JsonlCodec.GZIP:
+        if raw is not None:
+            return gzip.GzipFile(fileobj=raw, mode="rb")
         return gzip.open(path, "rb")  # type: ignore[return-value]
     if codec is JsonlCodec.XZ:
+        if raw is not None:
+            return lzma.LZMAFile(raw, "rb")
         return lzma.open(path, "rb")  # type: ignore[return-value]
     if codec is JsonlCodec.ZSTD:
         if _zstd is None:
             raise OSError(f"this Python cannot read zstd: {path.name}")
-        return _zstd.open(path, "rb")  # type: ignore[return-value]
-    return path.open("rb")
+        return _zstd.open(path if raw is None else raw, "rb")  # type: ignore[return-value]
+    return path.open("rb") if raw is None else raw
 
 
 def transcode(

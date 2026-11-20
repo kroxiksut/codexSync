@@ -25,25 +25,27 @@ ambiguous; a failure is not. Some warnings are permanent by design and say so:
 `sync_rules` reports a one-way direction or `delete_policy = propagate`, and
 `project_registry` reports that projects also live in `state_*.sqlite`.
 
-Three scenarios are what the release is actually judged on, and all three need
-a real machine rather than the suite:
+Run the first three scenarios on Windows with a real Codex installation and a
+disposable test workspace:
 
 1. **Codex open, `[sync] close_codex = false`** — `sync --apply`,
    `restore --apply`, `repair-projects apply`, `sessions apply`,
-   `chats move --confirm` and `recover resume|rollback` must each exit `3`, and
+   `chats move --confirm` and `recover resume|rollback` must refuse without
+   writing. Expect exit `3` at the process gate, or `5` if a plan obtained
+   while Codex was open is rejected as volatile first.
    `guardian snapshot --once` must still succeed. With `close_codex = true` a
    sync asks Codex to quit instead: it goes on once the gate sees Codex gone,
    and exits `3` with nothing written if Codex stays open.
 2. **Codex closed** — a sync runs, a verified backup exists before the first
    overwrite, and the journal ends `COMMITTED`.
-3. **An interrupted mutation** — kill the process during a sync, then check
-   that `recover inspect` reports it and that the Recovery screen offers
-   inspect, resume and rollback, each behind a dry run of the same choice.
+3. **An interrupted mutation** — interrupt codexSync during a sync in the
+   test workspace. Check that `recover inspect` and the Recovery screen show
+   the interruption. Try resume and rollback on separate interrupted runs,
+   each after a dry run of that choice.
 
-0.2 carries more than files, so these define what a 0.2 release actually
-ships. Each needs two real machines (A and B) or a real 0.1 config; record the
-date and the Codex version when one is run, and say in the release notes which
-were not:
+For the remaining scenarios use a real 0.1 config for scenario 4, two real
+machines (A and B) for 5–9, and a real desktop Codex for 10. Record the
+candidate commit, platform, date, Codex version and outcome for each run.
 
 4. **0.1 config upgrade** — a `config.toml` written by 0.1.2: `config check`
    lists the findings, `config upgrade --confirm-plan` applies them, the old
@@ -51,9 +53,14 @@ were not:
 5. **Full handoff A → B → A** — sync on A with Codex closed, wait for the
    cloud, sync on B, work in Codex on B, close it, sync on B, sync on A. Each
    side shows the other's work; `handoff status` agrees on both.
-6. **A new chat travels** — a chat created on A appears on B after the sync
-   and one Codex start (the catalogue rebuild, `D-024`); `doctor` on B reports
-   `session_visibility` with `not_listed=0`.
+6. **A new chat travels** — sync a new chat from A to B, where Codex already
+   has a catalogue. Verify the chat file landed, the sync reports it among
+   `chats_codex_does_not_list`, and `doctor` reports it under
+   `session_visibility`. Sync never requests a rebuild (`D-032`). With Codex
+   closed on B, run `sessions catalogue` to preview the rebuild and repeat it
+   with `--confirm-plan <id>` to request it explicitly (`D-024`). Start Codex
+   on B and leave it open until the chat appears. Check that `doctor` reports
+   `not_listed=0` in the test workspace.
 7. **A chat name travels** — a chat renamed on A shows that name on B; a chat
    already named on B keeps its own (`D-025`).
 8. **The project list** — a project added on A appears in B's sidebar with
@@ -67,13 +74,31 @@ were not:
     desktop app quits normally, the sync runs, and Codex's state reads cleanly
     on the next start (`D-029`).
 
-For an alpha, 1–3 must pass and 4–10 are recorded as run or not run; for a
-stable release all ten must pass on Windows.
+For an alpha, 1–3 must pass on the candidate. Record the outcome of 4–10 in
+the release notes, including any pending or partial scenarios. For a stable
+release all ten must pass on Windows.
+
+#### 0.2.0a2 candidate validation
+
+Manual validation of the current candidate is pending for scenarios 1–10.
+Earlier observations establish which parts have been exercised:
+
+| Scenario | Earlier observations |
+|---|---|
+| 1–3 | Windows, Codex 26.1021, 2026-10-25 and 2026-10-28. Safety, backup and recovery were exercised in a scratch workspace, including an injected interruption and an offscreen Recovery screen. Some of the 2026-10-25 process-gate checks used a stand-in process. |
+| 4 | 2026-10-28. The upgrade of a copy of a 0.1.2 config succeeded and retained the old file. The follow-up sync was refused because Codex was still open. |
+| 5 | Ubuntu, Codex 0.163.0-alpha.10.2, 2026-10-28. A round trip used two Codex homes on one laptop. Working in Codex on B and cloud propagation between machines still need a run. |
+| 6–7 | Same Ubuntu run. Explicit catalogue rebuild and chat-name transfer were exercised. |
+| 8 | Same Ubuntu run. A project added through the state JSON travelled and missing folders were reported. Verifying the desktop sidebar with its chats is pending. |
+| 9–10 | Same Ubuntu run. Conflict policy and graceful quit were exercised. |
+
+The release rehearsal with all publishing switches off is also pending for
+this candidate.
 
 ### 2. Check the release metadata
 
 1. `pyproject.toml` carries the version being released, in its PEP 440 form
-   (`0.2.0a1`, `0.2.0rc1`, `0.2.0`).
+   (`0.2.0a2`, `0.2.0rc1`, `0.2.0`).
 2. `CHANGELOG.md` has a section for exactly that version, with a date, and no
    `[Unreleased]` heading left behind. Its introduction — everything before the
    first `###` — becomes the GitHub release body, so it is written for someone
@@ -92,9 +117,12 @@ release workflow runs it before anything else.
    0.2 alphas and release candidates it reads "0.2.0 pre-releases and main" and
    "0.1.x until 0.2.0 is released"; at 0.2.0 it becomes "0.2.x" and "0.1.x —
    no, upgrade to 0.2".
-6. While the newest release is a pre-release, every `pip install` the READMEs
-   and `docs/*/README.md` show carries `--pre` — without it pip installs the
-   last final release. Remove it at the final release.
+6. Commands for the pre-release opt in with `pip install --pre` or with
+   `--pip-args="--pre"` on both `pipx install` and `pipx upgrade`. Check the
+   release notes, the three READMEs and the translated install and window
+   pages. Keep the stable 0.1 CLI command explicit (`"codexsync<0.2"`). Local
+   source installs need no pre-release flag. Update the commands when 0.2.0
+   becomes stable.
 
 ### 3. Confirm the optional extra stays optional
 
@@ -110,34 +138,35 @@ If it passes, `pip install codexsync` pulls nothing extra.
 
 ### 4. Rehearse, tag, release
 
-A tag is written the way people read it — `v0.2.0-alpha.1`, `v0.2.0-rc.1`,
+A tag is written the way people read it — `v0.2.0-alpha.2`, `v0.2.0-rc.1`,
 `v0.2.0` — and means the PEP 440 version `pyproject.toml` declares
-(`0.2.0a1`, `0.2.0rc1`, `0.2.0`). PEP 440 treats the two spellings as one
+(`0.2.0a2`, `0.2.0rc1`, `0.2.0`). PEP 440 treats the two spellings as one
 version, so `codexsync --version`, PyPI and the tag never name different builds.
 
 1. **Rehearse before tagging.** Run the `Release` workflow by hand with
    `release_tag` set to the tag you are about to push, `ref` set to `main`,
-   and every publishing switch off. It checks the metadata, runs the suite on
-   each Windows and Linux architecture, builds every exe, Linux package, npm
+   and `publish_pypi`, `publish_npm` and `github_release` all off. It checks the
+   metadata, runs the suite on each Windows and Linux architecture, builds every exe, Linux package, npm
    package and the wheel, installs them on clean systems, and leaves them as
    artifacts of the run. Nothing is published from anything but the tag.
 2. **Tag and push:**
 
    ```powershell
    git push origin main
-   git tag v0.2.0-alpha.1
-   git push origin v0.2.0-alpha.1
+   git tag v0.2.0-alpha.2
+   git push origin v0.2.0-alpha.2
    ```
 
 3. **Release:** run `Release` with that tag, `ref` empty, `publish_pypi` on,
-   `publish_npm` on, `github_release` on and `draft` on. PyPI and npm are
-   published only after every build succeeded; the GitHub release is created as a draft, marked pre-release
+   `publish_npm` on, `github_release` on and `draft` on. All three publishing
+   jobs wait for every build and installation check, including `npm` and
+   `npm-check`. The GitHub release is created as a draft, marked pre-release
    automatically for an `alpha`/`beta`/`rc` tag. Read the draft, then publish
    it on GitHub.
 
 If a build fails after the tag is pushed, fix it on `main` and release the next
-number (`v0.2.0-alpha.2`) rather than moving the tag: a tag others may have
-fetched is not rewritten, and a PyPI or npm version can never be uploaded twice.
+number (`v0.2.0-alpha.3` after alpha.2). Keep the pushed tag in place. A PyPI
+or npm version can only be uploaded once.
 
 ### PyPI: one-time setup
 
@@ -156,7 +185,7 @@ release is created independently. A manual upload remains possible:
 
 ```powershell
 python -m pip install --upgrade build twine
-python scripts/release_meta.py pypi-readme --tag v0.2.0-alpha.1   # never commit the result
+python scripts/release_meta.py pypi-readme --tag v0.2.0-alpha.2   # never commit the result
 python -m build
 python -m twine check --strict dist/*
 python -m twine upload dist/*

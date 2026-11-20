@@ -34,6 +34,10 @@ from .exceptions import FailSafeError
 from .mutation_journal import JournalStore
 from .runtime import _make_safety_gate
 from .process_knowledge import CLI_DAEMON_STOP_COMMAND
+from .plugin_inventory import (
+    CACHE_ONLY, CACHE_UNREADABLE, CONFIG_UNREADABLE, MALFORMED_DECLARATION, PAYLOAD_MISSING,
+    SOURCE_NOT_CONFIGURED, read_plugin_inventory,
+)
 from .preflight_observations import (
     ConfigObservation, FormatObservation, GlobalStateObservation, GlobalStateStatus, IndexObservation,
     SessionObservation, collect_preflight_observations, observe_config_source, observe_formats,
@@ -73,6 +77,9 @@ DETAIL_CODES = frozenset({
     "project_registry.proven", "project_registry.json_only",
     "path.missing", "path.not_dir", "path.ok", "path.unreadable",
     "manifest.ok", "manifest.failed",
+    "plugin_inventory.counts", "plugin_inventory.malformed", "plugin_inventory.missing",
+    "plugin_inventory.cache_only", "plugin_inventory.source_needed",
+    "plugin_inventory.config_unreadable", "plugin_inventory.cache_unreadable",
     "codex_process.stopped", "codex_process.running", "codex_process.found", "codex_process.unknown",
     "codex_process.cli_daemon",
     "codex_startup.not_checked", "codex_startup.state", "codex_startup.finding", "codex_startup.broken",
@@ -271,11 +278,45 @@ def run_preflight(
         ))
         checks.append(parallel["session_index"])
         checks.append(parallel["global_state_schema"])
+        checks.append(_check_plugin_inventory(local_dir, facts))
         checks.append(_check_guardian_latest_good(cfg))
     checks.append(_check_orphan_temp_files(cfg.paths.temp_dir))
     checks.append(_check_mutation_journals(cfg.paths.temp_dir))
 
     return PreflightReport(checks=checks)
+
+
+def _check_plugin_inventory(local_dir: Path, facts: dict | None = None) -> PreflightCheckResult:
+    inventory = read_plugin_inventory(local_dir)
+    declared = len(inventory.declarations)
+    cached = inventory.cached_declarations
+    configured = inventory.configured_marketplace_declarations
+    if facts is not None:
+        facts["plugin_inventory"] = {
+            "declared": declared,
+            "with_cache_marker": cached,
+            "with_configured_marketplace": configured,
+            "findings": inventory.findings,
+        }
+
+    details = f"Plugin declarations={declared}, with cache marker={cached}, with configured marketplace={configured}."
+    parts = [_part("plugin_inventory.counts", declared=declared, cached=cached, configured=configured)]
+    descriptions = {
+        MALFORMED_DECLARATION: ("malformed", "malformed plugin declarations"),
+        PAYLOAD_MISSING: ("missing", "declared payloads missing from cache. Check availability in Codex"),
+        CACHE_ONLY: ("cache_only", "cache-only plugins need an explicit source or backup"),
+        SOURCE_NOT_CONFIGURED: ("source_needed", "declarations need a marketplace configured in Codex"),
+        CONFIG_UNREADABLE: ("config_unreadable", "plugin configuration unavailable"),
+        CACHE_UNREADABLE: ("cache_unreadable", "plugin cache unavailable"),
+    }
+    for code, count in inventory.findings.items():
+        detail, message = descriptions[code]
+        details += f" {code}={count} ({message})."
+        parts.append(_part(f"plugin_inventory.{detail}", count=count))
+    return PreflightCheckResult(
+        "plugin_inventory", "WARN" if inventory.findings else "PASS", details, tuple(parts),
+    )
+
 
 def print_preflight_report(report: PreflightReport) -> None:
     print("Preflight report:")

@@ -169,7 +169,35 @@ def compare_session_branches(
             BranchRelation.INVALID, 0, 0, 0, "", "", detail=f"branch unreadable: {exc}"
         )
 
-    common, local_count, remote_count, local_sha, remote_sha, canonical_only, status = reading
+    return _classify_reading(*reading, local_state, remote_state, has_confirmed_base)
+
+
+def compare_identical_session_content(
+    sha256: str,
+    record_count: int,
+    local_state: BranchState,
+    remote_state: BranchState,
+    has_confirmed_base: bool,
+) -> BranchComparison:
+    """Classify two fully read branches with the same stream digest and count."""
+    return _classify_reading(
+        record_count, record_count, record_count, sha256, sha256,
+        0, CanonicalStatus.EXACT, local_state, remote_state, has_confirmed_base,
+    )
+
+
+def _classify_reading(
+    common: int,
+    local_count: int,
+    remote_count: int,
+    local_sha: str,
+    remote_sha: str,
+    canonical_only: int,
+    status: CanonicalStatus,
+    local_state: BranchState,
+    remote_state: BranchState,
+    has_confirmed_base: bool,
+) -> BranchComparison:
 
     prefix_local = local_count < remote_count and common == local_count
     prefix_remote = remote_count < local_count and common == remote_count

@@ -18,9 +18,17 @@ here without anyone remembering this file. So is a top-level ``--help`` or
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import os
 import sys
 from typing import Callable, Sequence
+
+
+if __name__ == "__main__":
+    # Session catalogues may use a process pool.  In a frozen windowed build
+    # this must run before importing either shell so children become workers
+    # instead of opening another window.
+    multiprocessing.freeze_support()
 
 
 def ensure_standard_streams() -> None:

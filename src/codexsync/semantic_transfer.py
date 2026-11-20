@@ -76,6 +76,7 @@ from .semantic_merge import (
     BranchComparison,
     BranchRelation,
     BranchState,
+    compare_identical_session_content,
     compare_session_branches,
 )
 from .session_catalog import (
@@ -86,6 +87,7 @@ from .session_catalog import (
     SessionCatalog,
     SessionDescriptor,
     SessionState,
+    matches_session_scan,
 )
 from .sqlite_audit import PlacementStatus, ThreadPlacements
 
@@ -892,14 +894,43 @@ def _classify(
         # copy, but where it lands is still a placement decision, so it goes
         # through the same gate a fast-forward does.
         return _one_sided_item(session_hash, session_id, local, remote, **gate_only), True
-    comparison = compare_session_branches(
-        local_root / _os_path(local.relative_path),
-        remote_root / _os_path(remote.relative_path),
-        local_state=_branch_state(local.state),
-        remote_state=_branch_state(remote.state),
-        has_confirmed_base=session_hash in confirmed_bases,
-        max_line_bytes=max_line_bytes,
-    )
+    local_path = local_root / _os_path(local.relative_path)
+    remote_path = remote_root / _os_path(remote.relative_path)
+    local_state, remote_state = _branch_state(local.state), _branch_state(remote.state)
+    has_confirmed_base = session_hash in confirmed_bases
+    if (
+        local.scan_line_limit is not None and local.scan_line_limit <= max_line_bytes
+        and remote.scan_line_limit is not None and remote.scan_line_limit <= max_line_bytes
+        and local.file_id is not None and remote.file_id is not None
+        and local.sha256 == remote.sha256
+        and local.byte_count == remote.byte_count
+        and local.line_count == remote.line_count
+        and matches_session_scan(local_root, local_path, local, require_change_stamp=True)
+        and matches_session_scan(remote_root, remote_path, remote, require_change_stamp=True)
+    ):
+        comparison = compare_identical_session_content(
+            local.sha256, local.line_count, local_state, remote_state, has_confirmed_base,
+        )
+    else:
+        comparison = compare_session_branches(
+            local_path, remote_path, local_state=local_state, remote_state=remote_state,
+            has_confirmed_base=has_confirmed_base, max_line_bytes=max_line_bytes,
+        )
+        # A second read must agree with the catalog used to build the plan,
+        # including the timestamps and placement derived from those bytes.
+        if comparison.relation is not BranchRelation.INVALID and (
+            local.scan_signature is not None and (
+                comparison.local_sha256 != local.sha256
+                or comparison.local_records != local.line_count
+                or not matches_session_scan(local_root, local_path, local)
+            )
+            or remote.scan_signature is not None and (
+                comparison.remote_sha256 != remote.sha256
+                or comparison.remote_records != remote.line_count
+                or not matches_session_scan(remote_root, remote_path, remote)
+            )
+        ):
+            comparison = BranchComparison(BranchRelation.INVALID, 0, 0, 0, "", "")
     return _decide(
         session_hash, session_id, comparison, local, remote, agreed_state=agreed_state, **gate,
     ), False

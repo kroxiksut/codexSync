@@ -5,17 +5,21 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
-from typing import Callable, Iterator
+import sys
+from typing import BinaryIO, Callable, Iterator
 
 from .cancellation import CancellationToken
 from .fs_links import is_link
+from .fs_replace import write_json_atomically
 from .jsonl_codec import (
     JSONL_READ_ERRORS,
     JsonlCodec,
+    READABLE_CODECS,
     codec_of,
     is_branch_file,
     logical_name,
@@ -24,6 +28,7 @@ from .jsonl_codec import (
     unsupported_container,
 )
 from .progress import ProgressCallback, report
+from .shared_read import open_shared, windows_change_time
 from .work_scheduler import WorkScheduler
 
 
@@ -36,6 +41,67 @@ DEFAULT_MAX_JSONL_LINE_BYTES = 64 * 1024 * 1024
 #: threads made a 9 s scan of `.codex` take 10-13 s -- so plain files stay on
 #: the calling thread.
 SCAN_WORKERS = max(1, min(4, os.cpu_count() or 1))
+
+# Starting child interpreters costs more than threads on a small catalogue.
+# Above this physical input size, however, parsing every JSON record is the
+# dominant work and holds the GIL.  A bounded process pool then keeps the exact
+# full-byte scan while allowing independent branches to use separate cores.
+PROCESS_SCAN_MIN_BYTES = 128 * 1024 * 1024
+_PARSE_CACHE_ABI = 1
+_PARSE_CACHE_LIMIT = 16_384
+_PARSE_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_PARSE_FIELDS = (
+    "session_id", "sha256", "byte_count", "line_count", "cwd", "timestamp", "parent_id",
+    "record_format", "last_record_at", "page", "max_ordinal", "first_record_format",
+)
+
+
+def _cache_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+
+
+def _cache_context() -> list:
+    return [_PARSE_CACHE_ABI, list(sys.version_info[:3]), [codec.value for codec in READABLE_CODECS]]
+
+
+class SessionParseCache:
+    """Local and disposable. Reading a cache never writes it."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.entries: dict[str, dict] = {}
+        self.dirty = False
+        try:
+            with path.open("rb") as handle:
+                body = handle.read(_PARSE_CACHE_MAX_BYTES + 1)
+            if len(body) > _PARSE_CACHE_MAX_BYTES:
+                return
+            saved = json.loads(body)
+            data = saved["data"]
+            if data["context"] == _cache_context() and _cache_digest(data) == saved["sha256"]:
+                self.entries = data["entries"] if isinstance(data["entries"], dict) else {}
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
+            pass
+
+    def remember(self, key: str, item: dict) -> None:
+        if self.entries.get(key) != item:
+            self.entries.pop(key, None)
+            self.entries[key] = item
+            self.dirty = True
+
+    def publish(self) -> None:
+        """Publish only after the operation using these reads has succeeded."""
+        if not self.dirty:
+            return
+        try:
+            recent = dict(list(self.entries.items())[-_PARSE_CACHE_LIMIT:])
+            data = {"context": _cache_context(), "entries": recent}
+            write_json_atomically(self.path, {"data": data, "sha256": _cache_digest(data)})
+        except (OSError, ValueError, RecursionError):
+            return
+        self.dirty = False
 
 
 class SessionState(str, Enum):
@@ -121,6 +187,11 @@ class SessionDescriptor:
     #: Diagnostic first-record reading, kept apart from whole-history format.
     #: It does not participate in a branch's identity or transfer decisions.
     first_record_format: str = field(default="unreadable", compare=False)
+    #: The completed scan's file identity and line limit. A descriptor made
+    #: outside the scanner cannot substitute for reading a branch comparison.
+    scan_signature: tuple[int, int, str | None] | None = field(default=None, compare=False, repr=False)
+    scan_change_stamp: int | None = field(default=None, compare=False, repr=False)
+    scan_line_limit: int | None = field(default=None, compare=False, repr=False)
 
     @property
     def page_start(self) -> int:
@@ -169,6 +240,7 @@ def scan_sessions(
     scheduler: WorkScheduler | None = None,
     on_tree_file: Callable[[Path], None] | None = None,
     on_tree_complete: Callable[[], None] | None = None,
+    parse_cache: SessionParseCache | None = None,
 ) -> SessionCatalog:
     """Read one tree; an injected scheduler remains owned by its caller.
 
@@ -180,6 +252,7 @@ def scan_sessions(
         volatile=volatile, progress=progress, phase=phase, scheduler=scheduler,
         on_tree_file=on_tree_file,
         on_tree_complete=on_tree_complete,
+        parse_cache=parse_cache,
     )[0]
 
 
@@ -218,6 +291,7 @@ def _scan_catalogs(
     on_tree_file: Callable[[Path], None] | None = None,
     on_tree_complete: Callable[[], None] | None = None,
     cancellation: CancellationToken | None = None,
+    parse_cache: SessionParseCache | None = None,
 ) -> list[SessionCatalog]:
     # Flatten both roots into one read batch: a scan never runs inside a
     # scheduler worker and therefore cannot multiply pools or deadlock them.
@@ -235,11 +309,21 @@ def _scan_catalogs(
     report(progress, phase, 0, total)
     results: list[SessionDescriptor | None] = [None] * total
     done = 0
+    cache_keys = [_cache_digest(str(path)) for path, *_rest in jobs] if parse_cache is not None else []
+    cache_inputs = [parse_cache.entries.get(key) for key in cache_keys] if parse_cache is not None else []
+    cache_updates: list[dict | None] = [None] * total if parse_cache is not None else []
 
     def read(index: int) -> SessionDescriptor:
         if cancellation is not None:
             cancellation.checkpoint()
         path, root, state, machine = jobs[index]
+        if parse_cache is not None:
+            item, entry = _scan_cached_jsonl(
+                path, root, state, max_line_bytes, volatile, machine, cache_inputs[index],
+            )
+            if entry is not None:
+                cache_updates[index] = entry
+            return item
         return _scan_jsonl(path, root, state, max_line_bytes, volatile, machine)
 
     def store(index: int, item: SessionDescriptor) -> None:
@@ -248,9 +332,205 @@ def _scan_catalogs(
         done += 1
         report(progress, phase, done, total)
 
+    process_scan = SCAN_WORKERS > 1 and _physical_bytes(jobs) >= PROCESS_SCAN_MIN_BYTES
+    if process_scan:
+        process_jobs = [
+            (path, root, state, max_line_bytes, volatile, machine)
+            for path, root, state, machine in jobs
+        ]
+
+        def process_result(index: int, _job, item) -> None:
+            if parse_cache is None:
+                store(index, item)
+            else:
+                descriptor, entry = item
+                cache_updates[index] = entry
+                store(index, descriptor)
+
+        worker = _scan_process_job
+        if parse_cache is not None:
+            worker = _scan_cached_process_job
+            process_jobs = [(*job, entry) for job, entry in zip(process_jobs, cache_inputs)]
+
+        if scheduler is not None:
+            scheduler.map_process(
+                worker, process_jobs, on_result=process_result,
+                cancellation=cancellation,
+            )
+        else:
+            with WorkScheduler(
+                cpu_workers=SCAN_WORKERS, io_workers=SCAN_WORKERS,
+                large_file_limit=SCAN_WORKERS,
+            ) as owned:
+                owned.map_process(
+                    worker, process_jobs, on_result=process_result,
+                    cancellation=cancellation,
+                )
+    else:
+        _read_catalog_jobs(
+            jobs, store, read, scheduler=scheduler,
+            cancellation=cancellation,
+        )
+
+    catalogs: list[SessionCatalog] = []
+    if cancellation is not None:
+        cancellation.checkpoint()
+    if parse_cache is not None:
+        for key, entry in zip(cache_keys, cache_updates):
+            if entry is not None:
+                parse_cache.remember(key, entry)
+    offset = 0
+    for size in sizes:
+        descriptors = [item for item in results[offset:offset + size] if item is not None]
+        catalogs.append(_catalog_from_descriptors(descriptors, volatile))
+        offset += size
+    return catalogs
+
+
+def _physical_bytes(jobs: list[tuple[Path, Path, SessionState, str | None]]) -> int:
+    """Best-effort size used only to choose an execution strategy."""
+    total = 0
+    for path, *_rest in jobs:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            # The real reader records a vanished/unreadable branch.  Selection
+            # of a pool must not turn that evidence into a scan failure.
+            pass
+    return total
+
+
+def _scan_process_job(
+    job: tuple[Path, Path, SessionState, int, bool, str | None],
+) -> SessionDescriptor:
+    """Picklable process entry point for one independent branch."""
+    path, root, state, max_line_bytes, volatile, machine = job
+    return _scan_jsonl(path, root, state, max_line_bytes, volatile, machine)
+
+
+def _scan_cached_process_job(job) -> tuple[SessionDescriptor, dict | None]:
+    return _scan_cached_jsonl(*job)
+
+
+class _PhysicalReader(io.RawIOBase):
+    """Hash the bytes supplied to the decoder, including its read-ahead."""
+
+    def __init__(self, raw: BinaryIO) -> None:
+        self.raw = raw
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        count = self.raw.readinto(buffer)
+        if count:
+            self.digest.update(memoryview(buffer)[:count])
+            self.size += count
+        return count
+
+    def finish(self) -> list:
+        # A decoder may stop at a valid member without reading until the
+        # physical EOF. Include whatever is left in the fingerprint.
+        while chunk := self.raw.read(1024 * 1024):
+            self.digest.update(chunk)
+            self.size += len(chunk)
+        return [self.digest.hexdigest(), self.size]
+
+
+def _scan_cached_jsonl(
+    path: Path, root: Path, state: SessionState, max_line_bytes: int,
+    volatile: bool, machine: str | None, entry: dict | None,
+) -> tuple[SessionDescriptor, dict | None]:
+    codec = codec_of(path)
+    if codec is None:
+        return _scan_jsonl(path, root, state, max_line_bytes, volatile, machine), None
+    context = [codec.value, max_line_bytes]
+    try:
+        with open_shared(path) as raw:
+            info = os.fstat(raw.fileno())
+            signature = _signature(info)
+            stamp = _handle_change_stamp(raw, info)
+            if stamp is not None and _file_id(info) is not None:
+                if isinstance(entry, dict) and entry.get("options") == context:
+                    physical = _PhysicalReader(raw).finish()
+                    if physical == entry.get("physical") and physical[1] == info.st_size:
+                        cached = _cached_descriptor(
+                            entry, path, root, state, machine, info, stamp, max_line_bytes,
+                        )
+                        if cached is not None and matches_session_scan(root, path, cached, require_change_stamp=True):
+                            return cached, None
+                    raw.seek(0)
+                physical_reader = _PhysicalReader(raw)
+                with io.BufferedReader(physical_reader) as reader:
+                    item = _scan_jsonl(path, root, state, max_line_bytes, volatile, machine, raw=reader)
+                if item.scan_signature is None:
+                    return item, None
+                physical = physical_reader.finish()
+                if (
+                    item.scan_signature == signature and item.scan_change_stamp == stamp
+                    and physical[1] == info.st_size
+                    and matches_session_scan(root, path, item, require_change_stamp=True)
+                ):
+                    return item, {
+                        "options": context, "physical": physical,
+                        "fields": {name: getattr(item, name) for name in _PARSE_FIELDS},
+                        "codes": [code for code in item.codes if code != "FILENAME_ID_MISMATCH"],
+                    }
+                return _with_code(item, SessionState.INVALID, "READ_CHANGED"), None
+    except OSError:
+        # Let the standard scanner handle disappearing files, optional
+        # identity support and shared-handle errors using its normal codes.
+        pass
+    return _scan_jsonl(path, root, state, max_line_bytes, volatile, machine), None
+
+
+def _cached_descriptor(
+    entry: dict, path: Path, root: Path, state: SessionState, machine: str | None,
+    info: os.stat_result, stamp: int, max_line_bytes: int,
+) -> SessionDescriptor | None:
+    fields, codes = entry.get("fields"), entry.get("codes")
+    if not isinstance(fields, dict) or fields.keys() != set(_PARSE_FIELDS):
+        return None
+    if not isinstance(codes, list) or any(not isinstance(code, str) or code in INVALID_CODES for code in codes):
+        return None
+    if any(not isinstance(fields[name], str) or not fields[name] for name in ("session_id", "sha256", "first_record_format")):
+        return None
+    if any(type(fields[name]) is not int or fields[name] <= 0 for name in ("line_count", "byte_count")):
+        return None
+    if any(fields[name] is not None and not isinstance(fields[name], str) for name in (
+        "cwd", "timestamp", "parent_id", "record_format", "last_record_at", "page",
+    )):
+        return None
+    if fields["max_ordinal"] is not None and type(fields["max_ordinal"]) is not int:
+        return None
+    if fields["page"] is not None and re.fullmatch(r"page-[0-9]+", fields["page"]) is None:
+        return None
+    if re.fullmatch(r"[0-9a-f]{64}", fields["sha256"]) is None:
+        return None
+    if fields["session_id"] not in Path(logical_name(path.name)).stem:
+        codes = [*codes, "FILENAME_ID_MISMATCH"]
+    return SessionDescriptor(
+        state=state, relative_path=path.relative_to(root).as_posix(), source_machine=machine,
+        codes=tuple(codes), mtime_ns=info.st_mtime_ns, file_id=_file_id(info),
+        scan_signature=_signature(info), scan_change_stamp=stamp, scan_line_limit=max_line_bytes,
+        **fields,
+    )
+
+
+def _read_catalog_jobs(
+    jobs: list[tuple[Path, Path, SessionState, str | None]],
+    store: Callable[[int, SessionDescriptor], None],
+    read: Callable[[int], SessionDescriptor],
+    *,
+    scheduler: WorkScheduler | None,
+    cancellation: CancellationToken | None,
+) -> None:
+    """Existing low-overhead path for catalogues too small for processes."""
+    total = len(jobs)
     packed = [index for index, (path, *_rest) in enumerate(jobs)
               if codec_of(path) not in (None, JsonlCodec.NONE)]
-    # Preserve the explicit serial path used for comparison/diagnostics.
     if SCAN_WORKERS <= 1:
         packed = []
     packed_set = set(packed)
@@ -277,16 +557,6 @@ def _scan_catalogs(
     else:
         with WorkScheduler(io_workers=SCAN_WORKERS, large_file_limit=SCAN_WORKERS) as owned:
             read_packed(owned)
-
-    catalogs: list[SessionCatalog] = []
-    if cancellation is not None:
-        cancellation.checkpoint()
-    offset = 0
-    for size in sizes:
-        descriptors = [item for item in results[offset:offset + size] if item is not None]
-        catalogs.append(_catalog_from_descriptors(descriptors, volatile))
-        offset += size
-    return catalogs
 
 
 def _catalog_from_descriptors(descriptors: list[SessionDescriptor], volatile: bool) -> SessionCatalog:
@@ -348,6 +618,8 @@ def _scan_jsonl(
     max_line_bytes: int,
     volatile: bool,
     source_machine: str | None,
+    *,
+    raw: BinaryIO | None = None,
 ) -> SessionDescriptor:
     if unsupported_container(path.name) is not None:
         return _unsupported_container(path, root, lifecycle, source_machine)
@@ -364,6 +636,7 @@ def _scan_jsonl(
             sha256=hashlib.sha256().hexdigest(), byte_count=0, line_count=0,
             source_machine=source_machine, codes=("READ_ERROR",),
         )
+    before_change = _change_stamp(path, before)
     digest = hashlib.sha256()
     byte_count = 0
     line_count = 0
@@ -379,7 +652,7 @@ def _scan_jsonl(
     try:
         # Every metric below is taken from the decompressed stream, so a branch
         # kept in a compressed container is the same branch as the plain one.
-        with open_jsonl(path) as handle:
+        with (open_jsonl(path) if raw is None else open_jsonl(path, raw=raw)) as handle:
             while True:
                 line = handle.readline(max_line_bytes + 1)
                 if not line:
@@ -476,7 +749,11 @@ def _scan_jsonl(
     except OSError:
         # Removed or replaced while it was being read.
         after = None
-    if after is None or _signature(before) != _signature(after):
+    after_change = _change_stamp(path, after) if after is not None else None
+    if (
+        after is None or _signature(before) != _signature(after)
+        or before_change is not None and after_change is not None and before_change != after_change
+    ):
         codes.append("READ_CHANGED")
         after = after or before
     if not complete_tail:
@@ -504,6 +781,9 @@ def _scan_jsonl(
         page=page,
         max_ordinal=max_ordinal,
         first_record_format=first_record_format,
+        scan_signature=_signature(after) if state is lifecycle and complete_tail else None,
+        scan_change_stamp=after_change if before_change == after_change else None,
+        scan_line_limit=max_line_bytes,
     )
 
 
@@ -707,6 +987,45 @@ def _signature(value: os.stat_result) -> tuple[int, int, str | None]:
     return value.st_size, value.st_mtime_ns, _file_id(value)
 
 
+def _change_stamp(path: Path, info: os.stat_result) -> int | None:
+    if os.name != "nt":
+        return getattr(info, "st_ctime_ns", None)
+    # Python's st_ctime on Windows is creation time. Use the native
+    # change time and require this handle to name the same file as stat.
+    try:
+        with open_shared(path) as handle:
+            if _file_id(info) is not None and _signature(os.fstat(handle.fileno())) == _signature(info):
+                return _handle_change_stamp(handle, info)
+    except OSError:
+        pass
+    return None
+
+
+def _handle_change_stamp(handle: BinaryIO, info: os.stat_result) -> int | None:
+    if os.name == "nt":
+        return windows_change_time(handle) or None
+    return getattr(info, "st_ctime_ns", None)
+
+
+def matches_session_scan(
+    root: Path, path: Path, item: SessionDescriptor, *, require_change_stamp: bool = False,
+) -> bool:
+    """Check whether the path still names the file read by the full scan."""
+    if item.scan_signature is None:
+        return False
+    try:
+        _require_inside(path, root.resolve())
+        info = path.stat(follow_symlinks=False)
+        if is_link(path, info) or _signature(info) != item.scan_signature:
+            return False
+        current = _change_stamp(path, info) if item.scan_change_stamp is not None else None
+        if current is None:
+            return not require_change_stamp
+        return current == item.scan_change_stamp
+    except (OSError, RuntimeError):
+        return False
+
+
 def _file_id(value: os.stat_result) -> str | None:
     inode = getattr(value, "st_ino", 0)
     return f"{getattr(value, 'st_dev', 0):x}:{inode:x}" if inode else None
@@ -744,6 +1063,7 @@ def scan_both_sides(
     progress: ProgressCallback | None = None,
     scheduler: WorkScheduler | None = None,
     cancellation: CancellationToken | None = None,
+    parse_cache: SessionParseCache | None = None,
 ) -> tuple[SessionCatalog, SessionCatalog]:
     """`.codex` and the cloud mirror, read at the same time. Reads only.
 
@@ -758,5 +1078,6 @@ def scan_both_sides(
         [(local_root, local_machine), (remote_root, remote_machine)],
         max_line_bytes=max_line_bytes, volatile=volatile, progress=progress,
         phase="sessions", scheduler=scheduler, cancellation=cancellation,
+        parse_cache=parse_cache,
     )
     return local, remote

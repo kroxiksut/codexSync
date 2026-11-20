@@ -115,7 +115,8 @@ class ParallelPreflightTests(unittest.TestCase):
         self.assertEqual(by_name["sync_rules"].status, "WARN")
         self.assertIn("worker broke", by_name["sync_rules"].details)
         self.assertEqual(by_name["config_compat"].status, "PASS")
-        self.assertEqual(len(report.checks), 23)
+        self.assertEqual(by_name["plugin_inventory"].status, "PASS")
+        self.assertEqual(len(report.checks), 24)
 
     def test_preflight_observes_once_and_does_not_change_any_file_or_mtime(self) -> None:
         scheduler = WorkScheduler(io_workers=4)
@@ -133,7 +134,7 @@ class ParallelPreflightTests(unittest.TestCase):
             .collect_preflight_observations,
         ) as collect:
             report = run_preflight(self.config, facts={}, scheduler=scheduler)
-        self.assertEqual(len(report.checks), 23)
+        self.assertEqual(len(report.checks), 24)
         self.assertEqual(collect.call_count, 1)
         self.assertEqual(snapshot(), before)
 

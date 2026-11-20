@@ -85,6 +85,8 @@ def build_issue_report(config_path: Path, operation: OperationKind = OperationKi
     # This separate inventory includes roles and matches absent from the
     # preflight safety decision. It is a fresh reading, not that snapshot.
     report["process"] = _process(names, markers, source)
+    if "plugin_inventory" in facts:
+        report["plugin_inventory"] = facts["plugin_inventory"]
     sandbox = facts.get("sandbox")
     if sandbox is not None and sandbox.applicable:
         # Counts and owner kinds only: a finding names a folder.

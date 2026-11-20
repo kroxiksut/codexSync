@@ -81,6 +81,7 @@ class SyncEngine:
         stage_operation_id: str | None = None,
         progress_events: ProgressLog | None = None,
         cancellation: CancellationToken | None = None,
+        verify_destination_after_replace: bool = True,
     ) -> None:
         self._backup_manager = backup_manager
         self._temp_dir = temp_dir
@@ -106,6 +107,7 @@ class SyncEngine:
         self._stage_operation_id = stage_operation_id
         self._progress_events = progress_events
         self._cancellation = cancellation
+        self._verify_destination_after_replace = verify_destination_after_replace
         self.applied_files: list[AppliedFile] = []
         self._event_phase = "stage_chats"
         self._event_done = 0
@@ -553,7 +555,7 @@ class SyncEngine:
         expected_hash: str | None = None,
     ) -> None:
         self._ensure_parent(action.dst)
-        if expected_hash is None:
+        if expected_hash is None and self._verify_destination_after_replace:
             expected_hash = _sha256_file(staged)
         try:
             self._replace_with_retry(staged, action.dst, unchanged)
@@ -567,7 +569,7 @@ class SyncEngine:
                 LOG.exception("fallback copy failed for staged file %s -> %s", staged, action.dst)
                 raise
         self._replacement_completed = True
-        if _sha256_file(action.dst) != expected_hash:
+        if self._verify_destination_after_replace and _sha256_file(action.dst) != expected_hash:
             raise FailSafeError("Destination verification failed after atomic replace", code="DESTINATION_VERIFY_FAILED")
 
     def _replace_with_retry(

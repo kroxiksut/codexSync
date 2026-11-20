@@ -23,8 +23,10 @@ The screenshots show invented demo data. They are rendered offscreen by
 
 ## Starting it
 
+Install the 0.2 alpha with `--pre`:
+
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"
+python -m pip install --upgrade --pre "codexsync[gui]"
 codexsync-gui                      # opens the config it used last
 codexsync-gui -c config.toml       # or: python -m codexsync.gui -c config.toml
 ```

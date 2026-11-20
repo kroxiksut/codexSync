@@ -45,12 +45,15 @@ an error.
 ## Install
 
 The core and the command line have no dependencies. The window is an optional
-extra. `--upgrade` makes the same command replace an installed 0.1.
+extra. `--pre` selects the 0.2 alpha and `--upgrade` replaces an earlier
+installation.
 
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"    # the command line and the window (PySide6)
-python -m pip install --upgrade codexsync           # the command line only
+python -m pip install --upgrade --pre "codexsync[gui]"    # the command line and the window (PySide6)
+python -m pip install --upgrade --pre codexsync           # the command line only
 ```
+
+For the stable 0.1 CLI, use `python -m pip install --upgrade "codexsync<0.2"`.
 
 On Windows you can instead download a build from
 [Releases](https://github.com/kroxiksut/codexSync/releases), none of which
@@ -95,7 +98,7 @@ packages, the AppImage and the `tar.gz` are on the
 and newer) and ARM64 (glibc 2.39 or later: Ubuntu 24.04, Debian 13 and newer).
 Each holds both programs, `codexsync` and `codexsync-gui`.
 A file is named after the release tag and the processor, such as
-`codexsync-v0.2.0-linux-amd64.deb` (`arm64` for ARM64); below, `<tag>` stands for
+`codexsync-v0.2.0-alpha.2-linux-amd64.deb` (`arm64` for ARM64); below, `<tag>` stands for
 the tag.
 
 **A .deb package** (Ubuntu, Debian and their relatives) installs into
@@ -145,8 +148,8 @@ call them by name, link both into `~/.local/bin`
 pipx` or `sudo dnf install pipx`, then `pipx ensurepath`):
 
 ```sh
-pipx install "codexsync[gui]"   # the window and the command line; without [gui], the command line only
-pipx upgrade codexsync          # update
+pipx install --pip-args="--pre" "codexsync[gui]"   # the window and the command line; without [gui], the command line only
+pipx upgrade --pip-args="--pre" codexsync           # update
 pipx uninstall codexsync        # remove
 ```
 
@@ -156,8 +159,8 @@ first:
 
 ```sh
 python3 -m venv ~/.venvs/codexsync
-~/.venvs/codexsync/bin/pip install "codexsync[gui]"            # install
-~/.venvs/codexsync/bin/pip install --upgrade "codexsync[gui]"  # update
+~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"            # install
+~/.venvs/codexsync/bin/pip install --upgrade --pre "codexsync[gui]"  # update
 rm -rf ~/.venvs/codexsync                                      # remove
 ```
 

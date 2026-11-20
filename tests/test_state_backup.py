@@ -250,8 +250,10 @@ class StateBackupTests(unittest.TestCase):
             info = real_stat(path, *args, **kwargs)
             if Path(path) == target:
                 seen["count"] += 1
-                if seen["count"] >= 2:
-                    return mock.Mock(st_size=info.st_size + 1, st_mtime_ns=info.st_mtime_ns + 1, st_mode=info.st_mode)
+                if seen["count"] >= 3:
+                    changed = mock.Mock(wraps=info)
+                    changed.st_size = info.st_size + 1
+                    return changed
             return info
 
         with mock.patch.object(Path, "stat", moving_stat):
@@ -267,6 +269,49 @@ class StateBackupTests(unittest.TestCase):
             with self.assertRaises(FailSafeError):
                 self._backup()
         self.assertEqual(list(self.copies.iterdir()), [])
+
+    def test_a_changed_source_set_keeps_the_previous_readable_copy(self) -> None:
+        self.config_path = self._config(keep=1)
+        start = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
+        session = self.codex / "sessions" / "2026" / "09" / "25" / "rollout-a.jsonl"
+        wal = self.codex / "state_5.sqlite-wal"
+        shm = self.codex / "state_5.sqlite-shm"
+
+        def replace_session() -> None:
+            info = session.stat()
+            replacement = session.with_suffix(".tmp")
+            _write(replacement, '{"a":2}\n')
+            os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
+            replacement.replace(session)
+
+        cases = (
+            ("session disappeared", session.unlink, lambda: _write(session, '{"a":1}\n'), 0),
+            ("WAL disappeared", wal.unlink, lambda: _write(wal, b"wal"), 0),
+            ("SHM appeared", lambda: _write(shm, b"shm"), shm.unlink, 1),
+            ("session replaced", replace_session, lambda: _write(session, '{"a":1}\n'), 1),
+        )
+        for step, (name, change, undo, when) in enumerate(cases):
+            with self.subTest(name=name):
+                created = start + timedelta(hours=2 * step)
+                previous, _ = self._backup(now=lambda: created)
+                changed = False
+
+                def progress(_phase, done, total):
+                    nonlocal changed
+                    if not changed and done == when * total:
+                        changed = True
+                        change()
+
+                try:
+                    with self.assertRaises(FailSafeError):
+                        self._backup(now=lambda: created + timedelta(hours=1), progress=progress)
+                finally:
+                    if changed:
+                        undo()
+                self.assertEqual(list(self.copies.iterdir()), [previous.path])
+                with zipfile.ZipFile(previous.path) as archive:
+                    self.assertIsNone(archive.testzip())
+                    self.assertEqual(archive.read("state_5.sqlite-wal"), b"wal")
 
     # --- keeping N ------------------------------------------------------------
 

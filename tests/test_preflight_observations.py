@@ -251,7 +251,7 @@ class PreflightObservationTests(unittest.TestCase):
             "config", "state_dirs", "codex_compat", "config_compat", "sync_rules", "project_registry",
             "local_state", "cloud_root", "backup_dir", "temp_dir", "manifest", "codex_process",
             "codex_startup", "codex_sandbox", "session_catalog", "session_visibility", "session_format",
-            "sqlite_audit", "session_index", "global_state_schema", "guardian_latest_good",
+            "sqlite_audit", "session_index", "global_state_schema", "plugin_inventory", "guardian_latest_good",
             "orphan_temp_files", "mutation_journal",
         ])
         self.assertEqual(disk_snapshot(), before)

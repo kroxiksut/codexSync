@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml"><img src="https://github.com/kroxiksut/codexSync/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/kroxiksut/codexSync/releases"><img src="https://img.shields.io/github/v/release/kroxiksut/codexSync?include_prereleases&sort=semver" alt="Release"></a>
+  <a href="https://hub.xerj.org/contributors/kroxiksut"><img src="https://hub.xerj.org/contributors/kroxiksut/badge.svg" alt="XERJ Corpus Hub contributor"></a>
   <img src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-3776AB?logo=python&logoColor=white" alt="Python 3.11 | 3.12 | 3.13 | 3.14">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platform: Windows | macOS | Linux">
   <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="Runtime dependencies: 0">
@@ -79,18 +80,20 @@ Syncthing 并不够：Codex 可能正在写入它，同一个对话可能在两�
 
 **使用 Node.js**，在 Windows 或 Linux 上：`npm install -g @kroxut/codexsync`（[通过 npm 安装](docs/zh/README.md#安装)）。
 
-**使用 Python 3.11+**，在 Windows、macOS 或 Linux 上——加上 `--upgrade`，已安装的 0.1 也会被替换。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
+**使用 Python 3.11+**，在 Windows、macOS 或 Linux 上，使用 `--pre` 安装 0.2 alpha，用 `--upgrade` 更新已安装的版本。在 macOS 上所有读取和计划都能用，但在进程检测器于那里得到验证之前，
 写入会被拒绝；在 Linux 上它已经得到验证（[平台](docs/zh/README.md#平台)）。在 Linux 上系统自带的 Python 不允许 `pip install`（PEP 668），
 请使用 `pipx` 或虚拟环境——两种方式及其更新和卸载见[在 Linux 上安装](docs/zh/README.md#在-linux-上)。
 
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"    # 窗口和命令行
+python -m pip install --upgrade --pre "codexsync[gui]"    # 窗口和命令行
 codexsync-gui                                       # 首次启动时，窗口会帮你创建或打开 config.toml
 
-python -m pip install --upgrade codexsync           # 只有命令行，没有依赖
+python -m pip install --upgrade --pre codexsync           # 只有命令行，没有依赖
 codexsync init-config --output config.toml
 codexsync -c config.toml doctor
 ```
+
+如需稳定版 0.1 的命令行工具，请运行 `python -m pip install --upgrade "codexsync<0.2"`。
 
 从源码安装以及首次运行的详细步骤：[安装与上手](docs/zh/README.md#安装)。
 
@@ -113,7 +116,7 @@ codexsync -c config.toml doctor
 
 ## 状态
 
-**0.2.0** —— 第一个在命令行之外带上窗口（`codexsync[gui]` 或 `codexsync-gui.exe`）的稳定版本，也是第一个提供 Linux 软件包和 npm 包的版本。
+**0.2.0a2** 是 0.2 的第二个 alpha 版本，提供命令行、窗口（`codexsync[gui]` 或 `codexsync-gui.exe`）、Linux 软件包和 npm 包。
 0.2 理解并修改的 Codex 状态比 0.1 多得多，每次写入都经过锁、日志和经过校验的备份。如果你在两台或更多机器上使用 Codex，
 请[告诉我们](https://github.com/kroxiksut/codexSync/issues/new/choose)结果。0.2 alpha 写入的数据仍然可以读取。
 

@@ -41,12 +41,14 @@
 
 ## 安装
 
-内核和命令行没有任何依赖。窗口是可选的附加部分。加上 `--upgrade`，同一条命令也会替换已安装的 0.1。
+内核和命令行没有任何依赖。窗口是可选的附加部分。使用 `--pre` 安装 0.2 alpha，用 `--upgrade` 更新已安装的版本。
 
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"    # 命令行加窗口（PySide6）
-python -m pip install --upgrade codexsync           # 只装命令行
+python -m pip install --upgrade --pre "codexsync[gui]"    # 命令行加窗口（PySide6）
+python -m pip install --upgrade --pre codexsync           # 只装命令行
 ```
+
+如需稳定版 0.1 的命令行工具，请运行 `python -m pip install --upgrade "codexsync<0.2"`。
 
 在 Windows 上也可以直接从
 [Releases](https://github.com/kroxiksut/codexSync/releases) 下载构建好的版本，
@@ -87,7 +89,7 @@ pip install -e ".[gui]"
 支持 x64（glibc 2.35 或更新：Ubuntu 22.04、Debian 12、Fedora 36 及更新版本）和
 ARM64（glibc 2.39 或更新：Ubuntu 24.04、Debian 13 及更新版本）。每种都包含
 `codexsync` 和 `codexsync-gui` 两个程序。
-文件名由发布标签和处理器组成，例如 `codexsync-v0.2.0-linux-amd64.deb`（ARM64 为
+文件名由发布标签和处理器组成，例如 `codexsync-v0.2.0-alpha.2-linux-amd64.deb`（ARM64 为
 `arm64`）；下面的 `<标签>` 表示发布标签。
 
 **.deb 软件包**（Ubuntu、Debian 及其衍生版）安装到 `/opt/codexsync`，两个命令都在
@@ -134,8 +136,8 @@ rm -rf ~/.local/opt/codexsync                                                   
 `pipx ensurepath`）：
 
 ```sh
-pipx install "codexsync[gui]"   # 窗口和命令行；不带 [gui] 则只有命令行
-pipx upgrade codexsync          # 更新
+pipx install --pip-args="--pre" "codexsync[gui]"   # 窗口和命令行；不带 [gui] 则只有命令行
+pipx upgrade --pip-args="--pre" codexsync           # 更新
 pipx uninstall codexsync        # 卸载
 ```
 
@@ -144,8 +146,8 @@ Debian 上请先 `sudo apt install python3-venv`：
 
 ```sh
 python3 -m venv ~/.venvs/codexsync
-~/.venvs/codexsync/bin/pip install "codexsync[gui]"            # 安装
-~/.venvs/codexsync/bin/pip install --upgrade "codexsync[gui]"  # 更新
+~/.venvs/codexsync/bin/pip install --pre "codexsync[gui]"            # 安装
+~/.venvs/codexsync/bin/pip install --upgrade --pre "codexsync[gui]"  # 更新
 rm -rf ~/.venvs/codexsync                                      # 卸载
 ```
 

@@ -8,7 +8,10 @@ collapse), or that a directory with the right name holds the right thing.
 from __future__ import annotations
 
 import gzip
+from dataclasses import replace
 import json
+import lzma
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -58,9 +61,13 @@ class _Sides(unittest.TestCase):
         self.remote.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, self.root, True)
 
-    def _plan(self, **kwargs):
+    def _plan(self, *, stream_pair: bool = False, **kwargs):
+        local, remote = scan_sessions(self.local), scan_sessions(self.remote)
+        if stream_pair:
+            for catalog in (local, remote):
+                catalog.descriptors = [replace(item, scan_line_limit=None) for item in catalog.descriptors]
         return build_transfer_plan(
-            scan_sessions(self.local), scan_sessions(self.remote),
+            local, remote,
             local_root=self.local, remote_root=self.remote,
             source_machine="desktop", target_machine="laptop",
             **kwargs,
@@ -74,6 +81,209 @@ class _Sides(unittest.TestCase):
 
 class UnusableBranchTests(_Sides):
     """CS-298: a copy that cannot be read is not a copy that is absent."""
+
+    def test_a_persisted_catalog_only_parses_the_history_that_changed(self) -> None:
+        from codexsync.session_catalog import SessionParseCache, _scan_jsonl
+
+        left = _session(self.local / "sessions" / "rollout-a.jsonl", "a", [{"r": 1}])
+        _session(self.local / "sessions" / "rollout-b.jsonl", "b", [{"r": 1}])
+        index = self.root / "local-cache.json"
+        cache = SessionParseCache(index)
+        before = scan_sessions(self.local, parse_cache=cache)
+        cache.publish()
+        warm = SessionParseCache(index)
+        with mock.patch("codexsync.session_catalog._scan_jsonl", wraps=_scan_jsonl) as parse:
+            self.assertEqual(before, scan_sessions(self.local, parse_cache=warm))
+            parse.assert_not_called()
+
+            info = left.stat()
+            _session(left, "a", [{"r": 2}])
+            os.utime(left, ns=(info.st_atime_ns, info.st_mtime_ns))
+            fresh = scan_sessions(self.local, parse_cache=warm)
+            parse.assert_called_once()
+        self.assertEqual(fresh, scan_sessions(self.local))
+        self.assertNotEqual(before.descriptors[0].sha256, fresh.descriptors[0].sha256)
+
+    def test_cache_reconstructs_archive_pages_and_duplicates_from_current_paths(self) -> None:
+        from codexsync.session_catalog import SessionParseCache, _scan_jsonl
+
+        source = _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"ordinal": 1}])
+        page = self.local / "sessions" / "rollout-s_page.jsonl"
+        page.write_bytes(
+            b'{"type":"session_meta","payload":{"id":"s","history_base":'
+            b'{"thread_id":"s","end_ordinal_exclusive":2}}}\n{"ordinal":2}\n'
+        )
+        remote = self.remote / "sessions" / "rollout-s.jsonl.xz"
+        remote.parent.mkdir()
+        remote.write_bytes(lzma.compress(source.read_bytes()))
+        index = self.root / "local-cache.json"
+        cache = SessionParseCache(index)
+        for root in (self.local, self.remote):
+            self.assertEqual(scan_sessions(root, parse_cache=cache), scan_sessions(root))
+        self.assertIn("s#page-2", {item.branch_key for item in scan_sessions(self.local).descriptors})
+        cache.publish()
+        cache = SessionParseCache(index)
+        with mock.patch("codexsync.session_catalog._scan_jsonl", wraps=_scan_jsonl) as parse:
+            self.assertEqual(scan_sessions(self.remote, parse_cache=cache), scan_sessions(self.remote))
+            parse.assert_called_once()  # Only the explicitly uncached reference.
+
+        archive = self.remote / "archived_sessions" / remote.name
+        archive.parent.mkdir()
+        remote.rename(archive)
+        duplicate = self.local / "archived_sessions" / source.name
+        duplicate.parent.mkdir()
+        shutil.copyfile(source, duplicate)
+        cfg = dict(local_root=self.local, remote_root=self.remote, source_machine="desktop", target_machine="laptop")
+        cached = build_transfer_plan(
+            scan_sessions(self.local, parse_cache=cache), scan_sessions(self.remote, parse_cache=cache), **cfg,
+        )
+        self.assertEqual(cached.plan_id, self._plan().plan_id)
+        duplicate.unlink()
+        cached = build_transfer_plan(
+            scan_sessions(self.local, parse_cache=cache), scan_sessions(self.remote, parse_cache=cache), **cfg,
+        )
+        self.assertEqual(cached.plan_id, self._plan().plan_id)
+
+    def test_cache_corruption_and_parser_version_changes_are_misses(self) -> None:
+        from codexsync.session_catalog import SessionParseCache, _scan_jsonl
+
+        _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        index = self.root / "local-cache.json"
+        cache = SessionParseCache(index)
+        expected = scan_sessions(self.local, parse_cache=cache)
+        cache.publish()
+        with mock.patch("codexsync.session_catalog._scan_jsonl", wraps=_scan_jsonl) as parse:
+            with mock.patch("codexsync.session_catalog._PARSE_CACHE_ABI", 999):
+                self.assertEqual(expected, scan_sessions(self.local, parse_cache=SessionParseCache(index)))
+            parse.assert_called_once()
+            parse.reset_mock()
+            limited = scan_sessions(self.local, max_line_bytes=8, parse_cache=SessionParseCache(index))
+            self.assertIn("LINE_TOO_LARGE", limited.descriptors[0].codes)
+            parse.assert_called_once()
+            parse.reset_mock()
+            saved = json.loads(index.read_text())
+            next(iter(saved["data"]["entries"].values()))["fields"]["session_id"] = "wrong"
+            index.write_text(json.dumps(saved))
+            self.assertEqual(expected, scan_sessions(self.local, parse_cache=SessionParseCache(index)))
+            parse.assert_called_once()
+
+    def test_a_file_changed_while_its_cached_physical_hash_is_read_is_rejected(self) -> None:
+        from codexsync.session_catalog import SessionParseCache, _PhysicalReader
+
+        path = _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        cache = SessionParseCache(self.root / "local-cache.json")
+        previous = scan_sessions(self.local, parse_cache=cache)
+        finish = _PhysicalReader.finish
+        changed = False
+
+        def finish_then_change(reader):
+            nonlocal changed
+            digest = finish(reader)
+            if not changed:
+                changed = True
+                old = path.stat()
+                if os.name == "nt":
+                    _session(path, "s", [{"r": 2}])
+                else:
+                    replacement = _session(path.with_suffix(".new"), "s", [{"r": 2}])
+                    replacement.replace(path)
+                os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
+            return digest
+
+        with mock.patch.object(_PhysicalReader, "finish", finish_then_change):
+            (item,) = scan_sessions(self.local, parse_cache=cache).descriptors
+        self.assertIs(item.state, SessionState.INVALID)
+        self.assertIn("READ_CHANGED", item.codes)
+        self.assertNotEqual(previous, scan_sessions(self.local, parse_cache=cache))
+
+    def test_parallel_cache_scans_can_reload_without_changing_the_catalog(self) -> None:
+        from codexsync.session_catalog import SessionParseCache
+
+        _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        index = self.root / "local-cache.json"
+        reference = scan_sessions(self.local)
+        cache = SessionParseCache(index)
+        with (
+            mock.patch("codexsync.session_catalog.SCAN_WORKERS", 2),
+            mock.patch("codexsync.session_catalog.PROCESS_SCAN_MIN_BYTES", 0),
+        ):
+            self.assertEqual(reference, scan_sessions(self.local, parse_cache=cache))
+            cache.publish()
+            self.assertTrue(index.is_file())
+            warm = SessionParseCache(index)
+            self.assertEqual(reference, scan_sessions(self.local, parse_cache=warm))
+            self.assertFalse(warm.dirty)
+
+    def test_identical_histories_do_not_reopen_the_compressed_mirror(self) -> None:
+        local = _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        remote = self.remote / "sessions" / "rollout-s.jsonl.gz"
+        remote.parent.mkdir()
+        remote.write_bytes(gzip.compress(local.read_bytes(), mtime=0))
+        with mock.patch(
+            "codexsync.semantic_transfer.compare_session_branches", wraps=compare_session_branches,
+        ) as compare:
+            identical = self._plan()
+            self.assertIs(self._only(identical).relation, BranchRelation.IDENTICAL)
+            compare.assert_not_called()
+        self.assertEqual(identical.plan_id, self._plan(stream_pair=True).plan_id)
+
+        archived = self.remote / "archived_sessions" / remote.name
+        archived.parent.mkdir()
+        remote.rename(archived)
+        bases = {session_hash_for("s")}
+        with mock.patch(
+            "codexsync.semantic_transfer.compare_session_branches", wraps=compare_session_branches,
+        ) as compare:
+            missing_base = self._plan()
+            self.assertIs(self._only(missing_base).relation, BranchRelation.MISSING_BASE)
+            confirmed = self._plan(confirmed_bases=bases)
+            self.assertIs(self._only(confirmed).relation, BranchRelation.ARCHIVE_TRANSITION)
+            compare.assert_not_called()
+        self.assertEqual(missing_base.plan_id, self._plan(stream_pair=True).plan_id)
+        self.assertEqual(confirmed.plan_id, self._plan(stream_pair=True, confirmed_bases=bases).plan_id)
+
+    def test_a_pair_changed_after_the_catalog_is_not_classified_for_writes(self) -> None:
+        _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        remote = _session(self.remote / "sessions" / "rollout-s.jsonl", "s", [{"r": 2}])
+        local_catalog, remote_catalog = scan_sessions(self.local), scan_sessions(self.remote)
+        _session(remote, "s", [{"r": 1}, {"r": 2}])
+        plan = build_transfer_plan(
+            local_catalog, remote_catalog,
+            local_root=self.local, remote_root=self.remote,
+            source_machine="desktop", target_machine="laptop",
+        )
+        item = self._only(plan)
+        self.assertIs(item.action, TransferAction.BLOCKED_INVALID_BRANCH)
+        self.assertIn(COMPARISON_FAILED, item.codes)
+
+    def test_rewriting_an_identical_branch_in_place_with_its_old_mtime_blocks_it(self) -> None:
+        _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        remote = _session(self.remote / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        local_catalog, remote_catalog = scan_sessions(self.local), scan_sessions(self.remote)
+        original = remote.stat()
+        _session(remote, "s", [{"r": 2}])
+        os.utime(remote, ns=(original.st_atime_ns, original.st_mtime_ns))
+        current = remote.stat()
+        self.assertEqual(
+            (current.st_ino, current.st_size, current.st_mtime_ns),
+            (original.st_ino, original.st_size, original.st_mtime_ns),
+        )
+        plan = build_transfer_plan(
+            local_catalog, remote_catalog,
+            local_root=self.local, remote_root=self.remote,
+            source_machine="desktop", target_machine="laptop",
+        )
+        self.assertIs(self._only(plan).action, TransferAction.BLOCKED_INVALID_BRANCH)
+
+    def test_identical_branches_are_streamed_when_the_change_stamp_is_unavailable(self) -> None:
+        _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        _session(self.remote / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}])
+        with (
+            mock.patch("codexsync.session_catalog._change_stamp", return_value=None),
+            mock.patch("codexsync.semantic_transfer.compare_session_branches", wraps=compare_session_branches) as compare,
+        ):
+            self.assertIs(self._only(self._plan()).relation, BranchRelation.IDENTICAL)
+            compare.assert_called_once()
 
     def test_a_broken_mirror_copy_is_not_overwritten_unread(self) -> None:
         _session(self.local / "sessions" / "rollout-s.jsonl", "s", [{"r": 1}, {"r": 2}])

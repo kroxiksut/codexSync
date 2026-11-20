@@ -25,8 +25,10 @@
 
 ## Запуск
 
+Для установки альфы 0.2 нужен ключ `--pre`.
+
 ```powershell
-python -m pip install --upgrade "codexsync[gui]"
+python -m pip install --upgrade --pre "codexsync[gui]"
 codexsync-gui                      # открывает конфигурацию, открытую в прошлый раз
 codexsync-gui -c config.toml       # или: python -m codexsync.gui -c config.toml
 ```

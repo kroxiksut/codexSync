@@ -5,7 +5,7 @@ remain the authority for cross-process exclusion and safe filesystem writes.
 """
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from enum import Enum, auto
 import os
@@ -90,6 +90,8 @@ class WorkScheduler:
             raise ValueError("worker and large-file limits must be positive")
         self._cpu = ThreadPoolExecutor(max_workers=self.cpu_workers, thread_name_prefix="codexsync-cpu")
         self._io = ThreadPoolExecutor(max_workers=self.io_workers, thread_name_prefix="codexsync-io")
+        self._process: ProcessPoolExecutor | None = None
+        self._process_guard = Lock()
         self._large_files = Semaphore(large_file_limit)
         self._condition = Condition()
         self._active = 0
@@ -117,6 +119,11 @@ class WorkScheduler:
                 self._condition.wait()
         self._cpu.shutdown(wait=True)
         self._io.shutdown(wait=True)
+        with self._process_guard:
+            process = self._process
+            self._process = None
+        if process is not None:
+            process.shutdown(wait=True)
 
     @contextmanager
     def _activity(self) -> Iterator[None]:
@@ -143,6 +150,7 @@ class WorkScheduler:
         self, function: Callable[[_Item], _Result], items: Iterable[_Item], *,
         pool: str = "io", large_file: Callable[[_Item], bool] | None = None,
         caller_work: Iterable[Callable[[], None]] | None = None,
+        on_result: Callable[[int, _Item, _Result], None] | None = None,
         cancellation: CancellationToken | None = None,
     ) -> list[_Result]:
         """Run read-only work with bounded submission and ordered results.
@@ -155,7 +163,29 @@ class WorkScheduler:
         """
         with self._activity():
             return self._ordered_map(
-                function, items, pool=pool, large_file=large_file, caller_work=caller_work, cancellation=cancellation,
+                function, items, pool=pool, large_file=large_file, caller_work=caller_work,
+                on_result=on_result, cancellation=cancellation,
+            )
+
+    def map_process(
+        self, function: Callable[[_Item], _Result], items: Iterable[_Item], *,
+        on_result: Callable[[int, _Item, _Result], None] | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> list[_Result]:
+        """Run picklable CPU work in bounded processes, accepting ordered results here.
+
+        The pool is lazy: ordinary operations and small session catalogues never
+        pay for another interpreter.  Submission stays bounded to the configured
+        CPU worker count, and a failure joins work already handed to a child
+        before the original exception is propagated.
+        """
+        with self._activity():
+            with self._process_guard:
+                if self._process is None:
+                    self._process = ProcessPoolExecutor(max_workers=self.cpu_workers)
+                executor = self._process
+            return self._ordered_process_map(
+                executor, function, items, on_result=on_result, cancellation=cancellation,
             )
 
     @contextmanager
@@ -307,6 +337,74 @@ class WorkScheduler:
             failure = exc
         finally:
             release_caller()
+        if failure is not None:
+            for future in pending:
+                try:
+                    future.result()
+                except BaseException as exc:
+                    if isinstance(failure, OperationCancelled) and not isinstance(exc, OperationCancelled):
+                        failure = exc
+            raise failure
+        return results
+
+    def _ordered_process_map(
+        self,
+        executor: ProcessPoolExecutor,
+        function: Callable[[_Item], _Result],
+        items: Iterable[_Item],
+        *,
+        on_result: Callable[[int, _Item, _Result], None] | None,
+        cancellation: CancellationToken | None,
+    ) -> list[_Result]:
+        """The process-safe subset of ``_ordered_map`` (no worker closures)."""
+        iterator = iter(items)
+        pending: dict[Future[_Result], tuple[int, _Item]] = {}
+        results: list[_Result] = []
+        completed: dict[int, tuple[_Item, _Result]] = {}
+        exhausted = False
+        next_index = 0
+
+        def submit_one() -> None:
+            nonlocal exhausted, next_index
+            if cancellation is not None:
+                cancellation.checkpoint()
+            try:
+                item = next(iterator)
+            except StopIteration:
+                exhausted = True
+                return
+            index = next_index
+            next_index += 1
+            pending[executor.submit(function, item)] = index, item
+
+        failure: BaseException | None = None
+        try:
+            while next_index - len(results) < self.cpu_workers and not exhausted:
+                submit_one()
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in sorted(done, key=lambda future: pending[future][0]):
+                    error = future.exception()
+                    if error is not None and (failure is None or isinstance(failure, OperationCancelled)):
+                        failure = error
+                for future in done:
+                    index, item = pending.pop(future)
+                    if failure is None:
+                        completed[index] = item, future.result()
+                if failure is not None:
+                    break
+                while len(results) in completed:
+                    index = len(results)
+                    item, result = completed.pop(index)
+                    if on_result is not None:
+                        on_result(index, item, result)
+                    results.append(result)
+                while next_index - len(results) < self.cpu_workers and not exhausted:
+                    submit_one()
+            if failure is None and cancellation is not None:
+                cancellation.checkpoint()
+        except BaseException as exc:
+            failure = exc
         if failure is not None:
             for future in pending:
                 try:
