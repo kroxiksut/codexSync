@@ -9,6 +9,7 @@ gone and refuses with why when it is not; the watcher never asks.
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 
 from pathlib import Path
 import shutil
@@ -82,6 +83,41 @@ class WindowsTests(unittest.TestCase):
         self.assertEqual(asked, [], "not even the app is asked while a terminal session runs")
         self.assertFalse(outcome.asked)
         self.assertIn("terminal", outcome.detail)
+
+    def test_a_terminal_cli_with_a_recycled_ancestor_pid_blocks_the_quit_request(self) -> None:
+        # The helper's original parent exited, and the new app used its PID.
+        helper = _proc(90, 100, "pwsh.exe")
+        cli = _proc(91, 90, "codex.exe")
+        for started in (helper.started, 0):
+            with self.subTest(helper_start=started):
+                outcome, asked = self.ask(DESKTOP + (replace(helper, started=started), cli))
+                self.assertEqual(asked, [])
+                self.assertIn("terminal", outcome.detail)
+
+    def test_an_app_whose_creation_time_is_unknown_is_never_asked(self) -> None:
+        root = replace(DESKTOP[1], started=0)
+        outcome, asked = self.ask((root,))
+        self.assertEqual(asked, [])
+        self.assertIn("creation time", outcome.detail)
+
+    def test_equal_creation_times_cannot_establish_which_app_process_is_a_root(self) -> None:
+        for parent, child in [(DESKTOP[1], DESKTOP[2]), (DESKTOP[2], DESKTOP[3])]:
+            with self.subTest(parent=parent.pid):
+                merged = tuple(
+                    replace(proc, started=parent.started, parent_pid=parent.pid) if proc.pid == child.pid else proc
+                    for proc in DESKTOP
+                )
+                outcome, asked = self.ask(merged)
+                self.assertEqual(asked, [])
+                self.assertIn("same creation time", outcome.detail)
+
+    def test_a_visible_app_child_is_never_asked_when_its_chatgpt_parent_path_is_denied(self) -> None:
+        for parent_started in (0, DESKTOP[1].started):
+            with self.subTest(parent_started=parent_started):
+                parent = replace(DESKTOP[1], path="", started=parent_started, path_access_denied=True)
+                outcome, asked = self.ask((parent, DESKTOP[2]))
+                self.assertEqual(asked, [])
+                self.assertIn("parent", outcome.detail)
 
     def test_the_cli_server_left_behind_is_named_not_stopped(self) -> None:
         daemon = (

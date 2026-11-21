@@ -26,6 +26,7 @@ another: the plan id simply stops matching.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from enum import Enum
 import gzip
 import lzma
@@ -257,7 +258,7 @@ def open_jsonl(path: Path, codec: JsonlCodec | None = None, *, raw: BinaryIO | N
 
 
 def transcode(
-    source: Path, destination: Path, source_codec: JsonlCodec, destination_codec: JsonlCodec
+    source: Path, destination: Path | BinaryIO, source_codec: JsonlCodec, destination_codec: JsonlCodec
 ) -> None:
     """Rewrite ``source`` from one container into another, streaming.
 
@@ -265,26 +266,30 @@ def transcode(
     the same way: out of the mirror it must be decompressed, into the mirror
     compressed, and between two like containers it is a plain copy. Doing this
     in one place is what keeps a compressed body from ever landing under a
-    plain name.
+    plain name. An already-open destination keeps a staging reservation bound
+    to its file even if another process replaces the pathname.
     """
     if destination_codec not in WRITABLE_CODECS:
         raise ValueError(f"codexSync never writes {destination_codec.value}")
     if source_codec is destination_codec:
-        shutil.copyfile(source, destination)
-        return
-    with open_jsonl(source, source_codec) as reader:
-        if destination_codec is JsonlCodec.NONE:
-            with destination.open("wb") as writer:
-                shutil.copyfileobj(reader, writer, _COPY_CHUNK)
-        elif destination_codec is JsonlCodec.GZIP:
-            with destination.open("wb") as raw:
-                with gzip.GzipFile(
-                    filename="", fileobj=raw, mode="wb", compresslevel=6, mtime=0
-                ) as writer:
-                    shutil.copyfileobj(reader, writer, _COPY_CHUNK)
+        if isinstance(destination, Path):
+            shutil.copyfile(source, destination)
         else:
-            with lzma.open(destination, "wb", preset=_XZ_PRESET) as writer:
-                shutil.copyfileobj(reader, writer, _COPY_CHUNK)
+            with source.open("rb") as reader:
+                shutil.copyfileobj(reader, destination, _COPY_CHUNK)
+        return
+    with (
+        open_jsonl(source, source_codec) as reader,
+        (destination.open("wb") if isinstance(destination, Path) else nullcontext(destination)) as raw,
+    ):
+        if destination_codec is JsonlCodec.NONE:
+            shutil.copyfileobj(reader, raw, _COPY_CHUNK)
+        elif destination_codec is JsonlCodec.GZIP:
+            with gzip.GzipFile(filename="", fileobj=raw, mode="wb", compresslevel=6, mtime=0) as zipped:
+                shutil.copyfileobj(reader, zipped, _COPY_CHUNK)
+        else:
+            with lzma.LZMAFile(raw, "wb", preset=_XZ_PRESET) as zipped:
+                shutil.copyfileobj(reader, zipped, _COPY_CHUNK)
 
 
 def compress_file(source: Path, destination: Path, codec: JsonlCodec) -> None:

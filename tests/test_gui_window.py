@@ -2357,6 +2357,89 @@ class TasksDialogTests(_WindowTestCase):
             for r in range(table.rowCount())
         ]
 
+    def test_long_progress_and_commit_actions_fit_in_the_task_window(self) -> None:
+        """A long progress line used to push the buttons offscreen and clip the only row."""
+        from PySide6.QtCore import QPoint, QRect, QSize
+        from PySide6.QtWidgets import QStyle, QStyleOptionButton
+
+        from codexsync.cancellation import CancellationToken
+        from codexsync.progress import ProgressEstimate
+
+        for language in available_languages():
+            with self.subTest(language=language):
+                window, _ = self.make(language)
+                book = window.jobs()
+                book.start("scan", page="projects", kind="project_files", apply=lambda *_: None,
+                           model=object(), cancellable=True)
+                book.finish("scan", Outcome(value=None))
+                cancellation = CancellationToken()
+                job = book.start("transfer", page="sync", kind="sessions_apply", apply=lambda *_: None,
+                                 model=object(), cancellable=False, cancellation=cancellation)
+                job.started -= 3661
+                book.report("transfer", "apply_chats", 250, 1769)
+                job.progress_estimate = ProgressEstimate(0.536, 1024**2, 2836)
+                cancellation.begin_commit()
+                window.show_tasks()
+                dialog = window._tasks_dialog
+                self.addCleanup(dialog.close)
+                for width in (800, 640):
+                    dialog.resize(width, 580)
+                    # The header resize posts a row fit, which can itself
+                    # resize the viewport and post one more fit.
+                    for _ in range(4):
+                        self.pump()
+                    with self.subTest(width=width):
+                        self.assertEqual(dialog.size(), QSize(width, 580))
+                        viewport = dialog.running.viewport()
+                        self.assertEqual(dialog.running.horizontalScrollBar().maximum(), 0)
+                        progress = dialog.running.visualItemRect(dialog.running.item(0, 4))
+                        self.assertTrue(viewport.rect().contains(progress))
+                        self.assertGreater(progress.height(), dialog.running.fontMetrics().height())
+                        for buttons in (dialog.finish_buttons, dialog.rollback_buttons):
+                            button = buttons["transfer"]
+                            self.assertTrue(button.isVisibleTo(dialog))
+                            rect = QRect(button.mapTo(viewport, QPoint()), button.size())
+                            self.assertTrue(viewport.rect().contains(rect))
+                            option = QStyleOptionButton()
+                            button.initStyleOption(option)
+                            content = button.style().subElementRect(QStyle.SE_PushButtonContents, option, button)
+                            self.assertGreaterEqual(content.width(), button.fontMetrics().horizontalAdvance(button.text()))
+                        self.assertFalse(dialog.stop_buttons["transfer"].isVisibleTo(dialog))
+                        self.assertGreaterEqual(dialog.recent.viewport().height(), dialog.recent.rowHeight(0))
+
+    def test_elapsed_and_remaining_time_use_hours_minutes_and_seconds(self) -> None:
+        from codexsync.gui.jobs import JobBook
+        from codexsync.progress import ProgressEstimate
+
+        window, _ = self.make("ru")
+        window._jobs_book = book = JobBook(clock=lambda: 3661.0)
+        job = book.start("transfer", page="sync", kind="full_sync", apply=lambda *_: None,
+                         model=object(), cancellable=False)
+        job.started = 0.0
+        book.report("transfer", "apply_chats", 250, 1769)
+        job.progress_estimate = ProgressEstimate(0.536, 1024**2, 2836)
+        window.show_tasks()
+        dialog = window._tasks_dialog
+        self.addCleanup(dialog.close)
+        row = self._texts(dialog.running)[0]
+        self.assertIn("47 мин 16 с", row[4])
+        self.assertEqual(row[3], "1 ч 1 мин 1 с")
+
+    def test_a_finished_read_does_not_leave_its_button_on_another_task(self) -> None:
+        window, _ = self.make()
+        book = window.jobs()
+        for token, cancellable in (("first-read", True), ("write", False), ("second-read", True)):
+            book.start(token, page="sync", kind=None, apply=lambda *_: None,
+                       model=object(), cancellable=cancellable)
+        window.show_tasks()
+        dialog = window._tasks_dialog
+        self.addCleanup(dialog.close)
+        self.assertIsNotNone(dialog.running.cellWidget(0, 5))
+        book.finish("first-read", Outcome(value=None))
+        dialog.render()
+        self.assertIsNone(dialog.running.cellWidget(0, 5), "the write has no stop action")
+        self.assertIsNotNone(dialog.running.cellWidget(1, 5), "the second read can still be dismissed")
+
     def test_stopping_a_sync_keeps_the_job_visible_until_the_worker_reports(self) -> None:
         window, runner = self._window()
         window.go_to("sync")
@@ -2470,6 +2553,26 @@ class TasksDialogTests(_WindowTestCase):
         window.show_tasks()
         window.set_language("ru")
         self.assertEqual(window._tasks_dialog.windowTitle(), load("ru").text("tasks.title"))
+
+    def test_switching_language_removes_the_previous_transfer_controls(self) -> None:
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from shiboken6 import isValid
+
+        window, _ = self._window()
+        window.show_tasks()
+        dialog = window._tasks_dialog
+        self.addCleanup(dialog.close)
+        previous_load = dialog.load_items
+        previous_filter = dialog.items_filter
+
+        window.set_language("ru")
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.pump(lambda: dialog.load_items.isVisibleTo(dialog))
+
+        self.assertFalse(isValid(previous_load), "the old load button still occupies the dialog")
+        self.assertFalse(isValid(previous_filter), "the old filter still occupies the dialog")
+        self.assertTrue(dialog.load_items.isVisibleTo(dialog))
+        self.assertEqual(dialog.items_filter.currentText(), load("ru").text("tasks.items.filter.all"))
 
 
 @unittest.skipUnless(_HAS_QT, "PySide6 is an optional extra and is not installed")

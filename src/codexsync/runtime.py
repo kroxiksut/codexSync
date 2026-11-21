@@ -215,10 +215,8 @@ def sample_process_state(
 
 def collect_process_snapshot(cfg: AppConfig, detector: CodexProcessDetector | None = None) -> ProcessSnapshot:
     detector = detector or CodexProcessDetector(cfg.process_detection.process_names)
-    main, subprocesses = detector.get_subprocess_tree(cfg.process_detection.process_names)
     markers = _current_os_background_processes(cfg)
-    find_processes = getattr(detector, "find_processes", None)
-    background_processes = find_processes(markers) if markers and callable(find_processes) else []
+    main, subprocesses, background_processes = detector.sample_matches(cfg.process_detection.process_names, markers)
     sandbox_detected = any(
         detector.has_marker(proc, marker)
         for marker in markers

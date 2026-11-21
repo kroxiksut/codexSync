@@ -49,7 +49,8 @@ import subprocess
 import sys
 
 from .process_detector import proc_program
-from .process_knowledge import BACKGROUND_PROCESS_NAMES, CLI_DAEMON_STOP_COMMAND, is_cli_daemon_path
+from .process_knowledge import BACKGROUND_PROCESS_NAMES, CLI_DAEMON_STOP_COMMAND, WINDOWS_APP_NAME, is_cli_daemon_path
+from .windows_processes import WindowsProcess, windows_processes
 
 LOG = logging.getLogger(__name__)
 
@@ -72,7 +73,6 @@ PROVEN_CLOSERS: dict[str, str] = {
 
 #: The Windows package the Codex desktop app ships in, as it appears in the path.
 WINDOWS_PACKAGE_MARKER = "\\openai.codex_"
-WINDOWS_APP_NAME = "chatgpt.exe"
 WINDOWS_CODEX_NAME = "codex.exe"
 MACOS_BUNDLE_ID = "com.openai.codex"
 #: Where the Linux desktop app's programs live: the path markers the process
@@ -90,17 +90,6 @@ _RM_ANSWERS = {
     351: "the application declined to close",
     352: "the application asked for a restart instead",
 }
-
-
-@dataclass(frozen=True, slots=True)
-class WindowsProcess:
-    pid: int
-    parent_pid: int
-    name: str
-    path: str
-    #: Creation time as a FILETIME integer, which the Restart Manager needs to
-    #: be sure the pid still names the same process.
-    started: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,13 +148,31 @@ def ask_codex_to_quit(
 
 
 def codex_app_roots(processes: Sequence[WindowsProcess]) -> tuple[WindowsProcess, ...]:
-    """The Codex app's root processes: `ChatGPT.exe` from the package, not a child of itself."""
-    app = [
-        proc for proc in processes
-        if proc.name.lower() == WINDOWS_APP_NAME and WINDOWS_PACKAGE_MARKER in proc.path.lower()
-    ]
-    app_pids = {proc.pid for proc in app}
-    return tuple(proc for proc in app if proc.parent_pid not in app_pids)
+    """Find the Codex app's roots or refuse if a possible app parent cannot be identified."""
+    chatgpt = {proc.pid: proc for proc in processes if proc.name.lower() == WINDOWS_APP_NAME}
+    app = {pid: proc for pid, proc in chatgpt.items() if WINDOWS_PACKAGE_MARKER in proc.path.lower()}
+    roots = []
+    for proc in app.values():
+        if proc.started <= 0:
+            raise RuntimeError("the Codex app's creation time could not be verified")
+        parent = chatgpt.get(proc.parent_pid)
+        if parent is None or parent.started > proc.started:
+            roots.append(proc)
+        elif parent.path_access_denied:
+            raise RuntimeError("Windows denied access to the path of a possible Codex app parent")
+        elif parent.pid not in app:
+            roots.append(proc)
+        elif parent.started == proc.started:
+            raise RuntimeError("a Codex app process and its possible parent have the same creation time")
+    return tuple(roots)
+
+
+def _older_windows_parent(proc: WindowsProcess, by_pid: dict[int, WindowsProcess]) -> WindowsProcess | None:
+    """A live parent ID alone can belong to a replacement process."""
+    parent = by_pid.get(proc.parent_pid)
+    if parent is not None and 0 < parent.started < proc.started:
+        return parent
+    return None
 
 
 def terminal_codex(processes: Sequence[WindowsProcess]) -> tuple[WindowsProcess, ...]:
@@ -179,11 +186,12 @@ def terminal_codex(processes: Sequence[WindowsProcess]) -> tuple[WindowsProcess,
     for proc in processes:
         if proc.name.lower() != WINDOWS_CODEX_NAME:
             continue
-        seen, parent = set(), by_pid.get(proc.parent_pid)
-        while parent is not None and parent.pid not in seen and parent.pid not in app_pids:
-            seen.add(parent.pid)
-            parent = by_pid.get(parent.parent_pid)
-        if parent is None or parent.pid not in app_pids:
+        child = proc
+        while (parent := _older_windows_parent(child, by_pid)) is not None:
+            if parent.pid in app_pids:
+                break
+            child = parent
+        else:
             found.append(proc)
     return tuple(found)
 
@@ -212,7 +220,10 @@ def _ask_windows(
             "Codex is running in a terminal (pid " + ", ".join(str(proc.pid) for proc in cli)
             + "); close it there -- a terminal is never closed for you",
         )
-    roots = codex_app_roots(processes)
+    try:
+        roots = codex_app_roots(processes)
+    except RuntimeError as exc:
+        return CloseOutcome(False, False, str(exc))
     if not roots:
         return CloseOutcome(False, False, "no Codex app window to ask; close Codex yourself")
     try:
@@ -598,55 +609,7 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess:
 
 
 def _list_windows_processes() -> list[WindowsProcess]:  # pragma: no cover - needs Windows
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    class PROCESSENTRY32W(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
-            ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
-            ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
-            ("szExeFile", ctypes.c_wchar * 260),
-        ]
-
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
-    if snapshot in (None, wintypes.HANDLE(-1).value):
-        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
-    entries: list[tuple[int, int, str]] = []
-    try:
-        entry = PROCESSENTRY32W()
-        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-        while more:
-            entries.append((entry.th32ProcessID, entry.th32ParentProcessID, entry.szExeFile))
-            more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-    finally:
-        kernel32.CloseHandle(snapshot)
-
-    wanted = {WINDOWS_APP_NAME, WINDOWS_CODEX_NAME}
-    processes = []
-    for pid, parent, name in entries:
-        path, started = "", 0
-        if name.lower() in wanted:
-            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-            if handle:
-                try:
-                    buffer = ctypes.create_unicode_buffer(32768)
-                    size = wintypes.DWORD(len(buffer))
-                    if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-                        path = buffer.value
-                    times = [wintypes.FILETIME() for _ in range(4)]
-                    if kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
-                        started = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
-                finally:
-                    kernel32.CloseHandle(handle)
-        processes.append(WindowsProcess(pid, parent, name, path, started))
-    return processes
+    return windows_processes(inspect_names={WINDOWS_APP_NAME, WINDOWS_CODEX_NAME}, include_start_time=True)
 
 
 def _restart_manager_shutdown(roots: Sequence[WindowsProcess]) -> int:  # pragma: no cover - needs Windows

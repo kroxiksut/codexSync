@@ -45,11 +45,8 @@ class ConsoleToolSpawnTests(unittest.TestCase):
     def test_a_platform_without_the_flags_still_runs(self) -> None:
         """The Windows adapter is exercised from macOS and Linux.
 
-        `test_process_detector.py` patches this module's `sys.platform` to
-        "win32" so the tasklist parser can be tested anywhere. Deciding on the
-        platform *name* and then reaching for `subprocess.STARTUPINFO` made
-        those tests crash on CI, and would crash the same way in any
-        environment that calls itself Windows without offering the attributes.
+        A test or an environment can report Windows without offering the
+        Windows-only subprocess attributes. The helper checks the attributes.
         """
         completed = subprocess.CompletedProcess(["x"], 0, "", "")
         # `create=True`: on POSIX these attributes do not exist at all, which is
@@ -114,14 +111,3 @@ class ConsoleToolTimeoutTests(unittest.TestCase):
         with patch("codexsync.process_detector.subprocess.run", side_effect=hang):
             with self.assertRaises(RuntimeError):
                 _run_console_tool(["powershell"], encoding="utf-8")
-
-    def test_a_hung_cim_listing_fails_the_sample(self) -> None:
-        from codexsync import process_detector
-
-        def hang(argv, **kwargs):
-            raise subprocess.TimeoutExpired(argv, 30)
-
-        detector = process_detector.CodexProcessDetector(["codex.exe"])
-        with patch("codexsync.process_detector.subprocess.run", side_effect=hang):
-            with self.assertRaises(RuntimeError):
-                detector._list_windows_cim()

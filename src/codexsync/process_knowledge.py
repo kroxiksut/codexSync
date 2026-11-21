@@ -33,6 +33,8 @@ from typing import Mapping
 
 #: Process names that *are* Codex, matched as whole names on every platform.
 PROCESS_NAMES: tuple[str, ...] = ("codex.exe", "codex", "codex-app-server")
+WINDOWS_APP_NAME = "chatgpt.exe"
+WINDOWS_CODEX_APP_MARKER = "/OpenAI.Codex_*/app/ChatGPT.exe"
 
 #: Per-OS processes that mean "Codex has not finished yet" even with no window.
 #:
@@ -65,7 +67,7 @@ BACKGROUND_PROCESS_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType({
         "codex-windows-sandbox",
         "codex-windows-sandbox-setup",
         "codex-command-runner",
-        "/OpenAI.Codex_*/app/ChatGPT.exe",
+        WINDOWS_CODEX_APP_MARKER,
     ),
     "macos": (
         "ChatGPT.app/Contents/MacOS/",

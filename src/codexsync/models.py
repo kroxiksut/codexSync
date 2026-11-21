@@ -275,11 +275,10 @@ class FileMeta:
 
 @dataclass(slots=True, frozen=True)
 class DestinationPrecondition:
-    """What a normal sync observed at a destination while building its plan.
+    """What the planner observed at a destination.
 
-    ``None`` on an action means that its specialised caller (restore or chat
-    transfer) did not build the action from the ordinary two-sided file index.
-    ``exists=False`` is distinct from that legacy/unbound state: a file which
+    ``None`` on an action means that its caller did not bind a destination.
+    ``exists=False`` is distinct from that unbound state: a file which
     appears after planning must not be overwritten without a backup (CS-493).
     """
 
@@ -288,6 +287,8 @@ class DestinationPrecondition:
     size: int | None = None
     device: int | None = None
     inode: int | None = None
+    #: A session destination is also bound to the confirmed logical content.
+    content_sha256: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -312,8 +313,7 @@ class CopyAction:
     #: moved after the plan was rebuilt is never written (CS-515). ``None`` for
     #: every ordinary file copy.
     expected_sha256: str | None = None
-    #: Destination identity captured by the ordinary sync planner. Specialised
-    #: restore/session plans leave it unbound and retain their own checks.
+    #: Destination identity captured by the planner.
     destination_precondition: DestinationPrecondition | None = None
     #: Semantic transfers use a short reference in their progress log.
     session_hash: str | None = None
@@ -352,20 +352,18 @@ class SyncManifest:
 
 @dataclass(slots=True)
 class DeleteAction:
-    """One file to remove because the other side proved it was removed there.
+    """One backed-up file to remove after a confirmed deletion or branch move.
 
-    Only ever produced under `sync.delete_policy = "propagate"`, and only for a
-    path the previous manifest shows both sides held and this side has not
-    touched since (`D-013`). Carries the relative path so the file can be
-    backed up -- and restored -- by the same name as any overwrite.
+    An ordinary deletion requires `sync.delete_policy = "propagate"` and a
+    previous manifest that proves the surviving file has not changed (`D-013`).
+    A session move binds the old path to the confirmed branch (`D-023`).
     """
 
     path: Path
     relative_path: str
     #: ``local`` or ``cloud``: which side the file is being removed from.
     side: str
-    #: Identity of the surviving file at plan time. An ordinary propagated
-    #: deletion must not delete a replacement delivered before backup.
+    #: Identity of the surviving file at plan time.
     destination_precondition: DestinationPrecondition | None = None
     #: A semantic move's removal belongs to the same branch as its copy.
     session_hash: str | None = None

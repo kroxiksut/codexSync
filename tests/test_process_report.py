@@ -45,7 +45,7 @@ class _Detector:
             raise RuntimeError("ps is not available for process detection")
         return self._posix
 
-    def _list_windows_all_complete(self):
+    def _list_windows_all_complete(self, *, inspect_names=None):
         return self._windows
 
 

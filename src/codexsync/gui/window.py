@@ -435,7 +435,7 @@ class MainWindow(QMainWindow):
                 return self.job_progress_text(job)
         return ""
 
-    def job_progress_text(self, job) -> str:
+    def job_progress_text(self, job, *, multiline: bool = False) -> str:
         """Phase count plus a rate/ETA once this phase has enough samples."""
         if job.cancellation is not None:
             state = job.cancellation.state
@@ -450,12 +450,13 @@ class MainWindow(QMainWindow):
                 return self._catalog.text("progress.of", phase=base, done=0, total=0)
             if job.progress_event.total is None and job.progress_event.completed:
                 base = self._catalog.text("progress.unknown", phase=base, done=job.progress_event.completed)
+        separator = "\n" if multiline else " · "
         if job.progress[2] <= 0 or estimate is None or estimate.items_per_second is None or estimate.remaining_seconds is None:
-            return f"{base} · {self._catalog.text('progress.estimating')}"
+            return f"{base}{separator}{self._catalog.text('progress.estimating')}"
         rate = estimate.items_per_second * 60
         seconds = max(0, int(estimate.remaining_seconds + 0.5))
-        eta = self._catalog.plural("common.seconds", seconds)
-        text = f"{base} · {self._catalog.text('progress.rate_eta', rate=f'{rate:.1f}', eta=eta)}"
+        eta = self._catalog.duration(seconds)
+        text = f"{base}{separator}{self._catalog.text('progress.rate_eta', rate=f'{rate:.1f}', eta=eta)}"
         if estimate.bytes_per_second is not None:
             text += " · " + self._catalog.text(
                 "progress.byte_rate", rate=f"{estimate.bytes_per_second / 1024**2:.1f}",

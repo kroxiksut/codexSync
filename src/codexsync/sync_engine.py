@@ -4,18 +4,22 @@ import logging
 import os
 from pathlib import Path
 import shutil
+import stat
+import struct
 import time
 import uuid
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cache
+from typing import BinaryIO
 
 from .backup import BackupManager
 from .cancellation import CancellationToken, OperationCancelled, RollbackRequested
 from .mutation_journal import AppliedFile
 from .exceptions import FailSafeError
 from .fs_replace import replace_with_retry
-from .jsonl_codec import CONTAINER_DECODE_ERRORS, JsonlCodec, codec_of, open_jsonl, transcode
+from .jsonl_codec import CONTAINER_DECODE_ERRORS, JSONL_READ_ERRORS, JsonlCodec, codec_of, open_jsonl, transcode
 from .models import CopyAction, DeleteAction, DestinationPrecondition, SyncPlan
 from .progress_log import ProgressLog
 from .work_scheduler import WorkScheduler
@@ -31,6 +35,14 @@ _ORPHAN_STAGE_AGE_SECONDS = 3600.0
 #: ``(st_dev, st_ino, st_size, st_mtime_ns)`` of a destination: a replacement
 #: changes its file identity, a write in place the last two. ``None`` -- absent.
 _Identity = tuple[int, int, int, int] | None
+_StageStamp = tuple[int, int, int, int, int]
+
+
+@dataclass(slots=True)
+class _StageReservation:
+    # Set by the worker from the handle it created. Only the caller reads
+    # this after the workers have joined.
+    stamp: _StageStamp | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +52,8 @@ class _PreparedCopy:
     source_identity: _Identity
     stage_identity: _Identity
     sha256: str
+    content_sha256: str | None
+    stage_stamp: _StageStamp
 
 
 def _stage_path(dst: Path, token: str) -> Path:
@@ -101,8 +115,8 @@ class SyncEngine:
         #: reports: whatever it raises is dropped, and it decides nothing.
         self._progress = progress
         self._phase_progress = phase_progress
-        # Only ordinary file sync opts in. Semantic transfer and restore keep
-        # their existing staging path and container-specific guarantees.
+        # Parallel preparation uses the same verified stage for raw copies and
+        # session containers. Restore can use the serial path.
         self._scheduler = scheduler
         self._stage_operation_id = stage_operation_id
         self._progress_events = progress_events
@@ -156,6 +170,8 @@ class SyncEngine:
 
         if self._scheduler is None:
             self._cleanup_orphaned_temp_files()
+        # Parallel preparation cleans up its own reservations. A stage left by
+        # another process has no live reservation we can use to prove ownership.
         if actions and self._before_stage_check is not None:
             self._before_stage_check()
         token = uuid.uuid4().hex[:8]
@@ -164,7 +180,7 @@ class SyncEngine:
         # Every path this run may have created, including the one a failure
         # interrupted: that half-written payload is this module's to remove too.
         stage_paths: list[Path] = []
-        reservations: dict[Path, _Identity] = {}
+        reservations: dict[Path, _StageReservation] = {}
         stage_dirs: dict[Path, _Identity] = {}
         prepared: dict[int, _PreparedCopy] = {}
         try:
@@ -184,52 +200,54 @@ class SyncEngine:
             self._begin_event_phase("stage_chats", len(actions))
             sizes: dict[int, int] = {}
             if self._scheduler is not None:
-                if any(action.codec is not None for action in actions):
-                    raise ValueError("parallel staging is for ordinary file sync only")
                 operation = self._stage_operation_id or uuid.uuid4().hex
                 inputs = []
-                # The caller reserves every sibling exclusively. A collision
-                # belongs to somebody else, regardless of its name or age.
+                # Prepare the directories on the caller. Each worker opens
+                # its sibling exclusively and keeps that handle while writing.
                 for index, action in enumerate(actions, start=1):
                     self._checkpoint()
                     self._event_action = action
                     self.failure_item = {"phase": "stage_chats", "index": index, "relative_path": action.relative_path}
                     self._ensure_stage_parent(action.dst.parent, stage_dirs)
-                    path = _stage_path(action.dst, operation)
-                    with path.open("xb") as handle:
-                        # Record the opened file, not whatever a cloud rename
-                        # might deliver under its pathname after the open.
-                        info = os.fstat(handle.fileno())
-                        reservations[path] = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-                        handle.write(f"codexsync-stage:{operation}\n".encode("ascii"))
+                    # Keep the existing short suffix on long Codex session names.
+                    path = _stage_path(action.dst, operation[:8] if action.codec is not None else operation)
+                    if path in reservations:
+                        raise FileExistsError(path)
+                    reservations[path] = _StageReservation()
                     inputs.append((action, path, reservations[path]))
                 # Treat every payload as large: the shared budget bounds
                 # whole copy/hash jobs without a racy size classification.
                 assert prepare is not None
                 self._event_action = None
+                self.failure_item = {"phase": "stage_chats"}
 
                 def staged_result(index: int, _input, result: _PreparedCopy) -> None:
                     size = result.stage_identity[2] if result.stage_identity is not None else None
                     if size is not None:
                         sizes[id(result.action)] = size
+                    self.staged_count = index + 1
+                    self._report(self.staged_count, total)
+                    self._report_phase("stage_chats", self.staged_count, len(actions))
                     self._count_event(index + 1, "pending", result.action, size)
 
-                results = prepare(
-                    self._prepare_copy, inputs, large_file=lambda _item: True, on_result=staged_result,
-                    cancellation=self._cancellation,
-                )
-                # A fast worker's source may change while another is copying.
-                # Re-prove the entire set after joining, using the same pool
-                # and large-file budget, before any backup or target write.
-                results = prepare(self._verify_prepared, results, large_file=lambda _item: True,
-                                  cancellation=self._cancellation)
-                for index, result in enumerate(results, start=1):
+                try:
+                    results = prepare(
+                        self._prepare_copy, inputs, large_file=lambda _item: True, on_result=staged_result,
+                        cancellation=self._cancellation,
+                    )
+                    # Re-prove the entire set after joining, before any backup or target write.
+                    results = prepare(self._verify_prepared, results, large_file=lambda _item: True,
+                                      cancellation=self._cancellation)
+                except Exception as exc:
+                    action = getattr(exc, "staged_copy_action", None)
+                    if action is not None:
+                        self._event_action = action
+                        self.failure_item.update(index=actions.index(action) + 1, relative_path=action.relative_path)
+                    raise
+                for result in results:
                     self._checkpoint()
                     prepared[id(result.action)] = result
                     staged.append((result.action, result.path))
-                    self.staged_count = index
-                    self._report(index, total)
-                    self._report_phase("stage_chats", index, len(actions))
                 for result in results:
                     self._checkpoint()
                     self._event_action = result.action
@@ -271,11 +289,11 @@ class SyncEngine:
                 self._checkpoint()
                 self._event_action = action
                 self.failure_item = {"phase": "backup_chats", "index": index, "relative_path": action.relative_path}
-                _require_planned_destination(
+                before = _require_planned_destination(
                     action.dst, action.relative_path, action.destination_precondition,
                 )
-                if action.dst.exists():
-                    before = _identity(action.dst)
+                if before is not None:
+                    _require_destination_streams(action.dst, before)
                     backup_path = self._backup_manager.backup_file(
                         action.dst, action.relative_path,
                         side="local" if id(action) in to_local else "cloud",
@@ -290,12 +308,13 @@ class SyncEngine:
                 self._checkpoint()
                 self._event_action = deletion
                 self.failure_item = {"phase": "backup_chats", "index": index, "relative_path": deletion.relative_path}
-                _require_planned_destination(
+                before = _require_planned_destination(
                     deletion.path, deletion.relative_path, deletion.destination_precondition,
                 )
                 # A file that vanished between the plan and now is not a file
                 # this run may delete: the plan described something else.
-                before = _identity(deletion.path)
+                if before is not None:
+                    _require_destination_streams(deletion.path, before)
                 backup_path = self._backup_manager.backup_file(
                     deletion.path, deletion.relative_path, side=deletion.side
                 )
@@ -348,12 +367,14 @@ class SyncEngine:
                             "it was not overwritten; run the sync again",
                             code="STATE_CHANGED_RETRY",
                         )
+                    else:
+                        _require_destination_streams(action.dst, expected)
 
                 if self._scheduler is None:
                     unchanged()
                 self._replacement_completed = False
                 try:
-                    if self._scheduler is not None:
+                    if self._scheduler is not None and self._verify_destination_after_replace:
                         self._replace_staged(action, staged_path, unchanged, prepared[id(action)].sha256)
                     else:
                         self._replace_staged(action, staged_path, unchanged)
@@ -391,7 +412,9 @@ class SyncEngine:
                     )
                 self._replacement_completed = False
                 try:
-                    self._remove_backed_up(deletion)
+                    if current is not None:
+                        _require_destination_streams(deletion.path, current)
+                        self._remove_backed_up(deletion)
                 finally:
                     if self._replacement_completed and self._cancellation is not None:
                         self.applied_files.append(AppliedFile(deletion.relative_path, deletion.side, True, None, None))
@@ -408,15 +431,16 @@ class SyncEngine:
         finally:
             # map_prepare joins active workers before raising. Cleanup occurs
             # only here, on the caller, and only for identities we reserved.
-            for path, identity in reservations.items():
+            for path, reservation in reservations.items():
                 try:
-                    current = _identity(path)
-                    if current is not None and identity is not None and current[:2] == identity[:2]:
-                        path.unlink(missing_ok=True)
+                    if os.name == "nt" and reservation.stamp is not None:
+                        _discard_windows_stage(path, reservation.stamp)
                 except OSError:
                     # A cloud lock on cleanup must not hide the worker's
                     # failure or turn a completed replacement into a failure.
                     LOG.warning("could not remove owned staging file %s", path, exc_info=True)
+            # POSIX pathname unlink cannot be conditioned on the file we
+            # proved. Keep unmatched stages rather than remove a replacement.
             for staged_path in stage_paths:
                 # Already gone for every action that was replaced into place.
                 staged_path.unlink(missing_ok=True)
@@ -424,7 +448,7 @@ class SyncEngine:
                 for path, identity in reversed(stage_dirs.items()):
                     try:
                         current = _identity(path)
-                        if current is not None and identity is not None and current[:2] == identity[:2]:
+                        if current is not None and identity and identity[1] and current[:2] == identity[:2]:
                             path.rmdir()  # atomic refusal if a peer populated it
                     except OSError:
                         LOG.debug("could not remove empty staging directory %s", path, exc_info=True)
@@ -476,20 +500,37 @@ class SyncEngine:
             item_id=action.session_hash if action else None, direction=direction,
         )
 
-    def _prepare_copy(self, item: tuple[CopyAction, Path, _Identity]) -> _PreparedCopy:
-        action, path, reserved = item
-        self._require_reservation(path, reserved)
-        before = _identity(action.src)
-        self._stage_verified(action.src, path, action.codec, action.expected_sha256)
-        self._require_reservation(path, reserved)
-        if before is None or _identity(action.src) != before:
-            raise FailSafeError("Source changed while preparing the mutation stage", code="STATE_CHANGED_RETRY")
-        return _PreparedCopy(action, path, before, _identity(path), _sha256_file(path))
+    def _prepare_copy(self, item: tuple[CopyAction, Path, _StageReservation]) -> _PreparedCopy:
+        action, path, reservation = item
+        try:
+            before = _identity(action.src)
+            # Never open a pre-existing pathname for writing, even if an inode
+            # number can be recycled between opens.
+            with path.open("xb+") as stage_file:
+                if _stage_stamp(os.fstat(stage_file.fileno())) is None:
+                    raise FailSafeError("Staging file identity is unavailable", code="STATE_CHANGED_RETRY")
+                try:
+                    content_sha256 = self._stage_verified(
+                        action.src, path, action.codec, action.expected_sha256, stage_file,
+                    )
+                    stage_file.seek(0)
+                    raw_sha256 = _sha256_reader(stage_file)
+                finally:
+                    stage_file.flush()
+                    reservation.stamp = _stage_stamp(os.fstat(stage_file.fileno()))
+            stamp = reservation.stamp
+            self._require_reservation(path, stamp)
+            if before is None or _identity(action.src) != before:
+                raise FailSafeError("Source changed while preparing the mutation stage", code="STATE_CHANGED_RETRY")
+            assert stamp is not None  # the reservation check refuses an unknown identity
+            return _PreparedCopy(action, path, before, stamp[:4], raw_sha256, content_sha256, stamp)
+        except Exception as exc:
+            exc.staged_copy_action = action
+            raise
 
     @staticmethod
-    def _require_reservation(path: Path, reserved: _Identity) -> None:
-        current = _identity(path)
-        if reserved is None or current is None or current[:2] != reserved[:2]:
+    def _require_reservation(path: Path, reserved: _StageStamp | None) -> None:
+        if reserved is None or _stage_stamp_at(path) != reserved:
             raise FailSafeError("Staging reservation changed during preparation", code="STATE_CHANGED_RETRY")
 
     @staticmethod
@@ -498,21 +539,45 @@ class SyncEngine:
         # precondition model at commit: identity, size and mtime. No series of
         # reads can exclude an undetectable same-identity/size/mtime edit after
         # its final verification; stronger exclusion requires an OS lease.
-        for path, expected in (
-            (prepared.action.src, prepared.source_identity), (prepared.path, prepared.stage_identity),
+        if (
+            prepared.source_identity is None
+            or _identity(prepared.action.src) != prepared.source_identity
+            or _stage_stamp_at(prepared.path) != prepared.stage_stamp
         ):
-            if (
-                expected is None or _identity(path) != expected
-            ):
-                raise FailSafeError("Source or staging file changed before commit", code="STATE_CHANGED_RETRY")
+            raise FailSafeError("Source or staging file changed before commit", code="STATE_CHANGED_RETRY")
 
     @classmethod
     def _verify_prepared(cls, prepared: _PreparedCopy) -> _PreparedCopy:
-        cls._require_prepared(prepared)
-        if any(_sha256_file(path) != prepared.sha256 for path in (prepared.action.src, prepared.path)):
-            raise FailSafeError("Source or staging file changed before commit", code="STATE_CHANGED_RETRY")
-        cls._require_prepared(prepared)
-        return prepared
+        action = prepared.action
+        try:
+            cls._require_prepared(prepared)
+            stage_sha256 = _sha256_file(prepared.path)
+            source_codec = codec_of(action.src) or JsonlCodec.NONE
+            if action.codec is None or (source_codec is action.codec and action.expected_sha256 is None):
+                if os.name == "nt":
+                    with action.src.open("rb") as reader:
+                        _require_unnamed_windows_data_stream(reader)
+                source_sha256 = _sha256_file(action.src)
+                content_unchanged = source_sha256 == prepared.sha256
+            else:
+                # The encoded bytes need not equal the source's. Re-prove the
+                # decoded bytes against the initial stage before trusting either.
+                source_sha256 = _sha256_stream(action.src, source_codec)
+                content_sha256 = (
+                    stage_sha256 if action.codec is JsonlCodec.NONE else _sha256_stream(prepared.path, action.codec)
+                )
+                content_unchanged = source_sha256 == content_sha256 == prepared.content_sha256
+            if stage_sha256 != prepared.sha256 or not content_unchanged:
+                raise FailSafeError("Source or staging file changed before commit", code="STATE_CHANGED_RETRY")
+            cls._require_prepared(prepared)
+            return prepared
+        except CONTAINER_DECODE_ERRORS as exc:
+            failure = FailSafeError("Source or staging container changed before commit", code="STATE_CHANGED_RETRY")
+            failure.staged_copy_action = action
+            raise failure from exc
+        except Exception as exc:
+            exc.staged_copy_action = action
+            raise
 
     def _report(self, done: int, total: int) -> None:
         if self._progress is None:
@@ -592,7 +657,7 @@ class SyncEngine:
         the file the backup holds.
         """
         checks = [check for check in (
-            (unchanged, self._before_replace_check) if self._scheduler is not None
+            (unchanged, self._before_replace_check, unchanged) if self._scheduler is not None
             else (self._before_replace_check, unchanged)
         ) if check is not None]
 
@@ -600,8 +665,8 @@ class SyncEngine:
             for check in checks:
                 check()
 
-        # The caller checks filesystem identities, then the final process state
-        # immediately before the first attempt and every subsequent retry.
+        # Check identity again after the process gate. A peer can deliver a
+        # destination while the gate is reading process state.
         if self._scheduler is not None:
             before_retry()
         replace_with_retry(staged, dst, before_retry=before_retry if checks else None)
@@ -616,7 +681,8 @@ class SyncEngine:
         staged: Path,
         codec: JsonlCodec | None = None,
         expected_sha256: str | None = None,
-    ) -> None:
+        stage_file: BinaryIO | None = None,
+    ) -> str:
         """Stage the payload and prove it is the source, byte for byte.
 
         ``codec`` is the container the *destination* wants, and only a caller
@@ -644,8 +710,19 @@ class SyncEngine:
         a chat and only noticing afterwards (CS-515).
 
         A container that cannot be decoded (truncated by a cloud client,
-        damaged) is a changed source, not an internal error (CS-518).
+        damaged) is a changed source, not an internal error (CS-518). Return
+        the verified content hash so parallel preparation can recheck it.
         """
+        def staged_digest(container: JsonlCodec | None) -> str:
+            if stage_file is None:
+                return _sha256_file(staged) if container is None else _sha256_stream(staged, container)
+            stage_file.flush()
+            stage_file.seek(0)
+            if container is None or container is JsonlCodec.NONE:
+                return _sha256_reader(stage_file)
+            with open_jsonl(staged, container, raw=stage_file) as reader:
+                return _sha256_reader(reader)
+
         source_codec = codec_of(source) or JsonlCodec.NONE
         try:
             if codec is None or source_codec is codec:
@@ -655,17 +732,22 @@ class SyncEngine:
                     before = _sha256_file(source)
                 else:
                     before = _sha256_stream(source, source_codec)
-                shutil.copy2(source, staged)
+                if stage_file is None:
+                    shutil.copy2(source, staged)
+                else:
+                    _copy_raw_to_stage(source, stage_file)
                 if expected_sha256 is None or codec is None:
-                    staged_hash = _sha256_file(staged)
+                    staged_hash = staged_digest(None)
                     after = _sha256_file(source)
                 else:
-                    staged_hash = _sha256_stream(staged, source_codec)
+                    staged_hash = staged_digest(source_codec)
                     after = _sha256_stream(source, source_codec)
             else:
                 before = _sha256_stream(source, source_codec)
-                transcode(source, staged, source_codec, codec)
-                staged_hash = _sha256_stream(staged, codec)
+                if stage_file is not None:
+                    stage_file.truncate(0)
+                transcode(source, staged if stage_file is None else stage_file, source_codec, codec)
+                staged_hash = staged_digest(codec)
                 after = _sha256_stream(source, source_codec)
         except CONTAINER_DECODE_ERRORS as exc:
             raise FailSafeError(
@@ -679,6 +761,7 @@ class SyncEngine:
                 f"{source.name} is no longer the branch the plan was built from; rescan and confirm the new plan",
                 code="PLAN_CHANGED",
             )
+        return before
 
     def _cleanup_orphaned_temp_files(self) -> None:
         if not self._temp_dir.exists():
@@ -736,15 +819,29 @@ def _identity(path: Path) -> _Identity:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
+def _stage_stamp(info: os.stat_result) -> _StageStamp | None:
+    birth_or_change = getattr(info, "st_birthtime_ns", info.st_ctime_ns)
+    if not info.st_ino or not birth_or_change or not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, birth_or_change
+
+
+def _stage_stamp_at(path: Path) -> _StageStamp | None:
+    try:
+        return _stage_stamp(os.lstat(path))
+    except FileNotFoundError:
+        return None
+
+
 def _require_planned_destination(
     path: Path,
     relative_path: str,
     expected: DestinationPrecondition | None,
-) -> None:
-    """Fail before backup when a normal sync's destination moved after scan."""
-    if expected is None:
-        return
+) -> _Identity:
+    """Return the identity proved by the plan before taking its backup."""
     current = _identity(path)
+    if expected is None:
+        return current
     if not expected.exists:
         matches = current is None
     elif current is None:
@@ -752,17 +849,24 @@ def _require_planned_destination(
     else:
         device, inode, size, mtime_ns = current
         matches = (
-            size == expected.size
-            and mtime_ns == expected.mtime_ns
+            (expected.size is None or size == expected.size)
+            and (expected.mtime_ns is None or mtime_ns == expected.mtime_ns)
             and (expected.device is None or device == expected.device)
             and (expected.inode is None or inode == expected.inode)
         )
+        if matches and expected.content_sha256 is not None:
+            try:
+                codec = codec_of(path) or JsonlCodec.NONE
+                matches = _sha256_stream(path, codec) == expected.content_sha256 and _identity(path) == current
+            except JSONL_READ_ERRORS:
+                matches = False
     if not matches:
         raise FailSafeError(
             f"{relative_path} changed after the sync plan was built; "
             "nothing was replaced; rescan and confirm the new plan",
             code="DESTINATION_CHANGED_SINCE_PLAN",
         )
+    return current
 
 
 def _same_while_backed_up(path: Path, relative_path: str, before: _Identity) -> _Identity:
@@ -777,17 +881,164 @@ def _same_while_backed_up(path: Path, relative_path: str, before: _Identity) -> 
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return _sha256_reader(handle)
 
 
 def _sha256_stream(path: Path, codec: JsonlCodec) -> str:
     """Hash what a staged container decompresses to, never its stored bytes."""
-    digest = hashlib.sha256()
     with open_jsonl(path, codec) as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+        return _sha256_reader(handle)
+
+
+def _sha256_reader(handle: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
     return digest.hexdigest()
+
+
+def _copy_raw_to_stage(source: Path, stage_file: BinaryIO) -> None:
+    """Copy the payload and preserve metadata on the reserved handle."""
+    with source.open("rb") as reader:
+        if os.name == "nt":
+            _require_unnamed_windows_data_stream(reader)
+        stage_file.truncate(0)
+        shutil.copyfileobj(reader, stage_file, 1024 * 1024)
+        source_stat = os.fstat(reader.fileno())
+        stage_file.flush()
+        if os.name == "nt":
+            _require_unnamed_windows_data_stream(reader)
+            _copy_windows_metadata(stage_file, source_stat)
+        else:
+            descriptor = stage_file.fileno()
+            os.utime(descriptor, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+            shutil._copyxattr(reader.fileno(), descriptor)
+            os.fchmod(descriptor, stat.S_IMODE(source_stat.st_mode))
+
+
+@cache
+def _windows_metadata_api():
+    import ctypes
+    from ctypes import wintypes
+
+    class FileBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("creation_time", ctypes.c_int64), ("last_access_time", ctypes.c_int64),
+            ("last_write_time", ctypes.c_int64), ("change_time", ctypes.c_int64),
+            ("file_attributes", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_info = kernel32.SetFileInformationByHandle
+    set_info.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    set_info.restype = wintypes.BOOL
+    get_info = kernel32.GetFileInformationByHandleEx
+    get_info.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    get_info.restype = wintypes.BOOL
+    return FileBasicInfo, set_info, get_info
+
+
+@cache
+def _windows_cleanup_api():
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    return create_file, close_handle
+
+
+def _discard_windows_stage(path: Path, stamp: _StageStamp) -> None:
+    """Delete the verified file through its handle. Never unlink the pathname."""
+    import ctypes
+    import msvcrt
+
+    create_file, close_handle = _windows_cleanup_api()
+    delete_access, read_attributes, share_read = 0x10000, 0x80, 1
+    open_existing, open_reparse_point = 3, 0x00200000
+    handle = create_file(str(path), delete_access | read_attributes, share_read, None,
+                         open_existing, open_reparse_point, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        if error in (2, 3):  # file or parent already gone
+            return
+        raise ctypes.WinError(error)
+    try:
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except OSError:
+        close_handle(handle)
+        raise
+    try:
+        info = os.fstat(descriptor)
+        if info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT or _stage_stamp(info) != stamp:
+            return
+        _, set_info, _ = _windows_metadata_api()
+        delete_on_close = ctypes.c_ubyte(1)  # FILE_DISPOSITION_INFO.DeleteFile
+        if not set_info(handle, 4, ctypes.byref(delete_on_close), ctypes.sizeof(delete_on_close)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        os.close(descriptor)
+
+
+def _require_unnamed_windows_data_stream(source: BinaryIO) -> None:
+    """Refuse alternate streams without reading their data."""
+    import ctypes
+    import msvcrt
+
+    _, _, get_info = _windows_metadata_api()
+    # FileStreamInfo returns one or more 8-byte aligned FILE_STREAM_INFO
+    # entries. A single default stream fits. An unreadable list fails closed.
+    buffer = (ctypes.c_int64 * 64)()
+    file_stream_info, error_handle_eof = 7, 38
+    if not get_info(msvcrt.get_osfhandle(source.fileno()), file_stream_info, buffer, ctypes.sizeof(buffer)):
+        error = ctypes.get_last_error()
+        if error == error_handle_eof:
+            return
+        raise FailSafeError(f"Could not verify alternate data streams (Windows error {error})", code="STATE_CHANGED_RETRY")
+    next_entry, name_length, _, _ = struct.unpack_from("<IIqq", buffer)
+    name_offset = struct.calcsize("<IIqq")
+    default = "::$DATA".encode("utf-16-le")
+    if next_entry or name_length != len(default) or bytes(buffer)[name_offset:name_offset + name_length] != default:
+        raise FailSafeError("File has an alternate data stream that cannot be preserved safely", code="STATE_CHANGED_RETRY")
+
+
+def _require_destination_streams(path: Path, expected: _Identity) -> None:
+    # ZIP and some supported copy/restore paths only carry the main stream.
+    if os.name != "nt":
+        return
+    try:
+        with path.open("rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) == expected:
+                _require_unnamed_windows_data_stream(handle)
+                return
+    except FileNotFoundError:
+        pass
+    raise FailSafeError("Destination changed while its data streams were checked", code="STATE_CHANGED_RETRY")
+
+
+def _copy_windows_metadata(stage_file: BinaryIO, source: os.stat_result) -> None:
+    import ctypes
+    import msvcrt
+
+    info_type, set_info, _ = _windows_metadata_api()
+    epoch_ticks = 116444736000000000  # FILETIME's Unix epoch in 100 ns ticks
+    dos_attributes = (
+        stat.FILE_ATTRIBUTE_ARCHIVE | stat.FILE_ATTRIBUTE_HIDDEN | stat.FILE_ATTRIBUTE_READONLY
+        | stat.FILE_ATTRIBUTE_SYSTEM | stat.FILE_ATTRIBUTE_NOT_CONTENT_INDEXED
+    )
+    info = info_type(
+        0, source.st_atime_ns // 100 + epoch_ticks, source.st_mtime_ns // 100 + epoch_ticks, 0,
+        source.st_file_attributes & dos_attributes or stat.FILE_ATTRIBUTE_NORMAL,
+    )
+    if not set_info(msvcrt.get_osfhandle(stage_file.fileno()), 0, ctypes.byref(info), ctypes.sizeof(info)):
+        raise ctypes.WinError(ctypes.get_last_error())

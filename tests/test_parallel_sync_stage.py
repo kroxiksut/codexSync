@@ -13,6 +13,7 @@ import uuid
 from codexsync import app
 from codexsync.backup import BackupManager
 from codexsync.exceptions import FailSafeError, SafetyPreconditionError
+from codexsync.models import DeleteAction, SyncPlan
 from codexsync.mutation_journal import JournalState, JournalStore
 from codexsync.sync_engine import STAGE_SUFFIX, SyncEngine
 from codexsync.work_scheduler import WorkScheduler
@@ -72,7 +73,8 @@ class ParallelSyncStageTests(unittest.TestCase):
 
     def _unchanged_failure(self, state=JournalState.FAILED):
         self.assertEqual(self._targets(), self.before)
-        self.assertFalse(list(self.root.rglob(f"*{STAGE_SUFFIX}")))
+        if os.name == "nt":
+            self.assertFalse(list(self.root.rglob(f"*{STAGE_SUFFIX}")))
         self.assertEqual((self.root / "manifest.json").read_bytes(), self.manifest_before)
         self.assertEqual(self._journal().state, state)
 
@@ -210,19 +212,87 @@ class ParallelSyncStageTests(unittest.TestCase):
         self._apply()
 
     def test_source_truncated_during_copy_is_refused_before_any_replace(self):
-        real = shutil.copy2
+        from codexsync.sync_engine import _copy_raw_to_stage
 
-        def copy(source, destination, *args, **kwargs):
-            result = real(source, destination, *args, **kwargs)
-            if str(destination).endswith(STAGE_SUFFIX) and Path(source).name == "0.txt":
+        def copy(source, destination):
+            _copy_raw_to_stage(source, destination)
+            if source.name == "0.txt":
                 Path(source).write_bytes(b"")
-            return result
 
-        with patch("codexsync.sync_engine.shutil.copy2", side_effect=copy):
+        with patch("codexsync.sync_engine._copy_raw_to_stage", side_effect=copy):
             with self.assertRaises(FailSafeError):
                 self._apply()
         self.before["local/data/0.txt"] = b""
         self._unchanged_failure()
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows alternate data streams")
+    def test_a_file_with_an_alternate_stream_is_not_copied_as_just_its_main_stream(self):
+        name = self.root / "local" / "data" / "0.txt"
+        stream = Path(f"{name}:codexsync-test-stream")
+        try:
+            stream.write_bytes(b"non-default data")
+        except OSError as exc:
+            if getattr(exc, "winerror", None) in (1, 50, 123):
+                self.skipTest("test volume does not support alternate data streams")
+            raise
+
+        with self.assertRaisesRegex(FailSafeError, "alternate data stream"):
+            self._apply()
+        self.assertEqual(stream.read_bytes(), b"non-default data")
+        self._unchanged_failure()
+
+    def _run_destination_stream_case(self, *, delete=False, after_backup=False):
+        if os.name != "nt":
+            self.skipTest("requires Windows alternate data streams")
+        target = self.root / "cloud" / "data" / "0.txt"
+        stream = Path(f"{target}:codexsync-test-stream")
+        payload = b"information a ZIP backup cannot retain"
+        self.ctx.config.backup.compression = "zip"
+        if delete:
+            self.ctx.plan = SyncPlan(deletions=[DeleteAction(target, "data/0.txt", "cloud")])
+
+        def deliver():
+            info = target.stat()
+            try:
+                stream.write_bytes(payload)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) in (1, 50, 123):
+                    self.skipTest("test volume does not support alternate data streams")
+                raise
+            os.utime(target, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+        if after_backup:
+            class Gate:
+                final_checks = 0
+
+                def require(self, *_args, final=False):
+                    if final:
+                        self.final_checks += 1
+                        if self.final_checks == 2:
+                            deliver()
+
+            self.ctx.safety_gate = Gate()
+        else:
+            deliver()
+
+        with self.assertRaisesRegex(FailSafeError, "alternate data stream"):
+            self._apply()
+        self.assertEqual(stream.read_bytes(), payload)
+        if not after_backup:
+            self.assertFalse(list((self.root / "backups").glob("*.zip")))
+        self._unchanged_failure(JournalState.RECOVERY_REQUIRED if after_backup else JournalState.FAILED)
+
+    def test_destination_stream_refuses_overwrite_before_zip_backup(self):
+        self._run_destination_stream_case()
+
+    def test_destination_stream_refuses_delete_before_zip_backup(self):
+        self._run_destination_stream_case(delete=True)
+
+    def test_destination_stream_delivered_at_the_gate_refuses_overwrite(self):
+        self._run_destination_stream_case(after_backup=True)
+
+    def test_destination_stream_delivered_at_the_gate_refuses_delete(self):
+        self._run_destination_stream_case(delete=True, after_backup=True)
 
     def test_source_changed_after_its_worker_finishes_is_refused_after_join(self):
         real = SyncEngine._stage_verified
@@ -279,19 +349,21 @@ class ParallelSyncStageTests(unittest.TestCase):
         self._unchanged_failure()
 
     def test_cloud_renames_stage_and_delivers_identical_foreign_copy_is_refused(self):
-        real = SyncEngine._stage_verified
+        real = SyncEngine._prepare_copy
         moved, foreign = [], []
 
-        def stage(source, staged, *args):
-            real(source, staged, *args)
+        def stage(engine, item):
+            result = real(engine, item)
+            source, staged = result.action.src, result.path
             if source.name == "0.txt":
                 renamed = staged.with_suffix(".cloud-renamed")
                 staged.rename(renamed)
                 moved.append(renamed)
                 staged.write_bytes(source.read_bytes())
                 foreign.append(staged)
+            return result
 
-        with patch.object(SyncEngine, "_stage_verified", side_effect=stage):
+        with patch.object(SyncEngine, "_prepare_copy", new=stage):
             with self.assertRaises(FailSafeError):
                 self._apply()
         self.assertEqual(foreign[0].read_bytes(), b"local-0")
@@ -429,15 +501,11 @@ class ParallelSyncStageTests(unittest.TestCase):
         self._unchanged_failure(JournalState.RECOVERY_REQUIRED)
 
     def test_cloud_lock_on_owned_stage_cleanup_does_not_mask_worker_failure(self):
-        real_unlink = Path.unlink
         failure = OSError("source copy interrupted")
 
-        def unlink(path, *args, **kwargs):
-            if path.name.endswith(STAGE_SUFFIX):
-                raise PermissionError("cloud client holds operation stage")
-            return real_unlink(path, *args, **kwargs)
-
-        with patch.object(SyncEngine, "_stage_verified", side_effect=failure), patch.object(Path, "unlink", new=unlink):
+        with patch.object(SyncEngine, "_stage_verified", side_effect=failure), patch(
+            "codexsync.sync_engine._discard_windows_stage", side_effect=PermissionError("cloud client holds operation stage"),
+        ):
             with self.assertRaises(OSError) as raised:
                 self._apply()
         self.assertIs(raised.exception, failure)
@@ -449,6 +517,26 @@ class ParallelSyncStageTests(unittest.TestCase):
         self.assertTrue(leftovers)
         for path in leftovers:
             path.unlink()
+
+    def test_stage_cleanup_never_unlinks_a_path_that_can_be_swapped_after_validation(self):
+        real_unlink = Path.unlink
+        unsafe_attempts = []
+        failure = OSError("staging failed before commit")
+
+        def deliver_on_path_unlink(path, *args, **kwargs):
+            if path.name.endswith(STAGE_SUFFIX) and path.exists():
+                path.rename(path.with_suffix(".saved"))
+                path.write_bytes(b"foreign stage bytes")
+                unsafe_attempts.append(path)
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(SyncEngine, "_stage_verified", side_effect=failure), patch.object(
+            Path, "unlink", new=deliver_on_path_unlink,
+        ):
+            with self.assertRaises(OSError):
+                self._apply()
+        self.assertEqual(unsafe_attempts, [], "path unlink could delete a replacement, despite an earlier valid stat")
+        self.assertEqual(self._targets(), self.before)
 
     def test_source_and_stage_reverification_overlap_without_caller_payload_reads(self):
         rendezvous = Barrier(2)
@@ -473,17 +561,17 @@ class ParallelSyncStageTests(unittest.TestCase):
 
     def test_stage_stat_failure_cleans_the_exact_successful_reservation(self):
         from codexsync import sync_engine
-        real_identity = sync_engine._identity
+        real_stamp = sync_engine._stage_stamp_at
         inspected = []
         failure = OSError("cloud client denied staging metadata")
 
-        def identity(path):
+        def stamp(path):
             if path.name.endswith(STAGE_SUFFIX) and not inspected:
                 inspected.append(path)
                 raise failure
-            return real_identity(path)
+            return real_stamp(path)
 
-        with patch.object(sync_engine, "_identity", side_effect=identity):
+        with patch.object(sync_engine, "_stage_stamp_at", side_effect=stamp):
             with self.assertRaises(OSError) as raised:
                 self._apply()
         self.assertIs(raised.exception, failure)

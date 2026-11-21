@@ -27,15 +27,16 @@ and `safety.fail_on_unknown` turns that into a refusal. Linux was observed on
 """
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
 import fnmatch
-import io
-import json
 import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
+
+from .process_knowledge import WINDOWS_APP_NAME, WINDOWS_CODEX_APP_MARKER
+from .windows_processes import windows_processes
 
 
 DETECTOR_CONTRACT_VERSION = 1
@@ -49,10 +50,8 @@ def _run_console_tool(argv: list[str], *, encoding: str) -> subprocess.Completed
     """Run a console helper without ever showing a console window.
 
     The window is not a cosmetic detail. `codexsync-gui.exe` is built windowed,
-    so the process owns no console; every `tasklist` and `powershell` started
-    from it therefore gets a *new* one, which Windows shows. One gated check is
-    up to nine samples of two adapters, so a screen that checks the process
-    state flashed up to eighteen windows (CS-259).
+    so the process owns no console. Before the native Windows adapter, a
+    process check could flash as many as eighteen console windows (CS-259).
 
     Three things make that stop, and each is needed on its own: `CREATE_NO_WINDOW`
     for the console the child would allocate, `STARTF_USESHOWWINDOW` for a child
@@ -92,8 +91,7 @@ def _run_console_tool(argv: list[str], *, encoding: str) -> subprocess.Completed
             **kwargs,
         )
     except subprocess.TimeoutExpired as exc:
-        # A hung WMI/PowerShell must not hang the gate or the watcher (CS-471):
-        # a listing that did not finish is a failed sample, i.e. UNKNOWN.
+        # A listing that did not finish is a failed sample, i.e. UNKNOWN.
         raise RuntimeError(f"{argv[0]} did not finish within {CONSOLE_TOOL_TIMEOUT_SECONDS}s") from exc
 
 #: Platforms whose adapter has been run against a live Codex, mapping
@@ -121,10 +119,11 @@ class ProcessInfo:
     command_line: str = ""
     parent_pid: int | None = None
     #: The program's own path, where the system says it exactly (`/proc` on
-    #: Linux, CIM `ExecutablePath` on Windows); empty elsewhere or where the
+    #: Linux, `QueryFullProcessImageNameW` on Windows); empty elsewhere or where the
     #: system would not say, and then on POSIX the command line's first word
     #: stands in.
     program: str = ""
+    program_access_denied: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -146,7 +145,7 @@ class CodexProcessDetector:
                 platform="windows",
                 contract_version=DETECTOR_CONTRACT_VERSION,
                 supported=True,
-                detail="Windows tasklist and CIM process-tree adapter",
+                detail="Native Windows process snapshot and image paths",
             )
         proof = PROVEN_DETECTORS.get(sys.platform)
         if proof:
@@ -234,34 +233,21 @@ class CodexProcessDetector:
             roots = self.list_running()
             return roots, []
 
-        parents = {_normalize_windows_name(name) for name in parent_process_names if name.strip()}
-        processes = self._list_windows_all_complete()
-        roots = [proc for proc in processes if _normalize_windows_name(proc.name) in parents]
-        if not roots:
-            return [], []
+        return _windows_subprocess_tree(self._list_windows_all_complete(), parent_process_names)
 
-        by_pid = {proc.pid: proc for proc in processes}
-        children: dict[int, list[int]] = {}
-        for proc in processes:
-            if proc.parent_pid is None:
-                continue
-            children.setdefault(proc.parent_pid, []).append(proc.pid)
-
-        root_pids = {proc.pid for proc in roots}
-        seen: set[int] = set()
-        queue = list(root_pids)
-        descendants: list[ProcessInfo] = []
-        while queue:
-            pid = queue.pop(0)
-            for child_pid in children.get(pid, []):
-                if child_pid in seen:
-                    continue
-                seen.add(child_pid)
-                child = by_pid.get(child_pid)
-                if child:
-                    descendants.append(child)
-                queue.append(child_pid)
-        return roots, descendants
+    def sample_matches(
+        self, process_names: list[str], markers: list[str],
+    ) -> tuple[list[ProcessInfo], list[ProcessInfo], list[ProcessInfo]]:
+        """Read main processes, children and background processes for one gate sample."""
+        if sys.platform.startswith("win"):
+            processes = self._list_windows_all_complete(inspect_names=_windows_path_candidates(process_names, markers))
+            main, children = _windows_subprocess_tree(processes, process_names)
+            background = _match_windows(processes, markers)
+            if not main and not background:
+                _require_windows_marker_visibility(processes, markers)
+            return main, children, background
+        main, children = self.get_subprocess_tree(process_names)
+        return main, children, self.find_processes(markers) if markers else []
 
     def has_marker(self, proc: ProcessInfo, marker_name: str) -> bool:
         marker = marker_name.lower().strip()
@@ -276,88 +262,14 @@ class CodexProcessDetector:
         """Compatibility helper for read-only callers that do not need a tree."""
         return self._list_windows_all_complete()
 
-    def _list_windows_all_complete(self) -> list[ProcessInfo]:
-        merged: dict[int, ProcessInfo] = {}
-        for proc in self._list_windows_tasklist():
-            merged[proc.pid] = proc
-        cim_processes = self._list_windows_cim()
-        for proc in cim_processes:
-            existing = merged.get(proc.pid)
-            if existing is None:
-                merged[proc.pid] = proc
-                continue
-            merged[proc.pid] = ProcessInfo(
-                pid=proc.pid,
-                name=proc.name or existing.name,
-                parent_pid=proc.parent_pid if proc.parent_pid is not None else existing.parent_pid,
-                program=proc.program or existing.program,
+    def _list_windows_all_complete(self, *, inspect_names: set[str] | None = None) -> list[ProcessInfo]:
+        return [
+            ProcessInfo(
+                proc.pid, proc.name, parent_pid=proc.parent_pid,
+                program=proc.path, program_access_denied=proc.path_access_denied,
             )
-        return list(merged.values())
-
-    def _list_windows_tasklist(self) -> list[ProcessInfo]:
-        # "oem", not "utf-8": `tasklist` writes in the console code page, so on
-        # a localized Windows a name with non-ASCII bytes was silently losing
-        # them to `errors="ignore"`.
-        result = _run_console_tool(["tasklist", "/FO", "CSV", "/NH"], encoding="oem")
-        if result.returncode != 0:
-            raise RuntimeError(f"tasklist failed with exit code {result.returncode}")
-
-        rows = csv.reader(io.StringIO(result.stdout))
-        processes: list[ProcessInfo] = []
-        for row in rows:
-            if len(row) < 2:
-                continue
-            name = row[0].strip()
-            try:
-                pid = int(row[1].strip())
-            except ValueError:
-                continue
-            processes.append(ProcessInfo(pid=pid, name=name))
-        return processes
-
-    def _list_windows_cim(self) -> list[ProcessInfo]:
-        script = (
-            "$ErrorActionPreference='Stop'; "
-            "Get-CimInstance Win32_Process | "
-            "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath | ConvertTo-Json -Compress"
-        )
-        result = _run_console_tool(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            encoding="utf-8",
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"CIM process enumeration failed with exit code {result.returncode}")
-        raw = result.stdout.strip()
-        if not raw:
-            raise RuntimeError("CIM process enumeration returned an empty snapshot")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("CIM process enumeration returned invalid JSON") from exc
-        rows = payload if isinstance(payload, list) else [payload]
-        processes: list[ProcessInfo] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                pid = int(row.get("ProcessId"))
-            except (TypeError, ValueError):
-                continue
-            parent_raw = row.get("ParentProcessId")
-            parent_pid: int | None = None
-            try:
-                if parent_raw is not None:
-                    parent_pid = int(parent_raw)
-            except (TypeError, ValueError):
-                parent_pid = None
-            name = str(row.get("Name") or "").strip()
-            if not name:
-                continue
-            # Null for a process this user may not open (a service running as
-            # SYSTEM): such a process is simply matched by name only.
-            program = str(row.get("ExecutablePath") or "").strip()
-            processes.append(ProcessInfo(pid=pid, name=name, parent_pid=parent_pid, program=program))
-        return processes
+            for proc in windows_processes(inspect_names=inspect_names)
+        ]
 
     def _list_posix(self) -> list[ProcessInfo]:
         return _match_posix(self._list_posix_all(), sorted(self._names))
@@ -484,6 +396,8 @@ def _windows_marker_matches(proc: ProcessInfo, marker: str) -> bool:
     No command line stands in for a missing path: a process whose path the
     system would not give is matched by name only, never by its arguments.
     """
+    if _windows_codex_app_marker(marker) and proc.name.lower() != WINDOWS_APP_NAME:
+        return False
     return _path_matches(proc.program, marker)
 
 
@@ -497,6 +411,63 @@ def _match_windows(processes: list[ProcessInfo], wanted: list[str]) -> list[Proc
         if _normalize_windows_name(proc.name) in names
         or any(_windows_marker_matches(proc, marker) for marker in markers)
     ]
+
+
+def _windows_codex_app_marker(marker: str) -> bool:
+    return marker.strip().lower().replace("\\", "/") == WINDOWS_CODEX_APP_MARKER.lower()
+
+
+def _windows_path_candidates(names: Sequence[str], markers: Sequence[str]) -> set[str] | None:
+    """Keep unrelated process churn out of the common case of the shipped marker."""
+    candidates: set[str] = set()
+    for marker in markers:
+        if _windows_codex_app_marker(marker):
+            candidates.add(WINDOWS_APP_NAME)
+        elif _path_marker(marker):
+            return None  # An arbitrary pattern can match any process path.
+    for name in (*names, *markers):
+        if name.strip() and not _path_marker(name):
+            normalized = _normalize_windows_name(name)
+            candidates.update((normalized, normalized.removesuffix(".exe")))
+    return candidates
+
+
+def _require_windows_marker_visibility(processes: list[ProcessInfo], markers: Sequence[str]) -> None:
+    """Refuse to report STOPPED if a marker could match an unreadable path."""
+    # The shipped marker requires a known basename. A custom substring or
+    # wildcard can also match a directory segment, even if it contains `.exe`.
+    candidates = _windows_path_candidates((), [marker for marker in markers if _path_marker(marker)])
+    for proc in processes:
+        if proc.program_access_denied and (candidates is None or proc.name.lower() in candidates):
+            raise RuntimeError(f"Windows image path access denied for {proc.name} (pid {proc.pid})")
+
+
+def _windows_subprocess_tree(
+    processes: list[ProcessInfo], parent_process_names: list[str],
+) -> tuple[list[ProcessInfo], list[ProcessInfo]]:
+    parents = {_normalize_windows_name(name) for name in parent_process_names if name.strip()}
+    roots = [proc for proc in processes if _normalize_windows_name(proc.name) in parents]
+    if not roots:
+        return [], []
+
+    children: dict[int, list[ProcessInfo]] = {}
+    for proc in processes:
+        if proc.parent_pid is not None:
+            children.setdefault(proc.parent_pid, []).append(proc)
+
+    root_pids = {proc.pid for proc in roots}
+    seen: set[int] = set()
+    queue = list(root_pids)
+    descendants: list[ProcessInfo] = []
+    while queue:
+        pid = queue.pop(0)
+        for child in children.get(pid, []):
+            if child.pid in seen:
+                continue
+            seen.add(child.pid)
+            descendants.append(child)
+            queue.append(child.pid)
+    return roots, descendants
 
 
 def _match_posix(processes: list[ProcessInfo], wanted: list[str]) -> list[ProcessInfo]:

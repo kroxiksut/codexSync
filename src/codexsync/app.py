@@ -74,6 +74,7 @@ from .models import (
     AppConfig,
     CopyAction,
     DeleteAction,
+    DestinationPrecondition,
     FileMeta,
     SyncPlan,
 )
@@ -279,7 +280,7 @@ from .codex_health import (
     diagnose_journals,
     measure_chat_files,
 )
-from .session_catalog import SessionParseCache, one_per_chat, scan_both_sides, scan_sessions
+from .session_catalog import SessionDescriptor, SessionParseCache, one_per_chat, scan_both_sides, scan_sessions
 from .session_index import (
     PROVEN_CONTRACTS,
     SESSION_INDEX_FILE,
@@ -2883,6 +2884,7 @@ def apply_session_transfer(
     with (
         OperationLock(cfg.paths.temp_dir, state_root=local_dir, machine_id=machine, family="sessions"),
         ProgressLog(progress_log_dir(cfg.paths.temp_dir, local_dir), "sessions", event_progress) as events,
+        WorkScheduler() as scheduler,
     ):
         journals = JournalStore(cfg.paths.temp_dir)
         # The same numbers a settings sync records, so a history row can say
@@ -2913,6 +2915,8 @@ def apply_session_transfer(
             progress=progress,
             phase_progress=phase_progress,
             progress_events=events,
+            scheduler=scheduler,
+            stage_operation_id=journal.operation_id,
             # Session transfer performs a stronger record-level read-back below.
             # Deferring that read avoids opening every cloud file twice in the
             # serial commit loop while the journal remains COMMITTING.
@@ -2920,11 +2924,10 @@ def apply_session_transfer(
         )
         try:
             engine.execute(copies, dry_run=False)
-            with WorkScheduler() as scheduler:
-                _verify_transferred_branches(
-                    cfg, plan, local_dir, cloud_dir,
-                    scheduler=scheduler, phase_progress=phase_progress,
-                )
+            _verify_transferred_branches(
+                cfg, plan, local_dir, cloud_dir,
+                scheduler=scheduler, phase_progress=phase_progress,
+            )
             current[0] = journals.transition(current[0], JournalState.COMMITTED)
         except Exception as exc:
             failure = (
@@ -2978,6 +2981,7 @@ def apply_session_transfer(
                     "CODEX_STATE_UNKNOWN": "Could not determine whether Codex is running.",
                     "DESTINATION_APPEARED": "Destination appeared after backup.",
                     "DESTINATION_CHANGED": "Destination changed after backup.",
+                    "DESTINATION_CHANGED_SINCE_PLAN": "Destination changed after the confirmed plan was built.",
                     "STATE_CHANGED_RETRY": "A file changed while the operation was running.",
                     "DESTINATION_VERIFY_FAILED": "Destination verification failed after replacement.",
                     "TRANSFER_READBACK_MISMATCH": "The written chat did not match the plan on read-back.",
@@ -3120,6 +3124,9 @@ def _transfer_copy_actions(
         destination = root / Path(*item.target_relative_path.split("/"))
         _require_within(destination, root, "session transfer destination")
         source_root = cloud_dir if towards_local else local_dir
+        old = (local_by_hash if towards_local else remote_by_hash).get(item.session_hash)
+        destination_hash = item.local_sha256 if towards_local else item.remote_sha256
+        replaced = old is not None and Path(old.relative_path) == Path(item.target_relative_path)
         bucket.append(
             CopyAction(
                 src=source_root / Path(*source.relative_path.split("/")),
@@ -3129,6 +3136,9 @@ def _transfer_copy_actions(
                 # What the confirmed plan saw on the source side; staging
                 # refuses anything else (CS-515).
                 expected_sha256=(item.remote_sha256 if towards_local else item.local_sha256) or None,
+                destination_precondition=(
+                    _transfer_destination(old, destination_hash) if replaced else DestinationPrecondition(exists=False)
+                ),
                 session_hash=item.session_hash,
             )
         )
@@ -3136,7 +3146,6 @@ def _transfer_copy_actions(
             MOVES_BRANCH in item.codes or IN_PLACE_DECOMPRESSED in item.codes
             or MIRROR_CONTAINER_REPLACED in item.codes
         ):
-            old = (local_by_hash if towards_local else remote_by_hash).get(item.session_hash)
             if old is None:
                 raise FailSafeError("A planned move no longer finds the file it moves", code="PLAN_CHANGED")
             if old.relative_path == item.target_relative_path:
@@ -3146,9 +3155,20 @@ def _transfer_copy_actions(
             deletions.append(DeleteAction(
                 path=old_path, relative_path=old.relative_path,
                 side="local" if towards_local else "cloud",
+                destination_precondition=_transfer_destination(old, destination_hash),
                 session_hash=item.session_hash,
             ))
     return SyncPlan(to_local=to_local, to_cloud=to_cloud, deletions=deletions)
+
+
+def _transfer_destination(branch: SessionDescriptor, expected_sha256: str) -> DestinationPrecondition:
+    if not expected_sha256 or branch.sha256 != expected_sha256:
+        raise FailSafeError("A destination branch no longer matches the plan", code="PLAN_CHANGED")
+    if branch.scan_signature is None:
+        return DestinationPrecondition(exists=True, mtime_ns=branch.mtime_ns, content_sha256=expected_sha256)
+    size, mtime_ns, file_id = branch.scan_signature
+    device, inode = (int(part, 16) for part in file_id.split(":")) if file_id else (None, None)
+    return DestinationPrecondition(True, mtime_ns, size, device, inode, expected_sha256)
 
 
 def _bundle_resolved_conflicts(

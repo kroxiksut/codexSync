@@ -114,6 +114,16 @@ class Catalog:
             return key
         return form.format(count=count, **params)
 
+    def duration(self, seconds: int) -> str:
+        """A compact elapsed or remaining time in the current language."""
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return self.text("common.duration.hours", hours=hours, minutes=minutes, seconds=seconds)
+        if minutes:
+            return self.text("common.duration.minutes", minutes=minutes, seconds=seconds)
+        return self.text("common.duration.seconds", seconds=seconds)
+
     def has(self, key: str) -> bool:
         return key in self.strings or key in self.fallback
 

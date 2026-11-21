@@ -204,7 +204,7 @@ class DocumentationNamesTests(unittest.TestCase):
             for extension in ("deb", "rpm", "AppImage", "tar.gz"):
                 with self.subTest(lang=lang, extension=extension):
                     self.assertIn(packages.asset_name(token, "x86_64", extension), text)
-            self.assertIn(packages.asset_name("v0.2.0", "x86_64", "deb"), text)
+            self.assertIn(packages.asset_name("v0.2.0-alpha.2", "x86_64", "deb"), text)
             self.assertNotRegex(text, r"codexsync-<(version|версия|版本)>-linux")
 
 class LauncherFileTests(unittest.TestCase):

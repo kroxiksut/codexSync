@@ -31,8 +31,10 @@ from .process_detector import (
     _path_marker,
     _posix_marker_matches,
     _posix_name_matches,
+    _require_windows_marker_visibility,
     _run_ps,
     _windows_marker_matches,
+    _windows_path_candidates,
 )
 
 __all__ = ["ProcessMatch", "ProcessReport", "build_process_report", "os_key"]
@@ -179,7 +181,7 @@ def _posix_rule(proc: ProcessInfo, entries: tuple[str, ...]) -> tuple[str, str] 
 
 
 def _windows_matches(detector: CodexProcessDetector, names: tuple[str, ...], markers: tuple[str, ...]):
-    processes = detector._list_windows_all_complete()
+    processes = detector._list_windows_all_complete(inspect_names=_windows_path_candidates(names, markers))
     # The first entry that names a process is the rule reported for it.
     by_name: dict[str, str] = {}
     for entry in names:
@@ -211,13 +213,18 @@ def _windows_matches(detector: CodexProcessDetector, names: tuple[str, ...], mar
             seen.add(child.pid)
             queue.append((child.pid, entry))
             yield ProcessMatch(CHILD, child.pid, child.parent_pid, _short(child.name), entry, "tree")
+    background = False
     for proc in processes:
         if proc.pid in seen:
             continue
         entry = by_marker.get(_normalize_windows_name(proc.name))
         if entry is not None:
+            background = True
             yield ProcessMatch(BACKGROUND, proc.pid, proc.parent_pid, _short(proc.name), entry, "name")
             continue
         entry = next((marker for marker in path_markers if _windows_marker_matches(proc, marker)), None)
         if entry is not None:
+            background = True
             yield ProcessMatch(BACKGROUND, proc.pid, proc.parent_pid, _short(proc.name), entry, "path_marker")
+    if not roots and not background:
+        _require_windows_marker_visibility(processes, markers)

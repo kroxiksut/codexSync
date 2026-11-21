@@ -35,7 +35,7 @@ class _Detector:
     def _list_posix_all(self):
         return []
 
-    def _list_windows_all_complete(self):
+    def _list_windows_all_complete(self, *, inspect_names=None):
         return []
 
 

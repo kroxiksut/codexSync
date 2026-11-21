@@ -38,6 +38,9 @@ SURFACE_CORNER_RADIUS = 9
 CONTROL_CORNER_RADIUS = 7
 CONTENT_PADDING = 34
 GRID_GAP = 18
+TABLE_CELL_HORIZONTAL_PADDING = 4
+TABLE_CELL_VERTICAL_PADDING = 5
+TABLE_CELL_BORDER = 1
 
 FONT_FAMILY = "Inter, Segoe UI, system-ui, sans-serif"
 
@@ -164,7 +167,10 @@ QTableWidget, QTreeWidget {{
     selection-background-color: {selection};
     selection-color: {p.text};
 }}
-QTableWidget::item {{ border-bottom: 1px solid {p.line}; padding: 5px 4px; }}
+QTableWidget::item {{
+    border-bottom: {TABLE_CELL_BORDER}px solid {p.line};
+    padding: {TABLE_CELL_VERTICAL_PADDING}px {TABLE_CELL_HORIZONTAL_PADDING}px;
+}}
 QTreeWidget::item {{ padding: 3px 2px; }}
 QTableWidget::item:selected, QTreeWidget::item:selected {{ background: {selection}; color: {p.text}; }}
 QHeaderView {{ background: {p.surface}; border: none; }}

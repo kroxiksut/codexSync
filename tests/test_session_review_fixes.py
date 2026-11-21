@@ -102,7 +102,10 @@ class UnusableBranchTests(_Sides):
             fresh = scan_sessions(self.local, parse_cache=warm)
             parse.assert_called_once()
         self.assertEqual(fresh, scan_sessions(self.local))
-        self.assertNotEqual(before.descriptors[0].sha256, fresh.descriptors[0].sha256)
+        before_by_id = {item.session_id: item.sha256 for item in before.descriptors}
+        fresh_by_id = {item.session_id: item.sha256 for item in fresh.descriptors}
+        self.assertNotEqual(before_by_id["a"], fresh_by_id["a"])
+        self.assertEqual(before_by_id["b"], fresh_by_id["b"])
 
     def test_cache_reconstructs_archive_pages_and_duplicates_from_current_paths(self) -> None:
         from codexsync.session_catalog import SessionParseCache, _scan_jsonl

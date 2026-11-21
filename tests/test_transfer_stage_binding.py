@@ -24,6 +24,7 @@ from codexsync.exceptions import FailSafeError
 from codexsync.jsonl_codec import JsonlCodec
 from codexsync.models import CopyAction, SyncPlan
 from codexsync.sync_engine import SyncEngine
+from codexsync.work_scheduler import WorkScheduler
 
 SANDBOX = Path(__file__).resolve().parents[1] / "test-sandbox"
 PLANNED = b'{"type":"session_meta"}\n{"n":1}\n'
@@ -78,6 +79,20 @@ class StageBindingTests(unittest.TestCase):
             source, staged, JsonlCodec.XZ, hashlib.sha256(PLANNED).hexdigest(),
         )
         self.assertEqual(staged.read_bytes(), source.read_bytes())
+
+    def test_a_copy_in_the_same_container_without_a_plan_hash_stays_byte_exact(self) -> None:
+        source = self.root / "mirror" / "chat.jsonl.xz"
+        payload = lzma.compress(PLANNED)
+        source.write_bytes(payload)
+        destination = self.root / "mirror" / "copy.jsonl.xz"
+        plan = SyncPlan(to_cloud=[CopyAction(source, destination, destination.name, codec=JsonlCodec.XZ)])
+        with WorkScheduler() as scheduler:
+            engine = SyncEngine(
+                backup_manager=BackupManager(self.root / "backups", "machine-a", 7, 0),
+                temp_dir=self.root / ".tmp", scheduler=scheduler,
+            )
+            engine.execute(plan, dry_run=False)
+        self.assertEqual(destination.read_bytes(), payload)
 
     def test_an_ordinary_copy_carries_no_expectation(self) -> None:
         self.assertIsNone(CopyAction(Path("a"), Path("b"), "a").expected_sha256)

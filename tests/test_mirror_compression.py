@@ -15,6 +15,7 @@ import json
 import lzma
 from pathlib import Path
 import shutil
+from threading import Barrier, get_ident
 import textwrap
 import unittest
 from unittest.mock import patch
@@ -42,6 +43,7 @@ from codexsync.semantic_transfer import (
     target_relative_path,
 )
 from codexsync.session_catalog import SessionState, scan_sessions
+from codexsync.sync_engine import SyncEngine
 
 
 class _StoppedGate:
@@ -248,6 +250,139 @@ class CompressedMirrorApplyTests(unittest.TestCase):
             (self.cloud_dir / "sessions" / "s1.jsonl").exists(), "no plain copy is left behind"
         )
 
+    def test_independent_chats_can_compress_together_but_commit_in_plan_order(self) -> None:
+        config_path = self._config("xz")
+        originals = [self._branch(f"s{index}", [str(index)]) for index in range(2)]
+        plan = self._scan(config_path)
+        from codexsync.jsonl_codec import transcode
+
+        barrier = Barrier(2)
+        caller = get_ident()
+        committed = []
+        real_replace = SyncEngine._replace_staged
+
+        def stage(*args):
+            self.assertNotEqual(get_ident(), caller)
+            barrier.wait(timeout=5)
+            transcode(*args)
+
+        def replace(engine, action, *args):
+            committed.append((get_ident(), action.relative_path))
+            return real_replace(engine, action, *args)
+
+        with patch("codexsync.sync_engine.transcode", side_effect=stage), patch.object(
+            SyncEngine, "_replace_staged", new=replace,
+        ):
+            self.assertEqual(self._apply(config_path, plan), 2)
+        self.assertEqual(committed, [(caller, item.target_relative_path) for item in plan.items])
+        for source in originals:
+            stored = self.cloud_dir / "sessions" / (source.name + ".xz")
+            self.assertEqual(lzma.decompress(stored.read_bytes()), source.read_bytes())
+
+    def test_a_staged_compressed_branch_changed_after_verification_never_reaches_the_mirror(self) -> None:
+        config_path = self._config("xz")
+        self._branch("s1", ["original"])
+        plan = self._scan(config_path)
+        real = SyncEngine._stage_verified
+
+        def change_stage_after_proof(source, staged, *args):
+            verified = real(source, staged, *args)
+            staged.write_bytes(lzma.compress(b"unrelated bytes\n"))
+            return verified
+
+        with patch.object(SyncEngine, "_stage_verified", side_effect=change_stage_after_proof):
+            with self.assertRaises(FailSafeError):
+                self._apply(config_path, plan)
+        self.assertFalse(list((self.cloud_dir / "sessions").glob("*.jsonl.xz")))
+
+    def test_a_foreign_file_delivered_under_a_reserved_stage_name_is_never_truncated(self) -> None:
+        config_path = self._config("xz")
+        self._branch("s1", ["original"])
+        plan = self._scan(config_path)
+        foreign = b"another process owns this content"
+        moved = []
+        real = SyncEngine._require_reservation
+
+        def swap(path, reserved):
+            real(path, reserved)
+            if not moved:
+                path.rename(path.with_suffix(".moved"))
+                path.write_bytes(foreign)
+                moved.append(path)
+
+        with patch.object(SyncEngine, "_require_reservation", side_effect=swap):
+            with self.assertRaises(FailSafeError):
+                self._apply(config_path, plan)
+        self.assertEqual(moved[0].read_bytes(), foreign)
+        self.assertFalse((self.cloud_dir / "sessions" / "s1.jsonl.xz").exists())
+
+    def test_a_compressed_stage_is_written_through_its_exclusive_open(self) -> None:
+        config_path = self._config("xz")
+        self._branch("s1", ["original"])
+        plan = self._scan(config_path)
+        real_open = Path.open
+        stage_modes = []
+
+        def open_path(path, mode="r", *args, **kwargs):
+            if path.name.startswith(".s1.jsonl.xz.") and path.name.endswith(".codexsync.tmp") and any(
+                flag in mode for flag in "xw+"
+            ):
+                stage_modes.append(mode)
+            return real_open(path, mode, *args, **kwargs)
+
+        with patch.object(Path, "open", new=open_path):
+            self.assertEqual(self._apply(config_path, plan), 1)
+        self.assertEqual(stage_modes, ["xb+"], "a path reopen could select a recycled file identity")
+
+    def test_a_mirror_branch_delivered_during_stage_cannot_be_overwritten_by_the_old_plan(self) -> None:
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                session = f"delivered-{existing}"
+                config_path = self._config("xz")
+                if existing:
+                    self._branch(session, ["one"])
+                    self._apply(config_path, self._scan(config_path))
+                self._branch(session, ["one", "two"])
+                plan = self._scan(config_path)
+                target = self.cloud_dir / "sessions" / f"{session}.jsonl.xz"
+                foreign = lzma.compress(b"a branch delivered by a peer\n")
+                real = SyncEngine._stage_verified
+
+                def deliver_after_stage(source, staged, *args):
+                    verified = real(source, staged, *args)
+                    target.write_bytes(foreign)
+                    return verified
+
+                with patch.object(SyncEngine, "_stage_verified", side_effect=deliver_after_stage):
+                    with self.assertRaises(FailSafeError):
+                        self._apply(config_path, plan)
+                self.assertEqual(target.read_bytes(), foreign)
+                target.unlink()
+                (self.local_dir / "sessions" / f"{session}.jsonl").unlink()
+
+    def test_the_mirror_is_rechecked_if_a_peer_delivers_a_branch_during_the_final_gate(self) -> None:
+        config_path = self._config("xz")
+        self._branch("s1", ["original"])
+        plan = self._scan(config_path)
+        target = self.cloud_dir / "sessions" / "s1.jsonl.xz"
+        foreign = lzma.compress(b"a branch delivered while the final process check runs\n")
+
+        class DeliverDuringFinalGate(_StoppedGate):
+            final_checks = 0
+
+            def require(self, operation, *, final=False):
+                if final:
+                    self.final_checks += 1
+                    if self.final_checks == 2:
+                        target.write_bytes(foreign)
+                return super().require(operation, final=final)
+
+        save_transfer_plan(plan, self.plan_path)
+        with patch("codexsync.app._make_safety_gate", return_value=DeliverDuringFinalGate()):
+            with self.assertRaises(FailSafeError):
+                apply_session_transfer(config_path, plan_path=self.plan_path, confirm_plan=plan.plan_id)
+        self.assertEqual(target.read_bytes(), foreign)
+
     def test_the_stored_branch_is_not_a_divergence_on_the_next_scan(self) -> None:
         # The property the whole design rests on. If the container leaked into
         # the comparison every mirrored session would come back DIVERGED and
@@ -311,7 +446,7 @@ class CompressedMirrorApplyTests(unittest.TestCase):
             with self.assertRaises(FailSafeError):
                 self._apply(config_path, plan)
         self.assertFalse(
-            list((self.cloud_dir / "sessions").iterdir()), "no destination was touched"
+            list((self.cloud_dir / "sessions").glob("*.jsonl.xz")), "no destination was touched"
         )
 
     def test_an_unknown_container_is_refused_at_config_load(self) -> None:
